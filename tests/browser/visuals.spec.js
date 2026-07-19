@@ -71,6 +71,11 @@ test("popup visual states", async ({ browser }) => {
     await page.locator("#notion-quick-note-root .ProseMirror").fill("A quiet place for the thought in front of you.");
   });
 
+  await expectPopupSnapshot(browser, "popup-slash-menu", {}, async (page) => {
+    await page.locator("#notion-quick-note-root .ProseMirror").press("/");
+    await expect(page.locator("#notion-quick-note-root .slash-menu")).toBeVisible();
+  });
+
   await expectPopupSnapshot(browser, "popup-dark-selection", {
     colorScheme: "dark",
     page: { selection: "Selected source text remains editable inside a quote block." }
@@ -164,6 +169,7 @@ async function optionsPage(browser, { colorScheme = "light", mode = "connect", s
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.addInitScript(({ initialSettings, stateMode }) => {
     const state = { ...initialSettings };
+    window.__settingsState = state;
     window.chrome = {
       storage: {
         local: {
@@ -249,4 +255,57 @@ test("onboarding visual states", async ({ browser }) => {
       destinationUrl: "https://notion.so/quick-notes",
     }
   }, "#ready-panel:not([hidden])");
+});
+
+test("AI preference controls persist master and per-feature choices", async ({ browser }) => {
+  const state = await optionsPage(browser, {
+    mode: "ready",
+    settings: {
+      token: "secret",
+      destinationId: "data-source-id",
+      destinationType: "database",
+      destinationName: "Quick Notes"
+    }
+  });
+  try {
+    const master = state.page.locator("#ai-enabled");
+    const title = state.page.locator("#ai-suggest-title");
+    const todos = state.page.locator("#ai-extract-todos");
+    await expect(master).toBeChecked();
+    await master.uncheck();
+    await expect(title).toBeDisabled();
+    await expect(todos).toBeDisabled();
+    expect(await state.page.evaluate(() => window.__settingsState.aiEnabled)).toBe(false);
+
+    await master.check();
+    await title.uncheck();
+    await todos.uncheck();
+    expect(await state.page.evaluate(() => ({
+      enabled: window.__settingsState.aiEnabled,
+      title: window.__settingsState.aiSuggestTitle,
+      todos: window.__settingsState.aiExtractTodos
+    }))).toEqual({ enabled: true, title: false, todos: false });
+
+    expect(state.pageErrors).toEqual([]);
+  } finally {
+    await state.context.close();
+  }
+
+  const rehydrated = await optionsPage(browser, {
+    settings: { aiEnabled: true, aiSuggestTitle: false, aiExtractTodos: false }
+  });
+  try {
+    await expect(rehydrated.page.locator("#ai-enabled")).toBeChecked();
+    await expect(rehydrated.page.locator("#ai-suggest-title")).not.toBeChecked();
+    await expect(rehydrated.page.locator("#ai-extract-todos")).not.toBeChecked();
+    await rehydrated.page.evaluate(() => {
+      chrome.storage.local.set = async () => { throw new Error("Storage unavailable"); };
+    });
+    await rehydrated.page.locator("#ai-enabled").click();
+    await expect(rehydrated.page.locator("#ai-enabled")).toBeChecked();
+    await expect(rehydrated.page.locator("#message")).toHaveText("Could not save the AI preference. Try again.");
+    expect(rehydrated.pageErrors).toEqual([]);
+  } finally {
+    await rehydrated.context.close();
+  }
 });

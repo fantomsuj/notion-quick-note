@@ -9,6 +9,7 @@ Open it from the toolbar, press `Ctrl + Shift + Space`, or right-click selected 
 - Floating bottom-right composer isolated from the host webpage with Shadow DOM, with automatic side-panel and extension-tab fallbacks
 - Toolbar, keyboard shortcut, and selected-text context menu entry points
 - Locally bundled Tiptap block editor with Markdown input rules, slash commands, and a selection toolbar
+- Optional on-device AI actions for editable title suggestions and to-do extraction, with no cloud fallback and no mutation before review
 - One versioned active draft across regular Chrome tabs, with explicit cross-tab handoff, stale-revision protection, and separately isolated Incognito state
 - A local Recent picker for the last 30 days, with five-note quick access, search, stashed-draft return, and live editing of supported Notion content
 - Multi-page source management with normalized URL deduplication, a stable primary source, selection quotes, and a 20-source cap
@@ -40,6 +41,8 @@ Open it from the toolbar, press `Ctrl + Shift + Space`, or right-click selected 
 After rebuilding an already loaded unpacked extension, click **Reload** for Notion Quick Note on `chrome://extensions` before testing. Chrome otherwise keeps the previous service worker alive, which can continue referencing an older content-script path.
 
 Inside the editor, type `/` for block commands. Markdown shortcuts such as `# `, `- `, `[] `, `> `, and triple backticks convert as you type. Press `Ctrl/⌘ + Enter` to check a to-do or open/close a toggle, `Ctrl/⌘ + Shift + Enter` to save, and `Escape` to close.
+
+On supported Chrome desktop devices, the sparkle menu can suggest a title or extract editable to-dos using Chrome's on-device Prompt API. Both actions are explicitly invoked and never block Save. The settings page includes a master AI switch plus separate controls for each action; unsupported browsers simply omit generation after reporting that the local model is unavailable.
 
 Opening Quick Note explicitly on another tab moves the same regular-profile draft there and adds that page to Sources. Use **Recent** to reopen one of the latest five notes or search retained local history. The current draft is stashed while a recent note is edited and returns after that edit is saved or discarded.
 
@@ -147,6 +150,7 @@ npm run check
 - Notes can report local storage use and export capture-only recovery files as JSON or Markdown; credentials and settings are excluded.
 - Pending, blocked, and uncertain captures are never purged automatically; delivered history and abandoned drafts use bounded 30-day retention.
 - No analytics, trackers, or remote scripts are included.
+- Optional AI actions use Chrome's locally managed on-device model only after a user gesture; generated text remains a preview until explicitly applied.
 
 The complete data handling and retention statement is in [`PRIVACY.md`](PRIVACY.md). A release must publish that policy at a stable HTTPS URL after replacing its support-contact placeholder.
 

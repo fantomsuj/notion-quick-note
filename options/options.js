@@ -39,6 +39,10 @@ function hydrateForm() {
   $("#oauth-client-id").value = PRODUCT_CONFIG.notionClientId || settings.oauthClientId;
   $("#oauth-broker-url").value = PRODUCT_CONFIG.oauthBrokerUrl || settings.oauthBrokerUrl;
   $("#include-source").checked = settings.includeSource;
+  $("#ai-enabled").checked = settings.aiEnabled;
+  $("#ai-suggest-title").checked = settings.aiSuggestTitle;
+  $("#ai-extract-todos").checked = settings.aiExtractTodos;
+  updateAiControls();
   $("#workspace-name").textContent = settings.workspaceName || "Notion";
   hydrateWorkspaceIcon($("#workspace-icon"), settings.workspaceIcon);
   $("#manual-destination-id").value = settings.destinationId;
@@ -62,6 +66,32 @@ function bindEvents() {
     settings.includeSource = $("#include-source").checked;
     await chrome.storage.local.set({ includeSource: settings.includeSource });
   });
+  $("#ai-enabled").addEventListener("change", async () => {
+    const previous = settings.aiEnabled;
+    settings.aiEnabled = $("#ai-enabled").checked;
+    updateAiControls();
+    try {
+      await chrome.storage.local.set({ aiEnabled: settings.aiEnabled });
+    } catch {
+      settings.aiEnabled = previous;
+      $("#ai-enabled").checked = previous;
+      updateAiControls();
+      flash("Could not save the AI preference. Try again.", true);
+    }
+  });
+  for (const [selector, key] of [["#ai-suggest-title", "aiSuggestTitle"], ["#ai-extract-todos", "aiExtractTodos"]]) {
+    $(selector).addEventListener("change", async () => {
+      const previous = settings[key];
+      settings[key] = $(selector).checked;
+      try {
+        await chrome.storage.local.set({ [key]: settings[key] });
+      } catch {
+        settings[key] = previous;
+        $(selector).checked = previous;
+        flash("Could not save the AI preference. Try again.", true);
+      }
+    });
+  }
   document.querySelectorAll("input[name=manual-destination-type]").forEach((radio) => {
     radio.addEventListener("change", updateManualDestinationType);
   });
@@ -71,6 +101,13 @@ function bindEvents() {
   $("#disconnect").addEventListener("click", disconnect);
   $("#finish").addEventListener("click", finishSetup);
   $("#open-destination").addEventListener("click", openDestination);
+}
+
+function updateAiControls() {
+  const enabled = $("#ai-enabled").checked;
+  $("#ai-feature-controls").dataset.disabled = String(!enabled);
+  $("#ai-suggest-title").disabled = !enabled;
+  $("#ai-extract-todos").disabled = !enabled;
 }
 
 async function saveDeveloperConfig() {

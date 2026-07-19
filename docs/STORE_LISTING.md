@@ -12,6 +12,8 @@
 
 > Open a compact Quick Note from the toolbar, a keyboard shortcut, or the selected-text context menu. Review and format your note, optionally attach the active page title and URL, then save it to a Notion page or database you choose.
 >
+> On supported Chrome desktop devices, optional AI actions can suggest a title or extract editable to-dos using Chrome's on-device language model. These actions run only when you choose them, have no cloud AI fallback, and never change or save a note until you review and apply the preview. A master setting and separate feature toggles let you turn them off.
+>
 > Your note text, selected text, and any attached page title and URL are autosaved locally in Chrome so you can recover a draft. Quick Note sends a capture only when you choose Save, and only to the Notion workspace and destination you selected.
 >
 > Queued notes stay on your device until delivery succeeds or you delete them. Inactive drafts and delivered history are removed after 30 days. Quick Note retries temporary failures and shows recent delivery status.
@@ -51,6 +53,8 @@ Confirm the dashboard's current wording before submission. Based on current beha
 - **Web history / browsing activity:** the active page title and URL, accessed only when the user invokes Quick Note and used only for the capture feature.
 
 Do not select advertising, analytics, personalization, or sale/transfer uses. Certify that data is used only for the extension's single purpose, is not sold, is not used for credit or lending, and is not used for personalized advertising. Supply the public URL hosting [`PRIVACY.md`](../PRIVACY.md), after replacing its contact placeholder.
+
+The optional Prompt API flow processes note content locally through Chrome's on-device model. It does not add a remote AI host permission or send prompt content to the extension developer.
 
 ## Listing media and review notes
 
