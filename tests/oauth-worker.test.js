@@ -112,6 +112,76 @@ test("forwards refresh and revoke requests to Notion", async () => {
   assert.deepEqual(calls[1].body, { token: "access" });
 });
 
+test("preserves valid Notion error responses", async () => {
+  const response = await worker.fetch(request("/refresh", { refresh_token: "refresh" }), {
+    ...env,
+    FETCH: async () => new Response(JSON.stringify({
+      object: "error",
+      code: "unauthorized",
+      message: "Refresh token expired"
+    }), {
+      status: 401,
+      headers: { "Content-Type": "application/json; charset=utf-8" }
+    })
+  });
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    object: "error",
+    code: "unauthorized",
+    message: "Refresh token expired"
+  });
+});
+
+test("normalizes Notion transport and response failures", async () => {
+  const unavailable = await worker.fetch(request("/refresh", { refresh_token: "refresh" }), {
+    ...env,
+    FETCH: async () => { throw new TypeError("connect failed"); }
+  });
+  assert.equal(unavailable.status, 502);
+  assert.deepEqual(await unavailable.json(), {
+    error: "Notion OAuth is temporarily unavailable",
+    code: "upstream_unavailable"
+  });
+
+  const invalid = await worker.fetch(request("/refresh", { refresh_token: "refresh" }), {
+    ...env,
+    FETCH: async () => new Response("gateway failure", {
+      status: 502,
+      headers: { "Content-Type": "text/plain" }
+    })
+  });
+  assert.equal(invalid.status, 502);
+  assert.deepEqual(await invalid.json(), {
+    error: "Notion OAuth returned an invalid response",
+    code: "invalid_upstream_response"
+  });
+});
+
+test("aborts a Notion request at the upstream deadline", async () => {
+  let observedSignal;
+  const response = await worker.fetch(request("/exchange", {
+    code: "authorization-code",
+    redirect_uri: "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/notion"
+  }), {
+    ...env,
+    UPSTREAM_TIMEOUT_MS: 5,
+    FETCH: async (_url, options) => {
+      observedSignal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    }
+  });
+
+  assert.equal(observedSignal.aborted, true);
+  assert.equal(response.status, 504);
+  assert.deepEqual(await response.json(), {
+    error: "Notion OAuth request timed out",
+    code: "upstream_timeout"
+  });
+});
+
 test("rejects an exchange redirect from an unknown extension", async () => {
   const response = await worker.fetch(request("/exchange", {
     code: "code",

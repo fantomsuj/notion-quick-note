@@ -1,6 +1,7 @@
 const NOTION_TOKEN_URL = "https://api.notion.com/v1/oauth/token";
 const NOTION_REVOKE_URL = "https://api.notion.com/v1/oauth/revoke";
 const MAX_REQUEST_BYTES = 16 * 1024;
+const UPSTREAM_TIMEOUT_MS = 8_000;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export default {
@@ -39,7 +40,7 @@ export default {
       }
       const body = await readJsonBody(request);
       const notionResponse = await forwardOauthRequest(url.pathname, body, env);
-      const payload = await notionResponse.json().catch(() => ({}));
+      const payload = await readUpstreamJson(notionResponse);
       return json(payload, notionResponse.status, cors);
     } catch (error) {
       return json({
@@ -50,7 +51,7 @@ export default {
   }
 };
 
-function forwardOauthRequest(path, body, env) {
+async function forwardOauthRequest(path, body, env) {
   const fetchImpl = env.FETCH || fetch;
   const credentials = btoa(`${env.NOTION_CLIENT_ID}:${env.NOTION_CLIENT_SECRET}`);
   const headers = {
@@ -60,32 +61,56 @@ function forwardOauthRequest(path, body, env) {
     "Notion-Version": "2026-03-11"
   };
 
+  let url = NOTION_TOKEN_URL;
+  let payload;
   if (path === "/exchange") {
     const { code, redirect_uri: redirectUri } = body;
-    if (!code || !redirectUri) return Promise.resolve(json({ error: "code and redirect_uri are required" }, 400, {}));
-    if (!isAllowedRedirect(redirectUri, env)) return Promise.resolve(json({ error: "Redirect URI is not allowlisted" }, 403, {}));
-    return fetchImpl(NOTION_TOKEN_URL, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ grant_type: "authorization_code", code, redirect_uri: redirectUri })
-    });
+    if (!code || !redirectUri) throw httpError("code and redirect_uri are required", 400);
+    if (!isAllowedRedirect(redirectUri, env)) throw httpError("Redirect URI is not allowlisted", 403);
+    payload = { grant_type: "authorization_code", code, redirect_uri: redirectUri };
+  } else if (path === "/refresh") {
+    if (!body.refresh_token) throw httpError("refresh_token is required", 400);
+    payload = { grant_type: "refresh_token", refresh_token: body.refresh_token };
+  } else {
+    if (!body.token) throw httpError("token is required", 400);
+    url = NOTION_REVOKE_URL;
+    payload = { token: body.token };
   }
 
-  if (path === "/refresh") {
-    if (!body.refresh_token) return Promise.resolve(json({ error: "refresh_token is required" }, 400, {}));
-    return fetchImpl(NOTION_TOKEN_URL, {
+  const controller = new AbortController();
+  const timeoutMs = Number(env.UPSTREAM_TIMEOUT_MS) > 0
+    ? Number(env.UPSTREAM_TIMEOUT_MS)
+    : UPSTREAM_TIMEOUT_MS;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, {
       method: "POST",
       headers,
-      body: JSON.stringify({ grant_type: "refresh_token", refresh_token: body.refresh_token })
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
+  } catch (error) {
+    if (controller.signal.aborted || error?.name === "AbortError") {
+      throw httpError("Notion OAuth request timed out", 504, "upstream_timeout");
+    }
+    throw httpError("Notion OAuth is temporarily unavailable", 502, "upstream_unavailable");
+  } finally {
+    clearTimeout(timeout);
   }
+}
 
-  if (!body.token) return Promise.resolve(json({ error: "token is required" }, 400, {}));
-  return fetchImpl(NOTION_REVOKE_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ token: body.token })
-  });
+async function readUpstreamJson(response) {
+  const contentType = response.headers.get("Content-Type") || "";
+  if (!/\bapplication\/json\b/i.test(contentType)) {
+    throw httpError("Notion OAuth returned an invalid response", 502, "invalid_upstream_response");
+  }
+  try {
+    const payload = await response.json();
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new TypeError();
+    return payload;
+  } catch {
+    throw httpError("Notion OAuth returned an invalid response", 502, "invalid_upstream_response");
+  }
 }
 
 function isAllowedRedirect(redirectUri, env) {
