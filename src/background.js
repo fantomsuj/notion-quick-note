@@ -127,6 +127,9 @@ async function handleMessage(message, sender) {
       return {
         destinationName: settings.destinationName,
         includeSource: settings.includeSource,
+        aiEnabled: settings.aiEnabled,
+        aiSuggestTitle: settings.aiSuggestTitle,
+        aiExtractTodos: settings.aiExtractTodos,
         configured: Boolean(settings.token && settings.destinationId)
       };
     }

@@ -21,6 +21,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
   databaseProvisioning: null,
   onboardingComplete: false,
   includeSource: true,
+  aiEnabled: true,
+  aiSuggestTitle: true,
+  aiExtractTodos: true,
   oauthClientId: "",
   oauthBrokerUrl: ""
 });

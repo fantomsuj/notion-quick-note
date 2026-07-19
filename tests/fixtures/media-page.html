@@ -39,7 +39,14 @@
       window.saveDelay = 0;
       window.saveResponse = { ok: true };
       window.captureStatus = { id: "capture-test", status: "delivered", lastError: null };
-      window.settingsResponse = { configured: true, destinationName: "Test Inbox", includeSource: true };
+      window.settingsResponse = {
+        configured: true,
+        destinationName: "Test Inbox",
+        includeSource: true,
+        aiEnabled: true,
+        aiSuggestTitle: true,
+        aiExtractTodos: true
+      };
       window.currentDraft = null;
       window.recentNotes = [];
       window.remoteDraft = null;

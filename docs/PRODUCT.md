@@ -19,6 +19,7 @@ Make capturing a thought into Notion take one gesture, focus immediately, requir
 | Recent editing | Five latest notes plus 30-day local search | Makes returning to prior work immediate without browsing history or workspace-wide Notion search |
 | Capture persistence | One IndexedDB row per regular draft/capture; one session key per Incognito record | Keeps autosaves proportional to the note being edited and preserves atomic draft-to-queue transitions |
 | Recovery | Notes diagnostics plus JSON and Markdown export | Makes local storage health visible and gives users a credential-free escape hatch |
+| AI assist | Explicit on-device title and to-do actions with editable previews | Adds focused help without putting generation in the capture or Save path |
 
 ## What research changed
 
@@ -38,6 +39,7 @@ Flylighter's differentiation is not just clipping. Its flows, formatted highligh
 4. **Quiet confidence.** Routine local autosaves stay invisible. “Saved to Notion” means confirmed remote delivery; local drafts, acceptance, and background retries remain clearly labeled in Notes.
 5. **Permission proportionality.** Read the active page only after a user gesture; do not request continuous browsing history.
 6. **Preserve before mutation.** Remote edits stop on fingerprint conflicts, keep unsupported blocks locked in place, and journal every replacement step locally.
+7. **AI is optional and reviewable.** Prompt features run only after an explicit gesture, degrade away when unsupported or disabled, and keep output separate until the user applies it.
 
 ## Release gates
 
