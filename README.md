@@ -117,3 +117,5 @@ There are no install-time dependencies. Tests use Node's built-in test runner.
 - No analytics, trackers, or remote scripts are included.
 
 See [docs/PRODUCT.md](docs/PRODUCT.md) for the research summary and product decisions.
+
+For an illustrated explanation of the architecture, capture lifecycle, core primitives, edit map, competitive position, maintenance process, and roadmap, read the [visual operating guide](docs/VISUAL_GUIDE.md).
