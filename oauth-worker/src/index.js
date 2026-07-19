@@ -3,6 +3,8 @@ const NOTION_REVOKE_URL = "https://api.notion.com/v1/oauth/revoke";
 const MAX_REQUEST_BYTES = 16 * 1024;
 const UPSTREAM_TIMEOUT_MS = 8_000;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const OUTCOME_PATTERN = /^[a-z0-9_]{1,64}$/;
+const KNOWN_ROUTES = new Set(["/health", "/exchange", "/refresh", "/revoke"]);
 
 export default {
   async fetch(request, env) {
@@ -11,13 +13,14 @@ export default {
     const now = env.NOW || Date.now;
     const startedAt = now();
     const response = await handleRequest(request, env, url, requestId);
+    const outcome = await outcomeFor(response);
     emitCompletion(env, {
       event: "oauth_request_completed",
       requestId,
       method: request.method,
-      path: url.pathname,
+      path: KNOWN_ROUTES.has(url.pathname) ? url.pathname : "unknown",
       status: response.status,
-      outcome: outcomeFor(response.status),
+      outcome,
       durationMs: Math.max(0, now() - startedAt)
     });
     return response;
@@ -37,7 +40,11 @@ async function handleRequest(request, env, url, requestId) {
       validateEnvironment(env);
       return json({ ok: true }, 200, cors);
     } catch (error) {
-      return json({ ok: false, error: error.message }, error.status || 503, cors);
+      return json({
+        ok: false,
+        error: error.message,
+        ...(error.code ? { code: error.code } : {})
+      }, error.status || 503, cors);
     }
   }
   if (request.method !== "POST" || !["/exchange", "/refresh", "/revoke"].includes(url.pathname)) {
@@ -75,10 +82,17 @@ function emitCompletion(env, entry) {
   console.info(JSON.stringify(entry));
 }
 
-function outcomeFor(status) {
-  if (status === 429) return "rate_limited";
-  if (status >= 500) return "server_error";
-  if (status >= 400) return "client_error";
+async function outcomeFor(response) {
+  if (response.status < 400) return "success";
+  try {
+    const code = (await response.clone().json())?.code;
+    if (typeof code === "string" && OUTCOME_PATTERN.test(code)) return code;
+  } catch {
+    // Fall back to the status class without retaining response content.
+  }
+  if (response.status === 429) return "rate_limited";
+  if (response.status >= 500) return "server_error";
+  if (response.status >= 400) return "client_error";
   return "success";
 }
 
@@ -156,7 +170,14 @@ function isAllowedRedirect(redirectUri, env) {
   try {
     const url = new URL(redirectUri);
     const allowedIds = (env.ALLOWED_EXTENSION_IDS || "").split(",").map((id) => id.trim()).filter(Boolean);
-    return url.protocol === "https:" && url.hostname.endsWith(".chromiumapp.org") && allowedIds.includes(url.hostname.split(".")[0]);
+    return url.protocol === "https:"
+      && allowedIds.some((id) => url.hostname === `${id}.chromiumapp.org`)
+      && url.pathname === "/notion"
+      && !url.search
+      && !url.hash
+      && !url.username
+      && !url.password
+      && !url.port;
   } catch {
     return false;
   }
@@ -164,17 +185,21 @@ function isAllowedRedirect(redirectUri, env) {
 
 function validateEnvironment(env) {
   if (!env.NOTION_CLIENT_ID || !env.NOTION_CLIENT_SECRET) {
-    throw httpError("OAuth broker credentials are not configured", 503);
+    throw httpError("OAuth broker credentials are not configured", 503, "invalid_configuration");
   }
   const allowedIds = commaSeparated(env.ALLOWED_EXTENSION_IDS);
   const allowedOrigins = commaSeparated(env.ALLOWED_ORIGINS);
-  if (!allowedIds.length || !allowedOrigins.length) throw httpError("OAuth broker allowlists are not configured", 503);
+  if (!allowedIds.length || !allowedOrigins.length) {
+    throw httpError("OAuth broker allowlists are not configured", 503, "invalid_configuration");
+  }
   const invalidId = allowedIds.some((id) => !/^[a-p]{32}$/.test(id));
   const mismatchedOrigin = allowedOrigins.some((origin) => {
     const id = origin.match(/^chrome-extension:\/\/([a-p]{32})$/)?.[1];
     return !id || !allowedIds.includes(id);
   });
-  if (invalidId || mismatchedOrigin) throw httpError("OAuth broker allowlists are invalid", 503);
+  if (invalidId || mismatchedOrigin) {
+    throw httpError("OAuth broker allowlists are invalid", 503, "invalid_configuration");
+  }
   if (typeof env.OAUTH_RATE_LIMITER?.limit !== "function") {
     throw httpError("OAuth broker rate limiter is not configured", 503, "invalid_configuration");
   }

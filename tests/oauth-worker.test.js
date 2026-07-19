@@ -256,6 +256,25 @@ test("logs one secret-free completion event with correlation metadata", async ()
   }
 });
 
+test("logs stable failure outcomes and canonicalizes unknown routes", async () => {
+  const failureLogs = [];
+  await worker.fetch(request("/refresh", { refresh_token: "refresh" }), {
+    ...env,
+    LOG: (entry) => failureLogs.push(entry),
+    FETCH: async () => { throw new TypeError("connect failed"); }
+  });
+  assert.equal(failureLogs[0].outcome, "upstream_unavailable");
+
+  const unknownLogs = [];
+  const response = await worker.fetch(request("/secret-in-url", {}), {
+    ...env,
+    LOG: (entry) => unknownLogs.push(entry)
+  });
+  assert.equal(response.status, 404);
+  assert.equal(unknownLogs[0].path, "unknown");
+  assert.equal(JSON.stringify(unknownLogs).includes("secret-in-url"), false);
+});
+
 test("rejects an exchange redirect from an unknown extension", async () => {
   const response = await worker.fetch(request("/exchange", {
     code: "code",
@@ -263,6 +282,30 @@ test("rejects an exchange redirect from an unknown extension", async () => {
   }), env);
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { error: "Redirect URI is not allowlisted" });
+});
+
+test("requires the exact allowlisted OAuth redirect host and path", async () => {
+  let forwarded = false;
+  const testEnv = {
+    ...env,
+    FETCH: async () => {
+      forwarded = true;
+      throw new Error("should not forward");
+    }
+  };
+  for (const redirectUri of [
+    "https://abcdefghijklmnopabcdefghijklmnop.evil.chromiumapp.org/notion",
+    "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/notion/extra",
+    "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/notion?next=evil"
+  ]) {
+    const response = await worker.fetch(request("/exchange", {
+      code: "code",
+      redirect_uri: redirectUri
+    }), testEnv);
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: "Redirect URI is not allowlisted" });
+  }
+  assert.equal(forwarded, false);
 });
 
 test("rejects missing, null, and hostile origins without forwarding", async () => {
