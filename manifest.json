@@ -4,10 +4,16 @@
   "version": "0.1.0",
   "description": "Capture a thought into Notion without leaving the page you're on.",
   "minimum_chrome_version": "116",
+  "incognito": "split",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
+  },
   "permissions": [
     "activeTab",
+    "alarms",
     "contextMenus",
     "identity",
+    "sidePanel",
     "scripting",
     "storage"
   ],
@@ -36,6 +42,19 @@
     "128": "icons/icon-128.png"
   },
   "options_page": "options/options.html",
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "styles/tokens.css",
+        "styles/composer.css",
+        "assets/fonts/*.woff2"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "commands": {
     "toggle-quick-note": {
       "suggested_key": {

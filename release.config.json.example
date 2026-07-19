@@ -1,0 +1,4 @@
+{
+  "notionClientId": "replace_with_public_notion_client_id",
+  "oauthBrokerUrl": "https://replace-with-production-broker.example"
+}

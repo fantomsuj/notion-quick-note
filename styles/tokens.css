@@ -1,0 +1,101 @@
+@font-face {
+  font-family: "NotionInter";
+  src: url("../assets/fonts/NotionInter-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "NotionInter";
+  src: url("../assets/fonts/NotionInter-Medium.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "NotionInter";
+  src: url("../assets/fonts/NotionInter-SemiBold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "NotionInter";
+  src: url("../assets/fonts/NotionInter-Bold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+:root,
+:host {
+  color-scheme: light dark;
+
+  --nqn-brand-red: #f64932;
+  --nqn-brand-yellow: #ffb110;
+  --nqn-brand-blue: #097fe8;
+  --nqn-brand-gray: #f6f5f4;
+  --nqn-brand-black: #000;
+  --nqn-brand-white: #fff;
+
+  --nqn-bg: #fff;
+  --nqn-surface: #fff;
+  --nqn-surface-secondary: #f9f8f7;
+  --nqn-surface-tertiary: #f0efed;
+  --nqn-text: #2c2c2b;
+  --nqn-text-secondary: #5f5e59;
+  --nqn-text-tertiary: #7d7a75;
+  --nqn-border: #e6e5e3;
+  --nqn-border-strong: #d4d3cf;
+  --nqn-action: #0077d4;
+  --nqn-action-hover: #0068bb;
+  --nqn-focus: #2383e2;
+  --nqn-success: #347a56;
+  --nqn-success-bg: #e8f1ec;
+  --nqn-danger: #b13a2f;
+  --nqn-danger-bg: #fce9e7;
+  --nqn-warning: #765f17;
+  --nqn-warning-bg: #f9f3dc;
+  --nqn-hover: rgba(55, 53, 47, .06);
+  --nqn-pressed: rgba(55, 53, 47, .16);
+  --nqn-shadow-sm: 0 2px 4px rgba(0, 0, 0, .04), 0 0 0 1px rgba(42, 28, 0, .07);
+  --nqn-shadow-md: 0 14px 28px -6px rgba(0, 0, 0, .22), 0 2px 6px -1px rgba(0, 0, 0, .12), 0 0 0 1px rgba(42, 28, 0, .07);
+
+  --nqn-font: "NotionInter", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --nqn-radius-control: 6px;
+  --nqn-radius-panel: 8px;
+  --nqn-radius-popover: 10px;
+  --nqn-duration-fast: 160ms;
+  --nqn-ease-out: cubic-bezier(.25, 1, .5, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root,
+  :host {
+    --nqn-bg: #191919;
+    --nqn-surface: #202020;
+    --nqn-surface-secondary: #202020;
+    --nqn-surface-tertiary: #252525;
+    --nqn-text: #f0efed;
+    --nqn-text-secondary: #ada9a3;
+    --nqn-text-tertiary: #8f8b85;
+    --nqn-border: #383836;
+    --nqn-border-strong: #5f5e59;
+    --nqn-action: #0077d4;
+    --nqn-action-hover: #1187e5;
+    --nqn-focus: #2383e2;
+    --nqn-success: #6ab08a;
+    --nqn-success-bg: #263d30;
+    --nqn-danger: #ef8379;
+    --nqn-danger-bg: #502c29;
+    --nqn-warning: #e1c45a;
+    --nqn-warning-bg: #504425;
+    --nqn-hover: rgba(255, 255, 255, .055);
+    --nqn-pressed: rgba(255, 255, 255, .094);
+    --nqn-shadow-sm: 0 2px 4px rgba(0, 0, 0, .3), 0 0 0 1px #383836;
+    --nqn-shadow-md: 0 18px 44px -10px rgba(0, 0, 0, .58), 0 3px 8px -2px rgba(0, 0, 0, .34), 0 0 0 1px #383836;
+  }
+}

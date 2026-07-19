@@ -4,8 +4,33 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check src/background.js && node --check src/content.js && node --check options/options.js && node --test",
-    "test": "node --test"
+    "build": "esbuild src/content.js --bundle --minify --format=iife --target=chrome116 --outfile=dist/content.js",
+    "build:debug": "esbuild src/content.js --bundle --sourcemap --format=iife --target=chrome116 --outfile=dist/content.js",
+    "dev": "esbuild src/content.js --bundle --format=iife --target=chrome116 --outfile=dist/content.js --watch",
+    "check": "npm run build && npm run check:bundle && npm run check:release && node --check src/background.js && node --check options/options.js && node --test && npm run test:browser",
+    "check:bundle": "node scripts/check-bundle-size.mjs",
+    "check:release": "node scripts/check-release.mjs",
+    "release:package": "npm run check && node scripts/package-extension.mjs",
+    "test": "node --test",
+    "test:browser": "npm run build && npm run check:bundle && playwright test",
+    "test:e2e": "npm run test:browser"
+  },
+  "dependencies": {
+    "@tiptap/core": "3.28.0",
+    "@tiptap/extension-blockquote": "3.28.0",
+    "@tiptap/extension-link": "3.28.0",
+    "@tiptap/extension-ordered-list": "3.28.0",
+    "@tiptap/extension-placeholder": "3.28.0",
+    "@tiptap/extension-strike": "3.28.0",
+    "@tiptap/extension-task-item": "3.28.0",
+    "@tiptap/extension-task-list": "3.28.0",
+    "@tiptap/extension-underline": "3.28.0",
+    "@tiptap/starter-kit": "3.28.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "esbuild": "0.28.1",
+    "fake-indexeddb": "^6.2.4"
   },
   "engines": {
     "node": ">=20"

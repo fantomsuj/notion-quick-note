@@ -3,94 +3,175 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Notion Quick Note Settings</title>
+    <title>Set up Notion Quick Note</title>
+    <link rel="stylesheet" href="../styles/tokens.css">
     <link rel="stylesheet" href="options.css">
   </head>
   <body>
-    <main>
-      <nav>
-        <div class="brand"><span class="mark">N</span><span>Quick Note</span></div>
-        <span class="version">v0.1</span>
+    <main class="shell">
+      <nav class="nav" aria-label="Quick Note">
+        <div class="brand"><img src="../assets/brand/notion-mark.svg" alt="" aria-hidden="true"><span>Quick Note</span></div>
+        <span id="connection-state" class="connection-state">Not connected</span>
       </nav>
 
-      <section class="hero">
-        <p class="eyebrow">SETUP</p>
-        <h1>Your thoughts, one gesture away.</h1>
-        <p>Choose how Quick Note connects to Notion and where every capture should land.</p>
-      </section>
+      <header class="intro">
+        <p class="eyebrow">Notion Quick Note</p>
+        <h1>Capture the thought.<br>Keep your place.</h1>
+        <p>Connect one Notion workspace and Quick Note will create a private database for your captures automatically.</p>
+      </header>
 
-      <section class="card">
-        <div class="card-heading">
-          <span class="step">1</span>
-          <div><h2>Connect Notion</h2><p>Your credential stays in Chrome's extension storage.</p></div>
-          <span id="connection-state" class="state">Not connected</span>
-        </div>
+      <ol class="progress" aria-label="Setup progress">
+        <li data-progress="connect"><span><span class="step-number">1</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><b>Connect</b></li>
+        <li data-progress="destination"><span><span class="step-number">2</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><b>Destination</b></li>
+        <li data-progress="ready"><span><span class="step-number">3</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><b>Ready</b></li>
+      </ol>
 
-        <div class="tabs" role="tablist">
-          <button class="tab active" data-auth="token">Personal token <span>Fastest</span></button>
-          <button class="tab" data-auth="oauth">Notion OAuth <span>Production</span></button>
-        </div>
+      <div id="message" class="message" role="status" aria-live="polite" hidden></div>
 
-        <div id="token-panel" class="panel">
-          <label>
-            <span>Personal access token</span>
-            <div class="secret-wrap">
-              <input id="token" type="password" autocomplete="off" placeholder="ntn_••••••••••••••••">
-              <button id="reveal-token" class="text-button" type="button">Show</button>
+      <section id="connect-panel" class="stage" aria-labelledby="connect-heading">
+        <div class="stage-number">01</div>
+        <div class="stage-body">
+          <p class="kicker">About a minute</p>
+          <h2 id="connect-heading">Connect your Notion workspace</h2>
+          <p class="stage-copy">After you connect, Quick Note creates a database in your Private section so you can start capturing immediately.</p>
+
+          <ul class="trust-list">
+            <li><span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><div><b>Setup happens automatically</b><small>A private Quick Notes database is created for this workspace.</small></div></li>
+            <li><span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><div><b>Saved notes go only where you choose</b><small>Quick Note sends them to your selected workspace and destination when you choose Save.</small></div></li>
+          </ul>
+
+          <button id="oauth-connect" class="button primary notion-button" type="button">
+            <img src="../assets/brand/notion-mark.svg" alt="" aria-hidden="true">
+            <span>Connect Notion</span>
+          </button>
+          <p class="fineprint">A Notion window will open so you can choose a workspace and pages.</p>
+
+          <details id="advanced-setup" class="advanced">
+            <summary>Advanced setup</summary>
+            <div class="advanced-body">
+              <p class="advanced-copy">Local builds can supply OAuth configuration or use a personal token. Store releases should bundle OAuth configuration.</p>
+              <div class="field-grid">
+                <label><span>Public connection client ID</span><input id="oauth-client-id" autocomplete="off" placeholder="Notion client ID"></label>
+                <label><span>OAuth broker URL</span><input id="oauth-broker-url" type="url" autocomplete="off" placeholder="https://your-worker.workers.dev"></label>
+              </div>
+              <button id="save-developer-config" class="button secondary" type="button">Save OAuth configuration</button>
+
+              <div class="advanced-divider"><span>or use a local token</span></div>
+              <label>
+                <span>Personal access token</span>
+                <div class="secret-wrap">
+                  <input id="token" type="password" autocomplete="off" placeholder="ntn_••••••••••••••••">
+                  <button id="reveal-token" class="text-button" type="button">Show</button>
+                </div>
+              </label>
+              <button id="use-token" class="button secondary" type="button">Use personal token</button>
             </div>
-          </label>
-          <p class="help">Create a token in Notion's developer portal. This is ideal for testing your own extension. Don't publish a token inside the extension package.</p>
+          </details>
         </div>
+      </section>
 
-        <div id="oauth-panel" class="panel" hidden>
-          <div class="two-up">
-            <label><span>Public connection client ID</span><input id="oauth-client-id" placeholder="Your public client ID"></label>
-            <label><span>OAuth broker URL</span><input id="oauth-broker-url" type="url" placeholder="https://your-worker.workers.dev"></label>
+      <section id="destination-panel" class="stage" aria-labelledby="destination-heading" hidden>
+        <div class="stage-number">02</div>
+        <div class="stage-body">
+          <div class="workspace-row">
+            <span id="workspace-icon" class="workspace-icon"><img src="../assets/brand/notion-mark.svg" alt="" aria-hidden="true"></span>
+            <div><small>Connected workspace</small><b id="workspace-name">Notion</b></div>
+            <button id="change-connection" class="text-link" type="button">Change</button>
           </div>
-          <p class="help">The broker safely holds your Notion client secret. Deploy the included Cloudflare Worker, then paste its URL here.</p>
-          <button id="oauth-connect" class="secondary" type="button">Connect with Notion</button>
+
+          <div id="provisioning-state" class="provisioning-state" hidden>
+            <span class="provisioning-spinner" aria-hidden="true"></span>
+            <p class="kicker">SETTING UP YOUR WORKSPACE</p>
+            <h2>Creating your Quick Notes database…</h2>
+            <p id="provisioning-copy" class="stage-copy">This normally takes only a few seconds. You can safely reopen this page if Chrome closes it.</p>
+          </div>
+
+          <div id="destination-picker">
+          <p class="kicker">Pick one for now</p>
+            <h2 id="destination-heading">Where should quick notes land?</h2>
+            <p class="stage-copy">Choose a page for one running inbox, or a database for separate, searchable notes.</p>
+
+            <button id="create-database" class="button primary" type="button">Retry automatic setup</button>
+
+            <div class="search-row">
+              <label class="search-field">
+                <span class="visually-hidden">Search destinations</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10.25 10.25 3 3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>
+              <input id="destination-search" type="search" autocomplete="off" placeholder="Search pages and databases">
+            </label>
+            <button id="refresh-destinations" class="icon-button" type="button" aria-label="Refresh destinations" title="Refresh destinations"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 4.5V1.75M13 1.75h-2.75M13 1.75A6 6 0 1 0 14 9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg></button>
+            </div>
+
+            <div id="destination-results" class="destination-results" role="listbox" aria-label="Notion destinations"></div>
+            <div id="destination-empty" class="empty-state" hidden>
+              <span>↳</span>
+              <b>No destinations found yet</b>
+              <p>Make sure the page was selected in Notion, then refresh. Search indexing can take a moment.</p>
+              <button id="empty-refresh" class="button secondary" type="button">Refresh</button>
+            </div>
+
+            <label class="toggle-row">
+              <span><b>Attach the current webpage</b><small>Include the page title and URL with new captures.</small></span>
+              <input id="include-source" class="toggle" type="checkbox" checked>
+            </label>
+
+            <details class="advanced manual-destination">
+              <summary>Can't find it? Enter a destination manually</summary>
+              <div class="advanced-body">
+                <div class="segmented" role="radiogroup" aria-label="Destination type">
+                  <label><input type="radio" name="manual-destination-type" value="page" checked><span>Page</span></label>
+                  <label><input type="radio" name="manual-destination-type" value="database"><span>Database</span></label>
+                </div>
+                <label><span>Notion URL or ID</span><input id="manual-destination-id" placeholder="Paste a Notion URL or ID"></label>
+                <label><span>Display name</span><input id="manual-destination-name" placeholder="Notion Inbox"></label>
+                <label id="manual-title-property-wrap" hidden><span>Database title property</span><input id="manual-title-property" value="Name"></label>
+                <button id="use-manual-destination" class="button secondary" type="button">Use this destination</button>
+              </div>
+            </details>
+          </div>
         </div>
       </section>
 
-      <section class="card">
-        <div class="card-heading">
-          <span class="step">2</span>
-          <div><h2>Choose a destination</h2><p>Append to one running page or create an entry for every note.</p></div>
-        </div>
+      <section id="ready-panel" class="stage ready-stage" aria-labelledby="ready-heading" hidden>
+        <div class="success-mark" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></div>
+        <div class="stage-body">
+          <p class="kicker">Setup complete</p>
+          <h2 id="ready-heading">Your next thought has somewhere to go.</h2>
+          <p class="stage-copy">Quick Note is connected to <strong id="ready-workspace">Notion</strong> and will save to <strong id="ready-destination">your destination</strong>.</p>
+          <p id="ready-outcome" class="ready-outcome"></p>
 
-        <div class="destination-options">
-          <label class="choice selected">
-            <input type="radio" name="destination-type" value="page" checked>
-            <span class="choice-icon">↳</span>
-            <span><b>Append to a page</b><small>A simple running inbox, closest to Apple Notes.</small></span>
-          </label>
-          <label class="choice">
-            <input type="radio" name="destination-type" value="database">
-            <span class="choice-icon">▦</span>
-            <span><b>Create database notes</b><small>One searchable Notion item per capture.</small></span>
-          </label>
-        </div>
+          <div class="shortcut-card">
+            <div><small>On any webpage</small><b>Open Quick Note</b></div>
+            <kbd>⌃ ⇧ Space</kbd>
+          </div>
 
-        <div class="two-up destination-fields">
-          <label><span id="destination-id-label">Notion page URL or ID</span><input id="destination-id" placeholder="Paste a Notion page URL or ID"></label>
-          <label><span>Display name</span><input id="destination-name" placeholder="Notion Inbox" value="Notion Inbox"></label>
+          <div class="ready-actions">
+            <button id="finish" class="button primary" type="button">Start capturing</button>
+            <button id="open-destination" class="button secondary" type="button" hidden>Open in Notion</button>
+            <button id="change-destination" class="button secondary" type="button">Change destination</button>
+          </div>
+          <button id="disconnect" class="danger-link" type="button">Disconnect Notion</button>
         </div>
-        <label id="title-property-wrap" hidden><span>Database title property</span><input id="title-property" value="Name"></label>
-        <label class="toggle-row">
-          <span><b>Attach the current webpage</b><small>Include the page title and URL with new captures.</small></span>
-          <input id="include-source" class="toggle" type="checkbox" checked>
-        </label>
       </section>
 
-      <div class="save-row">
-        <span id="message" aria-live="polite"></span>
-        <button id="save" class="primary" type="button">Save settings</button>
-      </div>
-
-      <section class="try-it">
-        <div><p class="eyebrow">READY WHEN YOU ARE</p><h2>Press <kbd>⌃ ⇧ Space</kbd> on any webpage.</h2></div>
-        <p>On macOS, you can change the shortcut at <code>chrome://extensions/shortcuts</code>.</p>
+      <section class="data-practices" aria-labelledby="data-practices-heading">
+        <div class="data-practices-heading">
+          <p class="kicker">Your data</p>
+          <h2 id="data-practices-heading">What stays here, and what goes to Notion</h2>
+        </div>
+        <ul>
+          <li><b>While you write</b><span>Your note text, selected text, and any attached page title and URL are autosaved in Chrome on this device so you can recover your draft.</span></li>
+          <li><b>When you choose Save</b><span>Your reviewed capture is sent to the Notion workspace and destination you selected.</span></li>
+          <li><b>Until it is safe</b><span>Queued notes stay on this device until delivery succeeds or you delete them. Inactive drafts and delivered history are removed after 30 days.</span></li>
+          <li><b>In Incognito</b><span>Drafts and local history last only for that Incognito session. Saving still sends the capture to your selected Notion workspace.</span></li>
+        </ul>
+        <p>Quick Note reads page details only when you open it. It does not continuously monitor browsing, run analytics, or show ads.</p>
       </section>
+
+      <footer class="page-footer">
+        <span>Quick Note v<span id="extension-version"></span></span>
+        <span>Private by design · No page access until you open it</span>
+      </footer>
     </main>
     <script type="module" src="options.js"></script>
   </body>

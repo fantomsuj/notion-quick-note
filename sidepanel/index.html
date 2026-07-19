@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Notion Quick Note</title>
+    <link rel="stylesheet" href="../styles/tokens.css">
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <span class="eyebrow">NOTION</span>
+        <h1>Quick Note</h1>
+      </div>
+      <button class="icon-button settings" type="button" aria-label="Open settings">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.25"/><path d="M8 2.25v1.2M8 12.55v1.2M2.25 8h1.2M12.55 8h1.2M3.93 3.93l.85.85M11.22 11.22l.85.85M12.07 3.93l-.85.85M4.78 11.22l-.85.85"/></svg>
+      </button>
+    </header>
+
+    <nav class="tabs" aria-label="Quick Note views">
+      <button type="button" data-view="compose" aria-selected="true">Compose</button>
+      <button type="button" data-view="activity" aria-selected="false">Notes <span class="note-count" hidden></span></button>
+    </nav>
+
+    <main>
+      <section class="view compose-view" data-panel="compose">
+        <div class="compose-empty">
+          <div class="compose-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg>
+          </div>
+          <h2>Capture without losing your place</h2>
+          <p>Your draft is autosaved on this device. It goes to Notion only when you choose Save.</p>
+          <button class="primary compose-button" type="button">Open composer</button>
+        </div>
+      </section>
+
+      <section class="view activity-view" data-panel="activity" hidden>
+        <div class="privacy-note" hidden>In Incognito, drafts and local history last only for this browser session. Choosing Save still sends the capture to Notion.</div>
+        <div class="activity-status" role="status" aria-live="polite">Loading activity…</div>
+        <div class="activity-content" hidden>
+          <section class="activity-group drafts-group">
+            <div class="group-heading"><h2>Drafts</h2><span class="draft-count"></span></div>
+            <div class="draft-list card-list"></div>
+          </section>
+          <section class="activity-group queue-group">
+            <div class="group-heading"><h2>Needs delivery</h2><span class="queue-count"></span></div>
+            <div class="queue-list card-list"></div>
+          </section>
+          <section class="activity-group delivered-group">
+            <div class="group-heading">
+              <h2>Saved to Notion</h2>
+              <button class="text-button clear-history" type="button">Delete local history</button>
+            </div>
+            <div class="delivered-list card-list"></div>
+          </section>
+
+          <details class="data-practices">
+            <summary>How your captures are handled</summary>
+            <ul>
+              <li>Drafts can include your note text, selected text, and attached page title and URL.</li>
+              <li>Queued notes stay on this device until delivery succeeds or you delete them.</li>
+              <li>Choosing Save sends the capture to your selected Notion workspace.</li>
+              <li>In Incognito, drafts and history last only for that Incognito session; saved captures still go to Notion.</li>
+            </ul>
+          </details>
+
+          <details class="storage-recovery">
+            <summary>Storage &amp; recovery</summary>
+            <div class="diagnostics-status" role="status">Open to check local storage.</div>
+            <dl class="diagnostics-grid" hidden>
+              <div><dt>Capture data</dt><dd class="capture-bytes"></dd></div>
+              <div><dt>Chrome storage</dt><dd class="chrome-bytes"></dd></div>
+              <div><dt>Origin storage</dt><dd class="origin-bytes"></dd></div>
+              <div><dt>Local records</dt><dd class="record-counts"></dd></div>
+              <div><dt>Storage health</dt><dd class="storage-health"></dd></div>
+              <div><dt>Persistence</dt><dd class="persistence-state"></dd></div>
+              <div><dt>Last maintenance</dt><dd class="maintenance-time"></dd></div>
+            </dl>
+            <p class="diagnostics-note"></p>
+            <div class="recovery-actions">
+              <button type="button" data-export="json">Export JSON</button>
+              <button type="button" data-export="markdown">Export Markdown</button>
+            </div>
+          </details>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" role="alert" hidden></div>
+    <script src="../dist/content.js"></script>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

@@ -1,5 +1,11 @@
 .DS_Store
 node_modules/
+dist/
+test-results/
+playwright-report/
 oauth-worker/.dev.vars
 oauth-worker/wrangler.toml
+release/
+release.config.json
 *.zip
+.gstack/

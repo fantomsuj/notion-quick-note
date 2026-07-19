@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Synthetic Media Page</title>
+    <style>
+      html, body { height: 100%; margin: 0; background: #111; color: white; font: 16px system-ui; }
+      #player { min-height: 100%; display: grid; place-items: center; background: #181818; }
+      #player:fullscreen { width: 100%; height: 100%; }
+      .controls { display: flex; gap: 12px; }
+      button { padding: 10px 16px; }
+    </style>
+  </head>
+  <body>
+    <main id="player">
+      <div class="controls">
+        <button id="player-focus">Player controls</button>
+        <button id="enter-fullscreen">Enter fullscreen</button>
+      </div>
+    </main>
+    <script>
+      const shortcutKeys = new Set([" ", "arrowleft", "arrowright", "arrowup", "arrowdown", "j", "k", "l", "f", "m"]);
+      window.mediaEvents = [];
+      window.runtimeMessages = [];
+      window.savedSession = {};
+      window.settingsDelay = 0;
+      window.draftDelay = 0;
+      window.draftSaveDelay = 0;
+      window.holdDraftSave = false;
+      window.releaseDraftSave = () => {};
+      window.manualDraftSaves = false;
+      window.pendingDraftSaveReleases = [];
+      window.draftWrites = [];
+      window.activeDraftWrites = 0;
+      window.maxConcurrentDraftWrites = 0;
+      window.releaseNextDraftSave = () => window.pendingDraftSaveReleases.shift()?.();
+      window.holdDraft = false;
+      window.releaseDraft = () => {};
+      window.saveDelay = 0;
+      window.saveResponse = { ok: true };
+      window.captureStatus = { id: "capture-test", status: "delivered", lastError: null };
+      window.settingsResponse = { configured: true, destinationName: "Test Inbox", includeSource: true };
+      window.currentDraft = null;
+      window.recentNotes = [];
+      window.remoteDraft = null;
+      window.recentConflict = false;
+      window.runtimeError = null;
+      window.storageError = null;
+
+      for (const type of ["keydown", "keyup"]) {
+        document.addEventListener(type, (event) => {
+          if (shortcutKeys.has(event.key.toLowerCase())) {
+            window.mediaEvents.push({ type, key: event.key });
+          }
+        });
+      }
+
+      document.querySelector("#enter-fullscreen").addEventListener("click", () => {
+        document.querySelector("#player").requestFullscreen();
+      });
+
+      document.addEventListener("click", () => {
+        if (!window.fullscreenOnNextClick) return;
+        window.fullscreenOnNextClick = false;
+        document.querySelector("#player").requestFullscreen();
+      }, { capture: true });
+
+      const messageListeners = [];
+      window.activeRuntimeListeners = () => messageListeners.length;
+      window.dispatchRuntimeMessage = async (message) => {
+        let response;
+        for (const listener of [...messageListeners]) {
+          listener(message, { id: "test-extension-id" }, (value) => { response = value; });
+        }
+        return response;
+      };
+      Object.defineProperty(window, "chrome", {
+        configurable: true,
+        value: {
+          runtime: {
+            id: "test-extension-id",
+            getURL(resource) {
+              return new URL(`../../${resource}`, location.href).href;
+            },
+            onMessage: {
+              addListener(listener) {
+                messageListeners.push(listener);
+              },
+              removeListener(listener) {
+                const index = messageListeners.indexOf(listener);
+                if (index !== -1) messageListeners.splice(index, 1);
+              }
+            },
+            async sendMessage(message) {
+              if (window.runtimeError) throw window.runtimeError;
+              window.runtimeMessages.push(message);
+              if (message.type === "GET_QUICK_SETTINGS") {
+                await new Promise((resolve) => setTimeout(resolve, window.settingsDelay));
+                return window.settingsResponse;
+              }
+              if (message.type === "GET_OR_CREATE_DRAFT") {
+                if (window.holdDraft) {
+                  await new Promise((resolve) => { window.releaseDraft = resolve; });
+                }
+                await new Promise((resolve) => setTimeout(resolve, window.draftDelay));
+                const legacy = window.savedSession[`draft:${location.href}`];
+                window.currentDraft ||= {
+                  version: 2,
+                  id: "draft-test",
+                  tabId: 1,
+                  sessionId: message.sessionId || "session-test",
+                  revision: 1,
+                  mode: "new",
+                  sources: [{ title: message.context?.title || "Source", url: message.context?.url || location.href }],
+                  context: message.context,
+                  title: legacy?.title || "",
+                  includeSource: legacy?.includeSource !== false,
+                  doc: legacy?.doc || { type: "doc", content: [{ type: "paragraph" }] }
+                };
+                return { ok: true, draft: window.currentDraft };
+              }
+              if (message.type === "UPSERT_DRAFT") {
+                window.draftWrites.push(structuredClone(message));
+                window.activeDraftWrites += 1;
+                window.maxConcurrentDraftWrites = Math.max(window.maxConcurrentDraftWrites, window.activeDraftWrites);
+                try {
+                  if (window.manualDraftSaves) {
+                    await new Promise((resolve) => window.pendingDraftSaveReleases.push(resolve));
+                  } else if (window.holdDraftSave) {
+                    await new Promise((resolve) => {
+                      window.releaseDraftSave = () => {
+                        window.holdDraftSave = false;
+                        resolve();
+                      };
+                    });
+                  }
+                  await new Promise((resolve) => setTimeout(resolve, window.draftSaveDelay));
+                  if (message.expectedRevision !== window.currentDraft.revision) return { ok: false, code: "stale_draft", error: "Stale draft" };
+                  const body = (function documentText(node) {
+                    if (!node) return "";
+                    if (node.type === "text") return node.text || "";
+                    return (node.content || []).map(documentText).join("\n");
+                  })(message.draft.doc);
+                  if (!body.trim()) {
+                    window.currentDraft = { version: 2, ...message.draft, revision: 0 };
+                    delete window.savedSession[`draft:${location.href}`];
+                    return { ok: true, draft: null, discarded: true };
+                  }
+                  window.currentDraft = { version: 2, ...message.draft, revision: window.currentDraft.revision + 1 };
+                  window.savedSession[`draft:${location.href}`] = window.currentDraft;
+                  return { ok: true, draft: window.currentDraft };
+                } finally {
+                  window.activeDraftWrites -= 1;
+                }
+              }
+              if (message.type === "LIST_RECENT_NOTES") return { ok: true, notes: window.recentNotes };
+              if (message.type === "LOAD_RECENT_NOTE") {
+                window.currentDraft = structuredClone(window.remoteDraft);
+                return { ok: true, draft: window.currentDraft, conflict: window.recentConflict };
+              }
+              if (message.type === "ACTIVATE_DRAFT") return { ok: true, draft: window.currentDraft };
+              if (message.type === "RELEASE_COMPOSER_SURFACE") return { ok: true };
+              if (message.type === "DISCARD_DRAFT") {
+                window.currentDraft = null;
+                delete window.savedSession[`draft:${location.href}`];
+                return { ok: true, discarded: true };
+              }
+              if (message.type === "ENQUEUE_CAPTURE") {
+                await new Promise((resolve) => setTimeout(resolve, window.saveDelay));
+                return window.saveResponse.ok
+                  ? { ...window.saveResponse, accepted: true, record: window.saveResponse.record || window.captureStatus }
+                  : window.saveResponse;
+              }
+              if (message.type === "GET_CAPTURE_STATUS") {
+                return { ok: true, record: window.captureStatus };
+              }
+              if (["OPEN_SETTINGS", "OPEN_ACTIVITY"].includes(message.type)) return { ok: true };
+            }
+          },
+          storage: {
+            session: {
+              async get(key) {
+                if (window.storageError) throw window.storageError;
+                if (window.holdDraft) {
+                  await new Promise((resolve) => { window.releaseDraft = resolve; });
+                }
+                await new Promise((resolve) => setTimeout(resolve, window.draftDelay));
+                return { [key]: window.savedSession[key] };
+              },
+              async set(value) {
+                if (window.storageError) throw window.storageError;
+                Object.assign(window.savedSession, value);
+              },
+              async remove(key) {
+                if (window.storageError) throw window.storageError;
+                delete window.savedSession[key];
+              }
+            }
+          }
+        }
+      });
+
+      window.openQuickNote = (overrides = {}) => {
+        return window.dispatchRuntimeMessage({
+          type: "TOGGLE_QUICK_NOTE",
+          draftId: "draft-test",
+          tabId: 1,
+          sessionId: "session-test",
+          revision: window.currentDraft?.revision || 1,
+          page: {
+            title: "Synthetic Media Page",
+            url: location.href,
+            selection: "",
+            ...overrides
+          }
+        });
+      };
+    </script>
+  </body>
+</html>

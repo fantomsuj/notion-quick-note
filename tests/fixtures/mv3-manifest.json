@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Notion Quick Note MV3 Failure Fixture",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "contextMenus",
+    "identity",
+    "sidePanel",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": ["https://api.notion.com/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Notion Quick Note MV3 Failure Fixture"
+  },
+  "commands": {
+    "toggle-quick-note": {
+      "suggested_key": { "default": "Ctrl+Shift+Space", "mac": "MacCtrl+Shift+Space" },
+      "description": "Open or close Quick Note"
+    }
+  },
+  "options_page": "control.html"
+}

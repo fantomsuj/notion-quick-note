@@ -2,6 +2,8 @@
 
 This guide explains what the extension is, how its pieces cooperate, where to make changes, and how to grow it without losing the quiet simplicity that makes it useful.
 
+For visual implementation decisions, use [`DESIGN.md`](../DESIGN.md) as the source of truth. The UI follows Notion's product system; references to Apple Quick Note in this guide describe invocation and capture behavior only.
+
 ## 1. The product in one picture
 
 The product promise is not “save the whole web.” It is **capture the thought that the web caused, without breaking concentration**.
@@ -27,7 +29,8 @@ flowchart TD
 
   subgraph Extension["Chrome extension — trusted"]
     Worker["Service worker\ncoordination + secrets"]
-    Store["Chrome storage\nsettings + drafts"]
+    Store["Chrome storage\nsettings + small index"]
+    CaptureDB["IndexedDB\nper-record drafts + captures"]
     Adapter["Notion adapter\nrequest construction"]
     Settings["Settings page"]
   end
@@ -38,8 +41,9 @@ flowchart TD
   end
 
   Trigger --> Card
-  Card -->|"capture message"| Worker
-  Card <--> Store
+  Card -->|"validated messages"| Worker
+  Worker <--> Store
+  Worker <--> CaptureDB
   Settings <--> Store
   Settings -. "OAuth only" .-> Broker
   Worker --> Adapter --> Notion
@@ -62,7 +66,7 @@ sequenceDiagram
   U->>C: Toolbar, shortcut, or context menu
   C->>C: Read active title, URL, selection
   C->>Q: Inject and open card
-  Q->>Q: Restore per-page draft
+  Q->>Q: Restore the global active draft and attach this page
   U->>Q: Write note and save
   Q->>W: SAVE_CAPTURE message
   W->>N: Append block or create page
@@ -102,7 +106,7 @@ flowchart TD
 |---|---|---|
 | Trigger | Toolbar, shortcut, selection menu | Hot-corner companion, omnibox command, side panel |
 | Context | URL, page title, selected text | Author, publish date, canonical URL, screenshot |
-| Draft | Freeform note with session persistence | Templates, slash commands, voice, Markdown |
+| Draft | Versioned Tiptap document with session persistence, Markdown rules, and slash commands | Templates, voice |
 | Destination | Running page or database/data source | Multiple workspaces, routing rules, other providers |
 | Delivery | Background message → Notion REST API | Offline queue, retry policy, idempotency |
 | Feedback | Saving, saved, or error state | Capture history, undo, open-in-Notion action |
@@ -117,7 +121,7 @@ stateDiagram-v2
   Unconfigured --> Ready: Add credential + destination
   Ready --> Composing: User gesture
   Composing --> Drafted: Type or capture selection
-  Drafted --> Saving: Cmd/Ctrl + Enter
+  Drafted --> Saving: Cmd/Ctrl + Shift + Enter
   Saving --> Saved: Notion 2xx
   Saving --> Failed: Auth, schema, or network error
   Failed --> Saving: Retry
@@ -270,4 +274,3 @@ Users will tolerate an API error; they will not tolerate losing the thought. Loc
 3. **Keep secrets and Notion transport behind the service-worker boundary.**
 4. **Win on thought-first simplicity before expanding into full web clipping.**
 5. **Build reliability and recall before building more providers.**
-
