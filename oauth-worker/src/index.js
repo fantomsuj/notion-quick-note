@@ -95,17 +95,17 @@ async function forwardOauthRequest(path, body, env) {
   let url = NOTION_TOKEN_URL;
   let payload;
   if (path === "/exchange") {
-    const { code, redirect_uri: redirectUri } = body;
-    if (!code || !redirectUri) throw httpError("code and redirect_uri are required", 400);
+    const code = requiredString(body, "code", "code and redirect_uri are required");
+    const redirectUri = requiredString(body, "redirect_uri", "code and redirect_uri are required");
     if (!isAllowedRedirect(redirectUri, env)) throw httpError("Redirect URI is not allowlisted", 403);
     payload = { grant_type: "authorization_code", code, redirect_uri: redirectUri };
   } else if (path === "/refresh") {
-    if (!body.refresh_token) throw httpError("refresh_token is required", 400);
-    payload = { grant_type: "refresh_token", refresh_token: body.refresh_token };
+    const refreshToken = requiredString(body, "refresh_token", "refresh_token is required");
+    payload = { grant_type: "refresh_token", refresh_token: refreshToken };
   } else {
-    if (!body.token) throw httpError("token is required", 400);
+    const token = requiredString(body, "token", "token is required");
     url = NOTION_REVOKE_URL;
-    payload = { token: body.token };
+    payload = { token };
   }
 
   const controller = new AbortController();
@@ -128,6 +128,14 @@ async function forwardOauthRequest(path, body, env) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function requiredString(body, field, message) {
+  const value = body[field];
+  if (typeof value !== "string" || !value.trim()) {
+    throw httpError(message, 400, "invalid_request");
+  }
+  return value;
 }
 
 async function readUpstreamJson(response) {
@@ -174,8 +182,16 @@ function validateEnvironment(env) {
 
 async function rateLimitRequest(request, path, env) {
   const clientAddress = request.headers.get("CF-Connecting-IP") || "unknown";
-  const result = await env.OAUTH_RATE_LIMITER.limit({ key: `${path}:${clientAddress}` });
-  return result?.success === true;
+  try {
+    const result = await env.OAUTH_RATE_LIMITER.limit({ key: `${path}:${clientAddress}` });
+    return result?.success === true;
+  } catch {
+    throw httpError(
+      "OAuth broker rate limiter is unavailable",
+      503,
+      "rate_limiter_unavailable"
+    );
+  }
 }
 
 function requestIdFor(request, env) {

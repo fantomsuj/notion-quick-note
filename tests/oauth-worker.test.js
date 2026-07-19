@@ -59,6 +59,23 @@ test("rate limits each client and OAuth route before forwarding", async () => {
   assert.deepEqual(await response.json(), { error: "Too many requests", code: "rate_limited" });
 });
 
+test("normalizes rate-limit binding failures without exposing internals", async () => {
+  const response = await worker.fetch(request("/refresh", { refresh_token: "refresh" }), {
+    ...env,
+    OAUTH_RATE_LIMITER: {
+      async limit() {
+        throw new Error("private binding failure details");
+      }
+    }
+  });
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "OAuth broker rate limiter is unavailable",
+    code: "rate_limiter_unavailable"
+  });
+});
+
 test("requires JSON object request bodies", async () => {
   const plainText = new Request("https://broker.example/refresh", {
     method: "POST",
@@ -132,6 +149,28 @@ test("preserves valid Notion error responses", async () => {
     code: "unauthorized",
     message: "Refresh token expired"
   });
+});
+
+test("rejects non-string OAuth fields before forwarding", async () => {
+  let forwarded = false;
+  const testEnv = {
+    ...env,
+    FETCH: async () => {
+      forwarded = true;
+      throw new Error("should not forward");
+    }
+  };
+  for (const [path, body] of [
+    ["/exchange", { code: [], redirect_uri: "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/notion" }],
+    ["/exchange", { code: "code", redirect_uri: 42 }],
+    ["/refresh", { refresh_token: { secret: true } }],
+    ["/revoke", { token: ["token"] }]
+  ]) {
+    const response = await worker.fetch(request(path, body), testEnv);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, "invalid_request");
+  }
+  assert.equal(forwarded, false);
 });
 
 test("normalizes Notion transport and response failures", async () => {
