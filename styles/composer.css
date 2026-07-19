@@ -35,12 +35,25 @@ button { -webkit-tap-highlight-color: transparent; }
   background: var(--nqn-surface);
   box-shadow: var(--nqn-shadow-md);
   opacity: 0;
-  transform: translateY(8px) scale(.99);
-  transition: opacity 150ms ease, transform 180ms var(--nqn-ease-out);
+  transform: translateY(10px) scale(.985);
+  transform-origin: bottom right;
+  transition: opacity var(--nqn-duration-fast) ease, transform var(--nqn-duration-slow) var(--nqn-ease-spring);
 }
 
 .sheet.visible { opacity: 1; transform: none; }
 .inline-icon { width: 16px; height: 16px; display: block; }
+
+/* Centered popovers keep their translateX(-50%) offset across the keyframes so
+   the horizontal centering is preserved while they animate in. */
+@keyframes nqn-drop-in-centered {
+  from { opacity: 0; transform: translateX(-50%) translateY(-5px); }
+  to { opacity: 1; transform: translateX(-50%); }
+}
+
+@keyframes nqn-toast-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translateX(-50%); }
+}
 
 .topbar {
   position: relative;
@@ -79,10 +92,10 @@ button { -webkit-tap-highlight-color: transparent; }
   background: transparent;
   color: var(--nqn-text-tertiary);
   cursor: pointer;
-  transition: background var(--nqn-duration-fast) ease, color var(--nqn-duration-fast) ease;
+  transition: background var(--nqn-duration-fast) ease, color var(--nqn-duration-fast) ease, transform var(--nqn-duration-quick) var(--nqn-ease-out);
 }
 .top-button:hover { background: var(--nqn-hover); color: var(--nqn-text); }
-.top-button:active { background: var(--nqn-pressed); }
+.top-button:active { background: var(--nqn-pressed); transform: scale(.9); }
 .top-button:disabled { opacity: .35; cursor: wait; }
 
 .save {
@@ -98,9 +111,10 @@ button { -webkit-tap-highlight-color: transparent; }
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: background var(--nqn-duration-fast) ease, opacity var(--nqn-duration-fast) ease;
+  transition: background var(--nqn-duration-fast) ease, opacity var(--nqn-duration-fast) ease, transform var(--nqn-duration-quick) var(--nqn-ease-out);
 }
 .save:hover { background: var(--nqn-action-hover); }
+.save:not(:disabled):active { transform: scale(.97); }
 .save:disabled { opacity: .62; cursor: wait; }
 .save .inline-icon { width: 14px; height: 14px; }
 .safe-close {
@@ -127,6 +141,7 @@ button { -webkit-tap-highlight-color: transparent; }
   color: var(--nqn-warning);
   font-size: 11px;
   line-height: 1.45;
+  animation: nqn-slide-down-in var(--nqn-duration-panel) var(--nqn-ease-out);
 }
 .setup strong { font-size: 12px; font-weight: 600; }
 
@@ -212,6 +227,7 @@ button { -webkit-tap-highlight-color: transparent; }
   border-radius: 3px;
   background: var(--nqn-surface);
 }
+.ProseMirror ul[data-type="taskList"] input { transition: background var(--nqn-duration-quick) ease, border-color var(--nqn-duration-quick) ease; }
 .ProseMirror ul[data-type="taskList"] input:checked { border-color: var(--nqn-action); background: var(--nqn-action); }
 .ProseMirror ul[data-type="taskList"] input:checked::after {
   content: "";
@@ -223,6 +239,8 @@ button { -webkit-tap-highlight-color: transparent; }
   border: solid var(--nqn-brand-white);
   border-width: 0 1.5px 1.5px 0;
   transform: rotate(45deg);
+  transform-origin: center;
+  animation: nqn-check-pop var(--nqn-duration-fast) var(--nqn-ease-spring);
 }
 .ProseMirror ul[data-type="taskList"] li > div { min-width: 0; flex: 1; }
 .ProseMirror blockquote {
@@ -284,6 +302,7 @@ button { -webkit-tap-highlight-color: transparent; }
   margin: 12px 0 0 auto;
   color: var(--nqn-text-tertiary);
   font-size: 10px;
+  animation: nqn-fade-in var(--nqn-duration-fast) ease;
 }
 .character-limit[data-tone="error"] { color: var(--nqn-danger); }
 
@@ -301,6 +320,8 @@ button { -webkit-tap-highlight-color: transparent; }
   background: var(--nqn-surface);
   box-shadow: var(--nqn-shadow-md);
   font-size: 12px;
+  transform-origin: top right;
+  animation: nqn-pop-in-tr var(--nqn-duration-panel) var(--nqn-ease-out);
 }
 .menu-heading { padding: 6px 8px; color: var(--nqn-text-secondary); font-size: 10px; font-weight: 600; }
 .destination-row, .menu-item {
@@ -316,7 +337,7 @@ button { -webkit-tap-highlight-color: transparent; }
   text-align: left;
 }
 .destination-row { margin-bottom: 3px; }
-.menu-item { cursor: pointer; }
+.menu-item { cursor: pointer; transition: background var(--nqn-duration-quick) ease; }
 .menu-item:hover { background: var(--nqn-hover); }
 .menu-icon, .menu-check {
   width: 20px;
@@ -359,6 +380,8 @@ kbd {
   border-radius: var(--nqn-radius-popover);
   background: var(--nqn-surface);
   box-shadow: var(--nqn-shadow-md);
+  transform-origin: top right;
+  animation: nqn-pop-in-tr var(--nqn-duration-panel) var(--nqn-ease-out);
 }
 .popover-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 4px 8px; }
 .popover-heading b, .popover-heading small { display: block; }
@@ -401,7 +424,9 @@ kbd {
 .recent-preview[hidden] { display: none; }
 .recent-edit small { margin-top: 2px; color: var(--nqn-text-tertiary); font-size: 10px; }
 .popover-state, .source-empty { padding: 18px 8px; color: var(--nqn-text-secondary); font-size: 11px; text-align: center; }
+.popover-state { animation: nqn-fade-in var(--nqn-duration-fast) ease; }
 .popover-state.error { color: var(--nqn-danger); }
+.ai-review { animation: nqn-pop-in var(--nqn-duration-panel) var(--nqn-ease-out); }
 .ai-action-list { display: grid; gap: 3px; }
 .ai-action {
   width: 100%;
@@ -479,6 +504,7 @@ kbd {
   background: var(--nqn-surface-secondary);
   color: var(--nqn-text-secondary);
   font-size: 10px;
+  animation: nqn-slide-down-in var(--nqn-duration-panel) var(--nqn-ease-out);
 }
 .edit-banner:has(.conflict-actions:not([hidden])) { align-items: flex-start; flex-direction: column; }
 .conflict-actions { display: flex; flex-wrap: wrap; gap: 3px; }
@@ -497,7 +523,9 @@ kbd {
   box-shadow: 0 5px 18px rgba(15, 15, 15, .24);
   color: var(--nqn-surface);
   white-space: nowrap;
+  animation: nqn-pop-in var(--nqn-duration-fast) var(--nqn-ease-out);
 }
+.bubble button { transition: background var(--nqn-duration-quick) ease; }
 .bubble button {
   min-width: 29px;
   height: 28px;
@@ -527,6 +555,8 @@ kbd {
   background: var(--nqn-surface);
   box-shadow: var(--nqn-shadow-md);
   transform: translateX(-50%);
+  transform-origin: top center;
+  animation: nqn-drop-in-centered var(--nqn-duration-fast) var(--nqn-ease-out);
 }
 .format-menu button {
   width: 100%;
@@ -576,6 +606,8 @@ kbd {
   border-radius: var(--nqn-radius-popover);
   background: var(--nqn-surface);
   box-shadow: var(--nqn-shadow-md);
+  transform-origin: top left;
+  animation: nqn-pop-in var(--nqn-duration-fast) var(--nqn-ease-out);
 }
 .slash-scroll {
   min-height: 0;
@@ -611,6 +643,7 @@ kbd {
   color: var(--nqn-text);
   text-align: left;
   cursor: pointer;
+  transition: background var(--nqn-duration-quick) ease;
 }
 .slash-item:hover, .slash-item.active { background: var(--nqn-hover); }
 .command-icon {
@@ -672,6 +705,7 @@ kbd {
   box-shadow: 0 5px 18px rgba(15, 15, 15, .18);
   transform: translateX(-50%);
   font-size: 11px;
+  animation: nqn-toast-in var(--nqn-duration-panel) var(--nqn-ease-spring);
 }
 .toast[data-tone="error"] { background: var(--nqn-danger); color: var(--nqn-brand-white); }
 .toast[data-tone="success"] { background: var(--nqn-success); color: var(--nqn-brand-white); }
@@ -695,4 +729,6 @@ kbd {
 
 @media (prefers-reduced-motion: reduce) {
   .sheet, .top-button, .save { transition: none; }
+  .top-button:active, .save:not(:disabled):active { transform: none; }
+  *, *::before, *::after { animation: none !important; }
 }
