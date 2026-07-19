@@ -95,14 +95,20 @@ test("popup visual states", async ({ browser }) => {
 
   await expectPopupSnapshot(browser, "popup-recent-dark", { colorScheme: "dark" }, async (page) => {
     await page.evaluate(() => {
+      window.recentDrafts = [
+        { id: "draft-one", source: "draft", title: "Half-written thought", preview: "Keep the local draft nearby", destinationName: "Local draft", status: "draft", mode: "new", updatedAt: Date.now(), editable: true }
+      ];
       window.recentNotes = [
-        { id: "one", title: "Questions from the research", destinationName: "Quick Notes", status: "delivered", updatedAt: Date.now(), remoteUrl: "https://notion.so/one" },
-        { id: "two", title: "Video ideas", destinationName: "Creative Inbox", status: "delivered", updatedAt: Date.now() - 3_600_000, remoteUrl: "https://notion.so/two" },
-        { id: "three", title: "A quieter launch checklist", destinationName: "Quick Notes", status: "delivered", updatedAt: Date.now() - 86_400_000, remoteUrl: "https://notion.so/three" }
+        { id: "one", source: "note", title: "Questions from the research", destinationName: "Quick Notes", status: "delivered", updatedAt: Date.now() - 60_000, remoteUrl: "https://notion.so/one", editable: true },
+        { id: "two", source: "note", title: "Video ideas", destinationName: "Creative Inbox", status: "delivered", updatedAt: Date.now() - 3_600_000, remoteUrl: "https://notion.so/two", editable: true }
+      ];
+      window.recentNotionPages = [
+        { id: "notionone", source: "notion", pageId: "notionone", title: "Workspace kickoff", destinationName: "Notion", status: "notion", updatedAt: Date.now() - 7_200_000, remoteUrl: "https://www.notion.so/kickoff", editable: true }
       ];
     });
     await page.locator("#notion-quick-note-root .recent").click();
-    await expect(page.locator("#notion-quick-note-root .recent-row")).toHaveCount(3);
+    await expect(page.locator("#notion-quick-note-root .recent-section")).toHaveCount(3);
+    await expect(page.locator("#notion-quick-note-root .recent-row")).toHaveCount(4);
   });
 
   await expectPopupSnapshot(browser, "popup-conflict-narrow", { viewport: { width: 390, height: 720 } }, async (page) => {

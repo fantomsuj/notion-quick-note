@@ -392,6 +392,24 @@ kbd {
 }
 .recent-search-wrap .inline-icon { width: 14px; height: 14px; }
 .recent-search { min-width: 0; flex: 1; padding: 0; border: 0; outline: 0; background: transparent; font-size: 11px; }
+.recent-section {
+  display: grid;
+  gap: 2px;
+  margin: 10px 4px 4px;
+}
+.recent-section:first-child { margin-top: 2px; }
+.recent-section b {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--nqn-text-tertiary);
+}
+.recent-section small {
+  color: var(--nqn-text-secondary);
+  font-size: 10px;
+  line-height: 1.35;
+}
 .recent-row { display: flex; align-items: center; gap: 3px; border-radius: 5px; }
 .recent-row:hover { background: var(--nqn-hover); }
 .recent-edit { min-width: 0; flex: 1; padding: 8px; border: 0; background: transparent; text-align: left; cursor: pointer; }

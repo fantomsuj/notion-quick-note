@@ -278,6 +278,7 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   await page.evaluate(() => {
     window.recentNotes = [{
       id: "capture-recent",
+      source: "note",
       title: "Recently saved",
       preview: "A compact preview of the saved note body",
       destinationName: "Test Inbox",
@@ -306,6 +307,7 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   const root = page.locator("#notion-quick-note-root");
   await root.locator(".ProseMirror").fill("Unsaved local thought");
   await root.locator(".recent").click();
+  await expect(root.locator(".recent-section").first()).toContainText("Saved notes");
   await expect(root.locator(".recent-edit")).toContainText("Recently saved");
   await expect(root.locator(".recent-preview")).toHaveText("A compact preview of the saved note body");
   await root.locator(".recent-edit").click();
@@ -324,6 +326,91 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   const messages = await page.evaluate(() => window.runtimeMessages);
   expect(messages.some((message) => message.type === "UPSERT_DRAFT" && message.draft.doc.content[0]?.content?.[0]?.text === "Unsaved local thought")).toBe(true);
   expect(messages.some((message) => message.type === "LOAD_RECENT_NOTE" && message.id === "capture-recent")).toBe(true);
+});
+
+test("Recent buckets drafts above Notion pages and can pull a Notion doc into the composer", async ({ page }) => {
+  await page.evaluate(() => {
+    window.recentDrafts = [{
+      id: "draft-stashed",
+      source: "draft",
+      title: "Stashed draft",
+      preview: "Keep this thought nearby",
+      destinationName: "Local draft",
+      status: "draft",
+      mode: "new",
+      updatedAt: Date.now(),
+      editable: true
+    }];
+    window.recentNotes = [{
+      id: "capture-recent",
+      source: "note",
+      title: "Extension note",
+      preview: "Delivered from Quick Note",
+      destinationName: "Quick Notes",
+      status: "delivered",
+      updatedAt: Date.now() - 60_000,
+      remoteUrl: "https://www.notion.so/extension-note",
+      editable: true
+    }];
+    window.recentNotionPages = [{
+      id: "notionpageid000000000000000000",
+      source: "notion",
+      pageId: "notionpageid000000000000000000",
+      title: "Workspace spec",
+      preview: "",
+      destinationName: "Notion",
+      status: "notion",
+      updatedAt: Date.now() - 120_000,
+      remoteUrl: "https://www.notion.so/Workspace-spec",
+      editable: true
+    }];
+    window.recentDraftBodies = {
+      "draft-stashed": {
+        version: 2,
+        id: "draft-stashed",
+        tabId: 1,
+        sessionId: "session-test",
+        revision: 2,
+        mode: "new",
+        title: "Stashed draft",
+        sources: [],
+        doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Keep this thought nearby" }] }] }
+      }
+    };
+    window.notionPageDraft = {
+      version: 2,
+      id: "edit-notion",
+      tabId: 1,
+      sessionId: "session-test",
+      revision: 1,
+      mode: "edit",
+      targetRecordId: "imported-notion",
+      returnDraftId: "draft-test",
+      title: "Workspace spec",
+      sources: [],
+      doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Pulled from Notion" }] }] }
+    };
+  });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".recent").click();
+  await expect(root.locator(".recent-section")).toHaveCount(3);
+  await expect(root.locator(".recent-section").nth(0)).toContainText("Drafts");
+  await expect(root.locator(".recent-section").nth(1)).toContainText("Saved notes");
+  await expect(root.locator(".recent-section").nth(2)).toContainText("From Notion");
+  await expect(root.locator('.recent-row[data-source="draft"] .recent-edit')).toContainText("Stashed draft");
+  await expect(root.locator('.recent-row[data-source="note"] .recent-edit')).toContainText("Extension note");
+  await expect(root.locator('.recent-row[data-source="notion"] .recent-edit')).toContainText("Workspace spec");
+
+  await root.locator('.recent-row[data-source="notion"] .recent-edit').click();
+  await expect(root.locator(".page-title")).toHaveValue("Workspace spec");
+  await expect(root.locator(".ProseMirror")).toHaveText("Pulled from Notion");
+  await expect(root.locator(".edit-banner")).toContainText("Editing a recent note");
+
+  const messages = await page.evaluate(() => window.runtimeMessages);
+  expect(messages.some((message) => (
+    message.type === "LOAD_NOTION_PAGE" && message.pageId === "notionpageid000000000000000000"
+  ))).toBe(true);
 });
 
 test("closing restores page focus and media shortcuts immediately", async ({ page }) => {
