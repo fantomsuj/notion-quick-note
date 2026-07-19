@@ -6,7 +6,9 @@ const env = {
   NOTION_CLIENT_ID: "client",
   NOTION_CLIENT_SECRET: "secret",
   ALLOWED_EXTENSION_IDS: "abcdefghijklmnopabcdefghijklmnop",
-  ALLOWED_ORIGINS: "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+  ALLOWED_ORIGINS: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+  OAUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
+  UUID: () => "generated-request-id"
 };
 
 test("health fails closed until credentials and matching production allowlists exist", async () => {
@@ -17,12 +19,76 @@ test("health fails closed until credentials and matching production allowlists e
   for (const invalid of [
     { ...env, NOTION_CLIENT_SECRET: "" },
     { ...env, ALLOWED_EXTENSION_IDS: "short" },
-    { ...env, ALLOWED_ORIGINS: "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba" }
+    { ...env, ALLOWED_ORIGINS: "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba" },
+    { ...env, OAUTH_RATE_LIMITER: undefined }
   ]) {
     const response = await worker.fetch(new Request("https://broker.example/health"), invalid);
     assert.equal(response.status, 503);
     assert.equal((await response.json()).ok, false);
   }
+});
+
+test("rate limits each client and OAuth route before forwarding", async () => {
+  const keys = [];
+  let forwarded = false;
+  const testEnv = {
+    ...env,
+    OAUTH_RATE_LIMITER: {
+      async limit(input) {
+        keys.push(input.key);
+        return { success: false };
+      }
+    },
+    FETCH: async () => {
+      forwarded = true;
+      throw new Error("should not forward");
+    }
+  };
+  const oauthRequest = request("/refresh", { refresh_token: "refresh" });
+  oauthRequest.headers.set("CF-Connecting-IP", "203.0.113.7");
+  oauthRequest.headers.set("X-Request-ID", "caller-request-42");
+
+  const response = await worker.fetch(oauthRequest, testEnv);
+
+  assert.deepEqual(keys, ["/refresh:203.0.113.7"]);
+  assert.equal(forwarded, false);
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("Retry-After"), "60");
+  assert.equal(response.headers.get("X-Request-ID"), "caller-request-42");
+  assert.deepEqual(await response.json(), { error: "Too many requests", code: "rate_limited" });
+});
+
+test("requires JSON object request bodies", async () => {
+  const plainText = new Request("https://broker.example/refresh", {
+    method: "POST",
+    headers: { Origin: env.ALLOWED_ORIGINS, "Content-Type": "text/plain" },
+    body: "refresh"
+  });
+  const unsupported = await worker.fetch(plainText, env);
+  assert.equal(unsupported.status, 415);
+  assert.deepEqual(await unsupported.json(), {
+    error: "Content-Type must be application/json",
+    code: "unsupported_media_type"
+  });
+
+  for (const body of [null, [], "refresh"]) {
+    const response = await worker.fetch(new Request("https://broker.example/refresh", {
+      method: "POST",
+      headers: { Origin: env.ALLOWED_ORIGINS, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }), env);
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "Request body must be a JSON object",
+      code: "invalid_request"
+    });
+  }
+});
+
+test("adds a generated request ID when the caller does not supply a safe one", async () => {
+  const response = await worker.fetch(request("/missing", {}), env);
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("X-Request-ID"), "generated-request-id");
 });
 
 test("forwards refresh and revoke requests to Notion", async () => {

@@ -1,11 +1,13 @@
 const NOTION_TOKEN_URL = "https://api.notion.com/v1/oauth/token";
 const NOTION_REVOKE_URL = "https://api.notion.com/v1/oauth/revoke";
 const MAX_REQUEST_BYTES = 16 * 1024;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const cors = corsHeaders(request, env);
+    const requestId = requestIdFor(request, env);
+    const cors = { ...corsHeaders(request, env), "X-Request-ID": requestId };
 
     if (request.method === "OPTIONS") {
       return isAllowedOrigin(request, env)
@@ -27,12 +29,23 @@ export default {
 
     try {
       validateEnvironment(env);
+      const allowed = await rateLimitRequest(request, url.pathname, env);
+      if (!allowed) {
+        return json(
+          { error: "Too many requests", code: "rate_limited" },
+          429,
+          { ...cors, "Retry-After": "60" }
+        );
+      }
       const body = await readJsonBody(request);
       const notionResponse = await forwardOauthRequest(url.pathname, body, env);
       const payload = await notionResponse.json().catch(() => ({}));
       return json(payload, notionResponse.status, cors);
     } catch (error) {
-      return json({ error: error.message || "OAuth exchange failed" }, error.status || 500, cors);
+      return json({
+        error: error.message || "OAuth exchange failed",
+        ...(error.code ? { code: error.code } : {})
+      }, error.status || 500, cors);
     }
   }
 };
@@ -98,6 +111,22 @@ function validateEnvironment(env) {
     return !id || !allowedIds.includes(id);
   });
   if (invalidId || mismatchedOrigin) throw httpError("OAuth broker allowlists are invalid", 503);
+  if (typeof env.OAUTH_RATE_LIMITER?.limit !== "function") {
+    throw httpError("OAuth broker rate limiter is not configured", 503, "invalid_configuration");
+  }
+}
+
+async function rateLimitRequest(request, path, env) {
+  const clientAddress = request.headers.get("CF-Connecting-IP") || "unknown";
+  const result = await env.OAUTH_RATE_LIMITER.limit({ key: `${path}:${clientAddress}` });
+  return result?.success === true;
+}
+
+function requestIdFor(request, env) {
+  const supplied = request.headers.get("X-Request-ID") || "";
+  if (REQUEST_ID_PATTERN.test(supplied)) return supplied;
+  const createUuid = env.UUID || (() => crypto.randomUUID());
+  return createUuid();
 }
 
 function commaSeparated(value = "") {
@@ -121,6 +150,10 @@ function isAllowedOrigin(request, env) {
 }
 
 async function readJsonBody(request) {
+  const contentType = request.headers.get("Content-Type") || "";
+  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    throw httpError("Content-Type must be application/json", 415, "unsupported_media_type");
+  }
   const declaredLength = Number(request.headers.get("Content-Length") || 0);
   if (declaredLength > MAX_REQUEST_BYTES) throw httpError("Request body is too large", 413);
 
@@ -128,15 +161,20 @@ async function readJsonBody(request) {
   if (new TextEncoder().encode(text).byteLength > MAX_REQUEST_BYTES) {
     throw httpError("Request body is too large", 413);
   }
+  let body;
   try {
-    return JSON.parse(text);
+    body = JSON.parse(text);
   } catch {
     throw httpError("Request body must be valid JSON", 400);
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw httpError("Request body must be a JSON object", 400, "invalid_request");
+  }
+  return body;
 }
 
-function httpError(message, status) {
-  return Object.assign(new Error(message), { status });
+function httpError(message, status, code = "") {
+  return Object.assign(new Error(message), { status, code });
 }
 
 function json(value, status, headers) {
