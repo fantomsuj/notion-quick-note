@@ -48,7 +48,12 @@
         aiExtractTodos: true
       };
       window.currentDraft = null;
+      window.recentDrafts = [];
       window.recentNotes = [];
+      window.recentNotionPages = [];
+      window.recentNotionError = "";
+      window.recentDraftBodies = {};
+      window.notionPageDraft = null;
       window.remoteDraft = null;
       window.recentConflict = false;
       window.runtimeError = null;
@@ -160,12 +165,29 @@
                   window.activeDraftWrites -= 1;
                 }
               }
-              if (message.type === "LIST_RECENT_NOTES") return { ok: true, notes: window.recentNotes };
+              if (message.type === "LIST_RECENT_NOTES") {
+                return {
+                  ok: true,
+                  drafts: window.recentDrafts || [],
+                  notes: window.recentNotes || [],
+                  notionPages: window.recentNotionPages || [],
+                  notionError: window.recentNotionError || ""
+                };
+              }
               if (message.type === "LOAD_RECENT_NOTE") {
                 window.currentDraft = structuredClone(window.remoteDraft);
                 return { ok: true, draft: window.currentDraft, conflict: window.recentConflict };
               }
-              if (message.type === "ACTIVATE_DRAFT") return { ok: true, draft: window.currentDraft };
+              if (message.type === "LOAD_NOTION_PAGE") {
+                window.currentDraft = structuredClone(window.notionPageDraft || window.remoteDraft);
+                return { ok: true, draft: window.currentDraft, conflict: false };
+              }
+              if (message.type === "ACTIVATE_DRAFT") {
+                window.currentDraft = structuredClone(
+                  (window.recentDraftBodies && window.recentDraftBodies[message.id]) || window.currentDraft
+                );
+                return { ok: true, draft: window.currentDraft };
+              }
               if (message.type === "RELEASE_COMPOSER_SURFACE") return { ok: true };
               if (message.type === "DISCARD_DRAFT") {
                 window.currentDraft = null;

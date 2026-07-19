@@ -18,6 +18,7 @@ import {
   plainTextFromCapture,
   refreshManagedDestination,
   searchDestinations,
+  searchRecentPages,
   sendCapture,
   updateRemoteNote,
   validateDestinationHealth
@@ -470,6 +471,76 @@ test("turns search results into page and database destinations", async () => {
   assert.deepEqual(destinations, [
     { id: "page-id", type: "page", name: "Quick Inbox", titleProperty: "Name", icon: "📥", url: "" },
     { id: "source-id", type: "database", name: "Reading Notes", titleProperty: "Note", icon: "▦", url: "" }
+  ]);
+});
+
+test("lists recently edited Notion pages and skips archived or trashed results", async () => {
+  const calls = [];
+  const pages = await searchRecentPages({
+    token: "secret",
+    limit: 2,
+    fetchImpl: async (_url, options) => {
+      calls.push(JSON.parse(options.body));
+      return response(200, {
+        results: [
+          {
+            object: "page",
+            id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            url: "https://www.notion.so/Meeting-notes",
+            last_edited_time: "2026-07-19T12:00:00.000Z",
+            properties: { title: { type: "title", title: [{ plain_text: "Meeting notes" }] } }
+          },
+          {
+            object: "page",
+            id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            archived: true,
+            last_edited_time: "2026-07-19T11:00:00.000Z",
+            properties: { title: { type: "title", title: [{ plain_text: "Archived" }] } }
+          },
+          {
+            object: "page",
+            id: "cccccccccccccccccccccccccccccccc",
+            in_trash: true,
+            last_edited_time: "2026-07-19T10:00:00.000Z",
+            properties: { title: { type: "title", title: [{ plain_text: "Trash" }] } }
+          },
+          {
+            object: "page",
+            id: "dddddddddddddddddddddddddddddddd",
+            url: "https://www.notion.so/Spec",
+            last_edited_time: "2026-07-18T09:00:00.000Z",
+            icon: { type: "emoji", emoji: "📝" },
+            properties: { Name: { type: "title", title: [{ plain_text: "Spec" }] } }
+          },
+          {
+            object: "data_source",
+            id: "source-id",
+            title: [{ plain_text: "Should be filtered by request" }]
+          }
+        ]
+      });
+    }
+  });
+
+  assert.deepEqual(calls[0].filter, { value: "page", property: "object" });
+  assert.deepEqual(calls[0].sort, { direction: "descending", timestamp: "last_edited_time" });
+  assert.deepEqual(pages, [
+    {
+      pageId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      title: "Meeting notes",
+      url: "https://www.notion.so/Meeting-notes",
+      icon: "↳",
+      lastEditedTime: "2026-07-19T12:00:00.000Z",
+      updatedAt: Date.parse("2026-07-19T12:00:00.000Z")
+    },
+    {
+      pageId: "dddddddddddddddddddddddddddddddd",
+      title: "Spec",
+      url: "https://www.notion.so/Spec",
+      icon: "📝",
+      lastEditedTime: "2026-07-18T09:00:00.000Z",
+      updatedAt: Date.parse("2026-07-18T09:00:00.000Z")
+    }
   ]);
 });
 

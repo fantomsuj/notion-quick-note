@@ -4,9 +4,11 @@ import {
   findManagedQuickNotesDatabase,
   loadRemoteNote,
   migrateManagedQuickNotesDatabase,
+  normalizeNotionId,
   notionBlocksFromDocument,
   NotionApiError,
   searchDestinations,
+  searchRecentPages,
   sendCapture,
   updateRemoteNote,
   validateDestinationHealth
@@ -149,9 +151,11 @@ async function handleMessage(message, sender) {
     case "LIST_CAPTURE_ACTIVITY":
       return { ok: true, ...(await captureActivity()) };
     case "LIST_RECENT_NOTES":
-      return { ok: true, notes: await recentNotes(message.query, message.limit) };
+      return { ok: true, ...(await listRecentItems(message.query, message.limit)) };
     case "LOAD_RECENT_NOTE":
       return loadRecentNote(message, sender);
+    case "LOAD_NOTION_PAGE":
+      return loadNotionPage(message, sender);
     case "CONVERT_EDIT_TO_NEW_DRAFT":
       return { ok: true, draft: await captureRepository.convertEditDraftToNew(requiredId(message.id)) };
     case "ACTIVATE_DRAFT":
@@ -175,7 +179,7 @@ async function handleMessage(message, sender) {
     case "EXPORT_CAPTURE_RECOVERY":
       return { ok: true, export: await exportCaptureRecovery(message.format) };
     case "OPEN_CAPTURE_RESULT":
-      return openCaptureResult(message.id);
+      return openCaptureResult(message.id, message.url);
     case "OPEN_ACTIVITY":
       return openActivity(sender.tab);
     case "OPEN_COMPOSER_FALLBACK":
@@ -547,6 +551,48 @@ async function captureActivity() {
   };
 }
 
+async function listRecentItems(query = "", limit = 5) {
+  const needle = String(query || "").trim();
+  const searching = Boolean(needle);
+  const localLimit = Math.max(1, Math.min(Number(limit) || 5, searching ? 100 : 5));
+  const draftLimit = searching ? 20 : 5;
+  const notionLimit = searching ? 10 : 5;
+  const [drafts, notes] = await Promise.all([
+    recentDrafts(needle, draftLimit),
+    recentNotes(needle, localLimit)
+  ]);
+  const localPageIds = new Set(
+    notes
+      .map((note) => normalizeNotionId(note.remotePageId || ""))
+      .filter(Boolean)
+  );
+  let notionPages = [];
+  let notionError = "";
+  try {
+    notionPages = await recentNotionPages(needle, notionLimit, localPageIds);
+  } catch (error) {
+    notionError = error?.message || "Notion recent pages are unavailable.";
+  }
+  return { drafts, notes, notionPages, notionError };
+}
+
+async function recentDrafts(query = "", limit = 5) {
+  const needle = String(query || "").trim().toLowerCase();
+  return (await captureRepository.listDrafts())
+    .filter((draft) => documentText(draft.doc).trim())
+    .filter((draft) => {
+      if (!needle) return true;
+      return [
+        draft.title,
+        documentText(draft.doc),
+        ...(draft.sources || []).flatMap((source) => [source.title, source.url])
+      ].join(" ").toLowerCase().includes(needle);
+    })
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
+    .slice(0, Math.max(1, Math.min(Number(limit) || 5, 20)))
+    .map(recentDraftSummary);
+}
+
 async function recentNotes(query = "", limit = 5) {
   const needle = String(query || "").trim().toLowerCase();
   return (await captureRepository.listCaptures({ statuses: [DELIVERY_STATES.delivered, DELIVERY_STATES.blockedConflict] }))
@@ -566,6 +612,56 @@ async function recentNotes(query = "", limit = 5) {
     .map(recentNoteSummary);
 }
 
+async function recentNotionPages(query = "", limit = 5, excludePageIds = new Set()) {
+  const settings = await getSettings();
+  if (!settings.token) return [];
+  let pages;
+  try {
+    pages = await searchRecentPages({ token: settings.token, query, limit: Math.max(limit + excludePageIds.size, limit) });
+  } catch (error) {
+    if (!(error instanceof NotionApiError) || error.status !== 401 || !settings.refreshToken) throw error;
+    const refreshed = await refreshStoredToken(settings);
+    pages = await searchRecentPages({ token: refreshed.token, query, limit: Math.max(limit + excludePageIds.size, limit) });
+  }
+  return pages
+    .filter((page) => !excludePageIds.has(page.pageId))
+    .slice(0, Math.max(1, Math.min(Number(limit) || 5, 10)))
+    .map((page) => ({
+      id: page.pageId,
+      source: "notion",
+      pageId: page.pageId,
+      title: page.title || "Untitled page",
+      preview: "",
+      destinationName: "Notion",
+      status: "notion",
+      updatedAt: page.updatedAt || 0,
+      remoteUrl: page.url || "",
+      remotePageId: page.pageId,
+      editable: true,
+      icon: page.icon || "↳"
+    }));
+}
+
+function recentDraftSummary(draft) {
+  const explicitTitle = String(draft.title || "").trim();
+  const body = documentText(draft.doc).trim();
+  const lines = body.split("\n").map((line) => line.trim()).filter(Boolean);
+  const preview = (explicitTitle ? body : lines.slice(1).join(" ")).replace(/\s+/g, " ").trim();
+  return {
+    id: draft.id,
+    source: "draft",
+    title: explicitTitle || lines[0] || "Untitled draft",
+    preview: truncateCharacters(preview, 180),
+    sources: normalizeSources(draft.sources || []),
+    destinationName: draft.mode === "edit" ? "Editing in Quick Note" : "Local draft",
+    status: "draft",
+    mode: draft.mode === "edit" ? "edit" : "new",
+    updatedAt: draft.updatedAt,
+    remoteUrl: draft.remote?.url || "",
+    editable: true
+  };
+}
+
 function recentNoteSummary(record) {
   const capture = record.pendingCapture || record.syncedCapture || record.capture || {};
   const explicitTitle = String(capture.document?.title || "").trim();
@@ -574,6 +670,7 @@ function recentNoteSummary(record) {
   const preview = (explicitTitle ? body : lines.slice(1).join(" ")).replace(/\s+/g, " ").trim();
   return {
     id: record.id,
+    source: record.importedFromNotion ? "notion-local" : "note",
     title: explicitTitle || lines[0] || "Untitled note",
     preview: truncateCharacters(preview, 180),
     sources: normalizeSources(capture.sources || []),
@@ -581,6 +678,7 @@ function recentNoteSummary(record) {
     status: record.status,
     updatedAt: record.updatedAt,
     remoteUrl: record.remote?.url || record.destination?.destinationUrl || "",
+    remotePageId: normalizeNotionId(record.remote?.pageId || record.remote?.id || ""),
     editable: Boolean(record.remote?.kind === "page" || record.remote?.kind === "section")
   };
 }
@@ -589,6 +687,47 @@ async function loadRecentNote(message, sender) {
   const id = requiredId(message.id);
   const record = await captureRepository.getCapture(id);
   if (!record) throw new Error("That recent note is no longer stored locally.");
+  return hydrateEditDraftFromRecord(record, message, sender);
+}
+
+async function loadNotionPage(message, sender) {
+  const pageId = normalizeNotionId(requiredId(message.pageId || message.id));
+  if (!pageId) throw new Error("A Notion page ID is required.");
+  const connection = await currentConnection();
+  if (!connection.token) throw new Error("Reconnect Notion before opening a Notion page.");
+  const existing = await captureRepository.findCaptureByRemotePageId(pageId);
+  if (existing && (existing.status === DELIVERY_STATES.delivered || existing.status === DELIVERY_STATES.blockedConflict)) {
+    return hydrateEditDraftFromRecord(existing, { ...message, id: existing.id }, sender);
+  }
+
+  const placeholder = await captureRepository.ensureImportedRemoteCapture({
+    pageId,
+    title: String(message.title || "").trim(),
+    url: String(message.url || "").trim(),
+    connectionId: connection.connectionId || "",
+    destination: {
+      destinationId: pageId,
+      destinationName: String(message.title || "").trim() || "Notion page",
+      destinationUrl: String(message.url || "").trim(),
+      destinationType: "page",
+      titleProperty: "title",
+      managedDestination: false
+    },
+    remote: {
+      kind: "page",
+      id: pageId,
+      pageId,
+      url: String(message.url || "").trim(),
+      blockIds: [],
+      fingerprint: ""
+    }
+  });
+
+  return hydrateEditDraftFromRecord(placeholder, { ...message, id: placeholder.id, reloadLatest: true }, sender);
+}
+
+async function hydrateEditDraftFromRecord(record, message, sender) {
+  const id = record.id;
   const activeDraft = await captureRepository.getActiveDraft();
   const returnDraftId = activeDraft?.mode === "edit" && activeDraft.targetRecordId === id
     ? activeDraft.returnDraftId || ""
@@ -605,14 +744,40 @@ async function loadRecentNote(message, sender) {
     };
   } else {
     const connection = await currentConnection();
-    if (!connection.configured) throw new Error("Reconnect Notion before editing a recent note.");
-    if (record.connectionId && record.connectionId !== connection.connectionId) throw new Error("Reconnect the Notion workspace that owns this note.");
+    if (!connection.token) throw new Error("Reconnect Notion before editing a recent note.");
+    if (record.connectionId && record.connectionId !== connection.connectionId) {
+      throw new Error("Reconnect the Notion workspace that owns this note.");
+    }
     try {
       loaded = await loadRemoteNote({ token: connection.token, record });
     } catch (error) {
       if (!isUnauthorized(error) || !connection.refreshToken) throw error;
       const refreshed = await refreshStoredToken(connection.settings);
       loaded = await loadRemoteNote({ token: refreshed.token, record });
+    }
+    if (!record.remote?.fingerprint || message.reloadLatest) {
+      await captureRepository.updateCapture(id, {
+        remote: loaded.remote,
+        syncedCapture: {
+          ...(record.syncedCapture || record.capture || {}),
+          document: {
+            version: 1,
+            title: loaded.title,
+            doc: loaded.doc
+          },
+          sources: loaded.sources,
+          includeSource: loaded.sources.length > 0
+        },
+        destination: record.destination || {
+          destinationId: loaded.remote.pageId,
+          destinationName: loaded.title || "Notion page",
+          destinationUrl: loaded.remote.url || "",
+          destinationType: "page",
+          titleProperty: "title",
+          managedDestination: false
+        },
+        baseFingerprint: loaded.baseFingerprint
+      });
     }
   }
   const sessionId = String(message.sessionId || crypto.randomUUID());
@@ -699,7 +864,15 @@ async function exportCaptureRecovery(format) {
   });
 }
 
-async function openCaptureResult(id) {
+async function openCaptureResult(id, explicitUrl = "") {
+  const directUrl = String(explicitUrl || "").trim();
+  if (directUrl) {
+    if (!/^https:\/\/([\w-]+\.)*notion\.(so|site)\//i.test(directUrl)) {
+      throw new Error("Only Notion links can be opened from Recent.");
+    }
+    await chrome.tabs.create({ url: directUrl });
+    return { ok: true };
+  }
   const record = await captureRepository.getCapture(requiredId(id));
   const url = record?.remote?.url || record?.destination?.destinationUrl;
   if (!url || !/^https:\/\//.test(url)) throw new Error("No Notion link is available for this capture.");
