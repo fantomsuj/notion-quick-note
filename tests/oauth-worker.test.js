@@ -8,7 +8,8 @@ const env = {
   ALLOWED_EXTENSION_IDS: "abcdefghijklmnopabcdefghijklmnop",
   ALLOWED_ORIGINS: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
   OAUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  UUID: () => "generated-request-id"
+  UUID: () => "generated-request-id",
+  LOG: () => {}
 };
 
 test("health fails closed until credentials and matching production allowlists exist", async () => {
@@ -180,6 +181,40 @@ test("aborts a Notion request at the upstream deadline", async () => {
     error: "Notion OAuth request timed out",
     code: "upstream_timeout"
   });
+});
+
+test("logs one secret-free completion event with correlation metadata", async () => {
+  const logs = [];
+  const times = [1_000, 1_037];
+  const response = await worker.fetch(request("/refresh", {
+    refresh_token: "client-refresh-secret"
+  }), {
+    ...env,
+    NOW: () => times.shift(),
+    LOG: (entry) => logs.push(entry),
+    FETCH: async () => new Response(JSON.stringify({
+      access_token: "notion-access-secret",
+      refresh_token: "notion-refresh-secret"
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    })
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(logs, [{
+    event: "oauth_request_completed",
+    requestId: "generated-request-id",
+    method: "POST",
+    path: "/refresh",
+    status: 200,
+    outcome: "success",
+    durationMs: 37
+  }]);
+  const serialized = JSON.stringify(logs);
+  for (const secret of ["client-refresh-secret", "notion-access-secret", "notion-refresh-secret"]) {
+    assert.equal(serialized.includes(secret), false);
+  }
 });
 
 test("rejects an exchange redirect from an unknown extension", async () => {

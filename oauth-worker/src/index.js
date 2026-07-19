@@ -8,48 +8,79 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const requestId = requestIdFor(request, env);
-    const cors = { ...corsHeaders(request, env), "X-Request-ID": requestId };
-
-    if (request.method === "OPTIONS") {
-      return isAllowedOrigin(request, env)
-        ? new Response(null, { status: 204, headers: cors })
-        : json({ error: "Origin is not allowlisted" }, 403, cors);
-    }
-    if (url.pathname === "/health") {
-      try {
-        validateEnvironment(env);
-        return json({ ok: true }, 200, cors);
-      } catch (error) {
-        return json({ ok: false, error: error.message }, error.status || 503, cors);
-      }
-    }
-    if (request.method !== "POST" || !["/exchange", "/refresh", "/revoke"].includes(url.pathname)) {
-      return json({ error: "Not found" }, 404, cors);
-    }
-    if (!isAllowedOrigin(request, env)) return json({ error: "Origin is not allowlisted" }, 403, cors);
-
-    try {
-      validateEnvironment(env);
-      const allowed = await rateLimitRequest(request, url.pathname, env);
-      if (!allowed) {
-        return json(
-          { error: "Too many requests", code: "rate_limited" },
-          429,
-          { ...cors, "Retry-After": "60" }
-        );
-      }
-      const body = await readJsonBody(request);
-      const notionResponse = await forwardOauthRequest(url.pathname, body, env);
-      const payload = await readUpstreamJson(notionResponse);
-      return json(payload, notionResponse.status, cors);
-    } catch (error) {
-      return json({
-        error: error.message || "OAuth exchange failed",
-        ...(error.code ? { code: error.code } : {})
-      }, error.status || 500, cors);
-    }
+    const now = env.NOW || Date.now;
+    const startedAt = now();
+    const response = await handleRequest(request, env, url, requestId);
+    emitCompletion(env, {
+      event: "oauth_request_completed",
+      requestId,
+      method: request.method,
+      path: url.pathname,
+      status: response.status,
+      outcome: outcomeFor(response.status),
+      durationMs: Math.max(0, now() - startedAt)
+    });
+    return response;
   }
 };
+
+async function handleRequest(request, env, url, requestId) {
+  const cors = { ...corsHeaders(request, env), "X-Request-ID": requestId };
+
+  if (request.method === "OPTIONS") {
+    return isAllowedOrigin(request, env)
+      ? new Response(null, { status: 204, headers: cors })
+      : json({ error: "Origin is not allowlisted" }, 403, cors);
+  }
+  if (url.pathname === "/health") {
+    try {
+      validateEnvironment(env);
+      return json({ ok: true }, 200, cors);
+    } catch (error) {
+      return json({ ok: false, error: error.message }, error.status || 503, cors);
+    }
+  }
+  if (request.method !== "POST" || !["/exchange", "/refresh", "/revoke"].includes(url.pathname)) {
+    return json({ error: "Not found" }, 404, cors);
+  }
+  if (!isAllowedOrigin(request, env)) return json({ error: "Origin is not allowlisted" }, 403, cors);
+
+  try {
+    validateEnvironment(env);
+    const allowed = await rateLimitRequest(request, url.pathname, env);
+    if (!allowed) {
+      return json(
+        { error: "Too many requests", code: "rate_limited" },
+        429,
+        { ...cors, "Retry-After": "60" }
+      );
+    }
+    const body = await readJsonBody(request);
+    const notionResponse = await forwardOauthRequest(url.pathname, body, env);
+    const payload = await readUpstreamJson(notionResponse);
+    return json(payload, notionResponse.status, cors);
+  } catch (error) {
+    return json({
+      error: error.message || "OAuth exchange failed",
+      ...(error.code ? { code: error.code } : {})
+    }, error.status || 500, cors);
+  }
+}
+
+function emitCompletion(env, entry) {
+  if (env.LOG) {
+    env.LOG(entry);
+    return;
+  }
+  console.info(JSON.stringify(entry));
+}
+
+function outcomeFor(status) {
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "server_error";
+  if (status >= 400) return "client_error";
+  return "success";
+}
 
 async function forwardOauthRequest(path, body, env) {
   const fetchImpl = env.FETCH || fetch;
@@ -163,8 +194,9 @@ function corsHeaders(request, env) {
   const allowedOrigins = commaSeparated(env.ALLOWED_ORIGINS);
   return {
     ...(allowedOrigins.includes(origin) ? { "Access-Control-Allow-Origin": origin } : {}),
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-Request-ID",
     "Access-Control-Allow-Methods": "POST,OPTIONS",
+    "Access-Control-Expose-Headers": "Retry-After, X-Request-ID",
     Vary: "Origin"
   };
 }
