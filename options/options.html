@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Notion Quick Note Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <nav>
+        <div class="brand"><span class="mark">N</span><span>Quick Note</span></div>
+        <span class="version">v0.1</span>
+      </nav>
+
+      <section class="hero">
+        <p class="eyebrow">SETUP</p>
+        <h1>Your thoughts, one gesture away.</h1>
+        <p>Choose how Quick Note connects to Notion and where every capture should land.</p>
+      </section>
+
+      <section class="card">
+        <div class="card-heading">
+          <span class="step">1</span>
+          <div><h2>Connect Notion</h2><p>Your credential stays in Chrome's extension storage.</p></div>
+          <span id="connection-state" class="state">Not connected</span>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-auth="token">Personal token <span>Fastest</span></button>
+          <button class="tab" data-auth="oauth">Notion OAuth <span>Production</span></button>
+        </div>
+
+        <div id="token-panel" class="panel">
+          <label>
+            <span>Personal access token</span>
+            <div class="secret-wrap">
+              <input id="token" type="password" autocomplete="off" placeholder="ntn_••••••••••••••••">
+              <button id="reveal-token" class="text-button" type="button">Show</button>
+            </div>
+          </label>
+          <p class="help">Create a token in Notion's developer portal. This is ideal for testing your own extension. Don't publish a token inside the extension package.</p>
+        </div>
+
+        <div id="oauth-panel" class="panel" hidden>
+          <div class="two-up">
+            <label><span>Public connection client ID</span><input id="oauth-client-id" placeholder="Your public client ID"></label>
+            <label><span>OAuth broker URL</span><input id="oauth-broker-url" type="url" placeholder="https://your-worker.workers.dev"></label>
+          </div>
+          <p class="help">The broker safely holds your Notion client secret. Deploy the included Cloudflare Worker, then paste its URL here.</p>
+          <button id="oauth-connect" class="secondary" type="button">Connect with Notion</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-heading">
+          <span class="step">2</span>
+          <div><h2>Choose a destination</h2><p>Append to one running page or create an entry for every note.</p></div>
+        </div>
+
+        <div class="destination-options">
+          <label class="choice selected">
+            <input type="radio" name="destination-type" value="page" checked>
+            <span class="choice-icon">↳</span>
+            <span><b>Append to a page</b><small>A simple running inbox, closest to Apple Notes.</small></span>
+          </label>
+          <label class="choice">
+            <input type="radio" name="destination-type" value="database">
+            <span class="choice-icon">▦</span>
+            <span><b>Create database notes</b><small>One searchable Notion item per capture.</small></span>
+          </label>
+        </div>
+
+        <div class="two-up destination-fields">
+          <label><span id="destination-id-label">Notion page URL or ID</span><input id="destination-id" placeholder="Paste a Notion page URL or ID"></label>
+          <label><span>Display name</span><input id="destination-name" placeholder="Notion Inbox" value="Notion Inbox"></label>
+        </div>
+        <label id="title-property-wrap" hidden><span>Database title property</span><input id="title-property" value="Name"></label>
+        <label class="toggle-row">
+          <span><b>Attach the current webpage</b><small>Include the page title and URL with new captures.</small></span>
+          <input id="include-source" class="toggle" type="checkbox" checked>
+        </label>
+      </section>
+
+      <div class="save-row">
+        <span id="message" aria-live="polite"></span>
+        <button id="save" class="primary" type="button">Save settings</button>
+      </div>
+
+      <section class="try-it">
+        <div><p class="eyebrow">READY WHEN YOU ARE</p><h2>Press <kbd>⌃ ⇧ Space</kbd> on any webpage.</h2></div>
+        <p>On macOS, you can change the shortcut at <code>chrome://extensions/shortcuts</code>.</p>
+      </section>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

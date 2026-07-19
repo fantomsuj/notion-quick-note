@@ -1,0 +1,11 @@
+name = "notion-quick-note-oauth"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+[vars]
+ALLOWED_EXTENSION_IDS = "your_chrome_extension_id"
+ALLOWED_ORIGINS = "chrome-extension://your_chrome_extension_id"
+
+# Set secrets separately:
+# npx wrangler secret put NOTION_CLIENT_ID
+# npx wrangler secret put NOTION_CLIENT_SECRET

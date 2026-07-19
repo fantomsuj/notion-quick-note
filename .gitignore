@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+oauth-worker/.dev.vars
+oauth-worker/wrangler.toml
+*.zip
