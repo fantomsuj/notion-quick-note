@@ -7,8 +7,14 @@ Use the generated ZIP only. Do not zip or upload the repository: the working tre
 1. Create the Chrome Web Store item to obtain its stable extension ID.
 2. Create a Notion public connection with the required read, insert, and update content capabilities and the intended installation scope.
 3. Register `https://EXTENSION_ID.chromiumapp.org/notion` as the exact Notion OAuth redirect URI.
-4. Deploy `oauth-worker/` over HTTPS. Set `ALLOWED_EXTENSION_IDS` to the production extension ID and `ALLOWED_ORIGINS` to `chrome-extension://EXTENSION_ID`. Store `NOTION_CLIENT_ID` and `NOTION_CLIENT_SECRET` as deployment secrets, never in Git or the extension.
-5. Exercise exchange, refresh-token rotation, revocation, rejected origins, and the exact redirect against the deployed broker. Confirm production logging does not retain authorization codes or tokens.
+4. Copy `oauth-worker/wrangler.toml.example` to the ignored `oauth-worker/wrangler.toml`. Set `ALLOWED_EXTENSION_IDS` to the production extension ID and `ALLOWED_ORIGINS` to `chrome-extension://EXTENSION_ID`. Assign `OAUTH_RATE_LIMITER` a positive integer namespace ID unused by other bindings in the Cloudflare account; the checked-in policy allows 30 calls per 60 seconds for each client address and OAuth route.
+5. Store `NOTION_CLIENT_ID` and `NOTION_CLIENT_SECRET` as deployment secrets, never in Git or the extension, then deploy `oauth-worker/` over HTTPS.
+6. Verify `GET /health` returns `200` and an `X-Request-ID`. A `503` means credentials, allowlists, or the rate-limit binding are missing or inconsistent; do not release while health is degraded.
+7. Exercise exchange, refresh-token rotation, revocation, rejected origins, the exact redirect, an upstream failure, and an upstream timeout against the deployed broker. Confirm every response has a request ID and OAuth success/error payloads still reach the extension.
+8. Generate a controlled same-client burst against a non-forwarding invalid request such as `{}` on `/refresh` and confirm the broker eventually returns `429`, `Retry-After: 60`, and `code: rate_limited`. Cloudflare's native counters are edge-local and eventually consistent, so this is an abuse guard rather than exact accounting.
+9. Find a request by its ID in Workers logs. Confirm the completion event contains only method, route, status, outcome, duration, and request ID; search explicitly for test authorization codes and tokens and confirm none were retained.
+
+If production verification fails after deployment, roll back to the previous Cloudflare Worker version. This broker change has no persistent schema or migration, so rollback does not require data repair. Preserve the failed deployment ID and request IDs for diagnosis.
 
 ## 2. Configure and verify the release
 
