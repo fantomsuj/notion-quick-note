@@ -58,7 +58,7 @@ test("start creates an alarm-backed ten-minute transaction for an exact redirect
   const { state } = await response.json();
   assert.match(state, /^[A-Za-z0-9_-]{43}$/);
   const storage = env.OAUTH_SESSIONS.storage(`transaction:${state}`);
-  const stored = await storage.get("record");
+  const stored = transactionRecord(await storage.get("record"));
   assert.equal(stored.type, "transaction");
   assert.equal(stored.redirect_uri, REDIRECT_URI);
   assert.deepEqual(stored.public_key, { ...keys.publicJwk, ext: true, key_ops: ["verify"] });
@@ -107,7 +107,7 @@ test("exchange atomically consumes state and stores only an encrypted refresh to
   });
 
   const connectionStorage = env.OAUTH_SESSIONS.storage(`connection:${payload.connection_handle}`);
-  const record = await connectionStorage.get("record");
+  const record = connectionRecord(await connectionStorage.get("record"));
   assert.equal(record.type, "connection");
   assert.equal(record.bot_id, "bot-id");
   assert.equal(record.workspace_id, "workspace-id");
@@ -189,7 +189,7 @@ test("refresh verifies proof, rotates custody, rejects replay, and renews the in
     workspace_id: "workspace-id"
   });
   assert.deepEqual(requiredItem(calls, 1).body, { grant_type: "refresh_token", refresh_token: "refresh-one" });
-  const record = await storage.get("record");
+  const record = connectionRecord(await storage.get("record"));
   assert.equal(JSON.stringify(record).includes("refresh-two"), false);
   assert.equal(record.nonces[proof.nonce] > Date.now(), true);
   assert.ok(storage.alarm >= oldAlarm);
@@ -252,20 +252,20 @@ test("a stale operation lease recovers while a Notion timeout releases its live 
   const keys = await makeSigningKeys();
   const handle = await connect(env, keys.publicJwk);
   const storage = env.OAUTH_SESSIONS.storage(`connection:${handle}`);
-  const crashed = await storage.get("record");
+  const crashed = connectionRecord(await storage.get("record"));
   crashed.operation_id = "crashed-operation";
   crashed.operation_expires_at = Date.now() - 1;
   await storage.put("record", crashed);
 
   const recovered = await worker.fetch(request("/refresh", await makeProof(keys.privateKey, "/refresh", handle)), env);
   assert.equal(recovered.status, 200);
-  assert.equal((await storage.get("record")).operation_id, null);
+  assert.equal(connectionRecord(await storage.get("record")).operation_id, null);
 
   timeOutRefresh = true;
   const timedOut = await worker.fetch(request("/refresh", await makeProof(keys.privateKey, "/refresh", handle)), env);
   assert.equal(timedOut.status, 504);
   assert.match((await timedOut.json()).error, /timed out/);
-  assert.equal((await storage.get("record")).operation_id, null);
+  assert.equal(connectionRecord(await storage.get("record")).operation_id, null);
 });
 
 test("refresh rejects expired and forged proofs without forwarding", async () => {
@@ -390,40 +390,40 @@ test("allows preflight only for the configured extension origin and rejects malf
   assert.equal((await worker.fetch(request("/refresh", { signature: "x".repeat(17 * 1024) }), env)).status, 413);
 });
 
-class MemoryStorage {
-  entries = new Map();
-  alarm = null;
-  queue = Promise.resolve();
+class MemoryStorage implements OAuthSessionState["storage"] {
+  entries = new Map<string, OAuthStoredRecord>();
+  alarm: number | null = null;
+  queue: Promise<void> = Promise.resolve();
 
-  async get(key) {
+  async get(key: "record"): Promise<OAuthStoredRecord | undefined> {
     const value = this.entries.get(key);
     return value === undefined ? undefined : structuredClone(value);
   }
 
-  async put(key, value) {
+  async put(key: "record", value: OAuthStoredRecord): Promise<void> {
     this.entries.set(key, structuredClone(value));
   }
 
-  async delete(key) {
-    this.entries.delete(key);
+  async delete(key: string): Promise<boolean> {
+    return this.entries.delete(key);
   }
 
-  async deleteAll() {
+  async deleteAll(): Promise<void> {
     this.entries.clear();
   }
 
-  async setAlarm(timestamp) {
+  async setAlarm(timestamp: number): Promise<void> {
     this.alarm = timestamp;
   }
 
-  async deleteAlarm() {
+  async deleteAlarm(): Promise<void> {
     this.alarm = null;
   }
 
-  async transaction(callback) {
-    let release;
+  async transaction<T>(callback: (storage: MemoryStorage) => Promise<T>): Promise<T> {
+    let release: (() => void) | undefined;
     const previous = this.queue;
-    this.queue = new Promise((resolve) => { release = resolve; });
+    this.queue = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     const snapshot = structuredClone(this.entries);
     try {
@@ -432,80 +432,96 @@ class MemoryStorage {
       this.entries = snapshot;
       throw error;
     } finally {
+      assert.ok(release);
       release();
     }
   }
 }
 
-class MemoryDurableObjectNamespace {
-  instances = new Map();
+interface MemoryInstance {
+  storage: MemoryStorage;
+  object: OAuthSession;
+}
 
-  constructor(env) {
-    this.env = env;
-  }
+class MemoryDurableObjectNamespace implements OAuthSessionNamespace {
+  instances = new Map<string, MemoryInstance>();
 
-  idFromName(name) {
+  constructor(private readonly loadEnv: () => ConfiguredOAuthWorkerEnv) {}
+
+  idFromName(name: string): OAuthSessionId {
     return name;
   }
 
-  get(id) {
-    return { fetch: (url, options) => this.instance(id).object.fetch(new Request(url, options)) };
+  get(id: OAuthSessionId): { fetch(request: Request): Promise<Response> } {
+    return { fetch: (request) => this.instance(String(id)).object.fetch(request) };
   }
 
-  storage(name) {
+  storage(name: string): MemoryStorage {
     return this.instance(name).storage;
   }
 
-  alarm(name) {
+  alarm(name: string): Promise<void> {
     return this.instance(name).object.alarm();
   }
 
-  instance(name) {
+  instance(name: string): MemoryInstance {
     if (!this.instances.has(name)) {
       const storage = new MemoryStorage();
       const state = { storage };
-      this.instances.set(name, { storage, object: new OAuthSession(state, this.env) });
+      this.instances.set(name, { storage, object: new OAuthSession(state, this.loadEnv()) });
     }
-    return this.instances.get(name);
+    const instance = this.instances.get(name);
+    assert.ok(instance);
+    return instance;
   }
 }
 
-class MemoryRateLimiter {
-  keys = [];
+type RateLimitPredicate = (options: { key: string }) => boolean;
 
-  constructor(predicate = () => true) {
+class MemoryRateLimiter implements OAuthRateLimiter {
+  keys: string[] = [];
+  predicate: RateLimitPredicate;
+
+  constructor(predicate: RateLimitPredicate = () => true) {
     this.predicate = predicate;
   }
 
-  async limit(options) {
+  async limit(options: { key: string }): Promise<{ success: boolean }> {
     this.keys.push(options.key);
     return { success: this.predicate(options) };
   }
 }
 
-function makeEnv(fetchImpl = async () => {
+interface TestEnv extends ConfiguredOAuthWorkerEnv {
+  OAUTH_SESSIONS: MemoryDurableObjectNamespace;
+  OAUTH_RATE_LIMITER: MemoryRateLimiter;
+}
+
+function makeEnv(fetchImpl: WorkerFetch = async () => {
   throw new Error("Unexpected Notion request");
-}, rateLimiter = new MemoryRateLimiter()) {
-  const env = {
+}, rateLimiter = new MemoryRateLimiter()): TestEnv {
+  let env: TestEnv;
+  const sessions = new MemoryDurableObjectNamespace(() => env);
+  env = {
     NOTION_CLIENT_ID: "client",
     NOTION_CLIENT_SECRET: "secret",
     ALLOWED_EXTENSION_IDS: EXTENSION_ID,
     ALLOWED_ORIGINS: ORIGIN,
     TOKEN_ENCRYPTION_KEY: encodeBase64Url(new Uint8Array(32).fill(7)),
+    OAUTH_SESSIONS: sessions,
     OAUTH_RATE_LIMITER: rateLimiter,
     FETCH: fetchImpl
   };
-  env.OAUTH_SESSIONS = new MemoryDurableObjectNamespace(env);
   return env;
 }
 
-async function start(env, publicKey) {
+async function start(env: TestEnv, publicKey: JsonWebKey): Promise<string> {
   const response = await worker.fetch(request("/start", { redirect_uri: REDIRECT_URI, public_key: publicKey }), env);
   assert.equal(response.status, 200);
   return (await response.json()).state;
 }
 
-async function connect(env, publicKey) {
+async function connect(env: TestEnv, publicKey: JsonWebKey): Promise<string> {
   const state = await start(env, publicKey);
   const response = await worker.fetch(request("/exchange", {
     code: "code", redirect_uri: REDIRECT_URI, state
@@ -514,7 +530,12 @@ async function connect(env, publicKey) {
   return (await response.json()).connection_handle;
 }
 
-async function makeProof(privateKey, path, connectionHandle, token = "") {
+async function makeProof(
+  privateKey: CryptoKey,
+  path: "/refresh" | "/revoke" | "/retire",
+  connectionHandle: string,
+  token = ""
+): Promise<{ connection_handle: string; timestamp: string; nonce: string; signature: string }> {
   const timestamp = String(Date.now());
   const nonce = randomNonce();
   return {
@@ -525,7 +546,7 @@ async function makeProof(privateKey, path, connectionHandle, token = "") {
   };
 }
 
-async function makeSigningKeys() {
+async function makeSigningKeys(): Promise<{ privateKey: CryptoKey; publicJwk: JsonWebKey }> {
   const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
   const publicJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
   delete publicJwk.alg;
@@ -534,7 +555,7 @@ async function makeSigningKeys() {
   return { privateKey: pair.privateKey, publicJwk };
 }
 
-async function sign(privateKey, canonical) {
+async function sign(privateKey: CryptoKey, canonical: string): Promise<string> {
   const signature = await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" },
     privateKey,
@@ -543,7 +564,7 @@ async function sign(privateKey, canonical) {
   return encodeBase64Url(new Uint8Array(signature));
 }
 
-function tokenPayload(accessToken, refreshToken) {
+function tokenPayload(accessToken: string, refreshToken: string): Record<string, unknown> {
   return {
     access_token: accessToken,
     refresh_token: refreshToken,
@@ -552,25 +573,52 @@ function tokenPayload(accessToken, refreshToken) {
   };
 }
 
-function notionResponse(payload, status = 200) {
+function notionResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function randomNonce() {
+function randomNonce(): string {
   return encodeBase64Url(crypto.getRandomValues(new Uint8Array(18)));
 }
 
-function encodeBase64Url(bytes) {
+function encodeBase64Url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
-function request(path, body, origin = ORIGIN, method = "POST") {
+function request(path: string, body: unknown, origin: string | undefined = ORIGIN, method = "POST"): Request {
   const resolvedOrigin = arguments.length < 3 ? ORIGIN : arguments[2];
-  const headers = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (resolvedOrigin !== undefined) headers.Origin = resolvedOrigin;
   return new Request(`https://broker.example${path}`, {
     method,
     headers,
     ...(body === null ? {} : { body: JSON.stringify(body) })
   });
+}
+
+function requestBody(init: RequestInit): Record<string, unknown> {
+  assert.equal(typeof init.body, "string");
+  const parsed: unknown = JSON.parse(init.body);
+  assert.ok(isRecord(parsed));
+  return parsed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requiredItem<T>(items: readonly T[], index: number): T {
+  const item = items[index];
+  assert.ok(item);
+  return item;
+}
+
+function transactionRecord(value: OAuthStoredRecord | undefined): OAuthTransactionRecord {
+  assert.ok(value && value.type === "transaction");
+  return value;
+}
+
+function connectionRecord(value: OAuthStoredRecord | undefined): OAuthConnectionRecord {
+  assert.ok(value && value.type === "connection");
+  return value;
 }
