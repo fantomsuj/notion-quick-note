@@ -8,6 +8,7 @@ import type {
   OAuthSessionId,
   OAuthSessionNamespace,
   OAuthSessionState,
+  OAuthStorage,
   OAuthStoredRecord,
   OAuthTransactionRecord,
   WorkerFetch
@@ -191,8 +192,9 @@ test("refresh verifies proof, rotates custody, rejects replay, and renews the in
   assert.deepEqual(requiredItem(calls, 1).body, { grant_type: "refresh_token", refresh_token: "refresh-one" });
   const record = connectionRecord(await storage.get("record"));
   assert.equal(JSON.stringify(record).includes("refresh-two"), false);
-  assert.equal(record.nonces[proof.nonce] > Date.now(), true);
-  assert.ok(storage.alarm >= oldAlarm);
+  const nonceExpiry = record.nonces[proof.nonce];
+  assert.ok(nonceExpiry && nonceExpiry > Date.now());
+  assert.ok(storage.alarm !== null && oldAlarm !== null && storage.alarm >= oldAlarm);
 
   const replay = await worker.fetch(request("/refresh", proof), env);
   assert.equal(replay.status, 409);
@@ -239,16 +241,17 @@ test("a stale operation lease recovers while a Notion timeout releases its live 
     if (timeOutRefresh) {
       return new Promise<Response>((_resolve, reject) => {
         const keepAlive = setTimeout(() => reject(new Error("timeout signal did not fire")), 100);
-        assert.ok(options.signal);
-        options.signal.addEventListener("abort", () => {
+        const signal = options.signal;
+        assert.ok(signal);
+        signal.addEventListener("abort", () => {
           clearTimeout(keepAlive);
-          reject(options.signal.reason);
+          reject(signal.reason);
         }, { once: true });
       });
     }
     return notionResponse(tokenPayload("access-two", "refresh-two"));
   });
-  env.NOTION_REQUEST_TIMEOUT_MS = 5;
+  env.NOTION_REQUEST_TIMEOUT_MS = "5";
   const keys = await makeSigningKeys();
   const handle = await connect(env, keys.publicJwk);
   const storage = env.OAUTH_SESSIONS.storage(`connection:${handle}`);
@@ -299,7 +302,7 @@ test("refresh rejects expired and forged proofs without forwarding", async () =>
 
 test("revoke deletes local custody even when Notion rejects revocation", async () => {
   const env = makeEnv(async (url, options) => {
-    if (url.endsWith("/token")) return notionResponse(tokenPayload("access", "refresh"));
+    if (String(url).endsWith("/token")) return notionResponse(tokenPayload("access", "refresh"));
     assert.deepEqual(requestBody(options), { token: "access" });
     return notionResponse({ code: "service_unavailable" }, 503);
   });
@@ -336,7 +339,7 @@ test("rate limiting fails with 429 and uses stable device/connection keys rather
   const env = makeEnv(undefined, limiter);
   const denied = await worker.fetch(request("/start", { redirect_uri: REDIRECT_URI, public_key: keys.publicJwk }), env);
   assert.equal(denied.status, 429);
-  assert.match(limiter.keys[0], /^device:[A-Za-z0-9_-]{43}$/);
+  assert.match(requiredItem(limiter.keys, 0), /^device:[A-Za-z0-9_-]{43}$/);
 
   const allowedEnv = makeEnv(async () => notionResponse(tokenPayload("access", "refresh")));
   const handle = await connect(allowedEnv, keys.publicJwk);
@@ -390,7 +393,7 @@ test("allows preflight only for the configured extension origin and rejects malf
   assert.equal((await worker.fetch(request("/refresh", { signature: "x".repeat(17 * 1024) }), env)).status, 413);
 });
 
-class MemoryStorage implements OAuthSessionState["storage"] {
+class MemoryStorage implements OAuthStorage {
   entries = new Map<string, OAuthStoredRecord>();
   alarm: number | null = null;
   queue: Promise<void> = Promise.resolve();
@@ -597,8 +600,9 @@ function request(path: string, body: unknown, origin: string | undefined = ORIGI
 }
 
 function requestBody(init: RequestInit): Record<string, unknown> {
-  assert.equal(typeof init.body, "string");
-  const parsed: unknown = JSON.parse(init.body);
+  const body = init.body;
+  if (typeof body !== "string") assert.fail("Expected a JSON request body.");
+  const parsed: unknown = JSON.parse(body);
   assert.ok(isRecord(parsed));
   return parsed;
 }

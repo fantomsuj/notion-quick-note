@@ -411,8 +411,9 @@ function response(status: number, payload: unknown): Response {
 }
 
 function requestBody(init?: RequestInit): Record<string, unknown> {
-  assert.equal(typeof init?.body, "string");
-  const parsed: unknown = JSON.parse(init.body);
+  const body = init?.body;
+  if (typeof body !== "string") assert.fail("Expected a JSON request body.");
+  const parsed: unknown = JSON.parse(body);
   assert.ok(isRecord(parsed));
   return parsed;
 }
@@ -426,7 +427,7 @@ function requiredItem<T>(items: readonly T[], index: number): T {
 function requiredField(value: Record<string, unknown>, field: string): string {
   const fieldValue = value[field];
   assert.equal(typeof fieldValue, "string");
-  return fieldValue;
+  return String(fieldValue);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
