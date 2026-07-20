@@ -63,9 +63,8 @@ async function handleRequest(request, env, url, requestId) {
       );
     }
     const body = await readJsonBody(request);
-    const notionResponse = await forwardOauthRequest(url.pathname, body, env);
-    const payload = await readUpstreamJson(notionResponse);
-    return json(payload, notionResponse.status, cors);
+    const { status, payload } = await forwardOauthRequest(url.pathname, body, env);
+    return json(payload, status, cors);
   } catch (error) {
     return json({
       error: error.message || "OAuth exchange failed",
@@ -128,16 +127,19 @@ async function forwardOauthRequest(path, body, env) {
     : UPSTREAM_TIMEOUT_MS;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(url, {
+    const response = await fetchImpl(url, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
       signal: controller.signal
     });
+    const responsePayload = await readUpstreamJson(response);
+    return { status: response.status, payload: responsePayload };
   } catch (error) {
     if (controller.signal.aborted || error?.name === "AbortError") {
       throw httpError("Notion OAuth request timed out", 504, "upstream_timeout");
     }
+    if (error?.status) throw error;
     throw httpError("Notion OAuth is temporarily unavailable", 502, "upstream_unavailable");
   } finally {
     clearTimeout(timeout);
@@ -252,13 +254,16 @@ async function readJsonBody(request) {
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
     throw httpError("Content-Type must be application/json", 415, "unsupported_media_type");
   }
-  const declaredLength = Number(request.headers.get("Content-Length") || 0);
-  if (declaredLength > MAX_REQUEST_BYTES) throw httpError("Request body is too large", 413);
-
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_REQUEST_BYTES) {
-    throw httpError("Request body is too large", 413);
+  const contentLength = request.headers.get("Content-Length");
+  if (contentLength !== null) {
+    const validLength = /^\d+$/.test(contentLength);
+    const declaredLength = Number(contentLength);
+    if (!validLength || !Number.isSafeInteger(declaredLength) || declaredLength > MAX_REQUEST_BYTES) {
+      throw httpError("Request body is too large or invalid", 413);
+    }
   }
+
+  const text = await readBoundedText(request);
   let body;
   try {
     body = JSON.parse(text);
@@ -269,6 +274,24 @@ async function readJsonBody(request) {
     throw httpError("Request body must be a JSON object", 400, "invalid_request");
   }
   return body;
+}
+
+async function readBoundedText(request) {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    bytesRead += value.byteLength;
+    if (bytesRead > MAX_REQUEST_BYTES) {
+      await reader.cancel();
+      throw httpError("Request body is too large", 413);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
 }
 
 function httpError(message, status, code = "") {

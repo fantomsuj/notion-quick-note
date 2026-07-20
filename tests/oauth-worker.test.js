@@ -222,6 +222,34 @@ test("aborts a Notion request at the upstream deadline", async () => {
   });
 });
 
+test("keeps the upstream deadline active while reading the response body", async () => {
+  const response = await worker.fetch(request("/refresh", { refresh_token: "refresh" }), {
+    ...env,
+    UPSTREAM_TIMEOUT_MS: 5,
+    FETCH: async (_url, options) => new Response(new ReadableStream({
+      start(controller) {
+        const finish = setTimeout(() => {
+          controller.enqueue(new TextEncoder().encode('{"ok":true}'));
+          controller.close();
+        }, 25);
+        options.signal.addEventListener("abort", () => {
+          clearTimeout(finish);
+          controller.error(new DOMException("aborted", "AbortError"));
+        });
+      }
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    })
+  });
+
+  assert.equal(response.status, 504);
+  assert.deepEqual(await response.json(), {
+    error: "Notion OAuth request timed out",
+    code: "upstream_timeout"
+  });
+});
+
 test("logs one secret-free completion event with correlation metadata", async () => {
   const logs = [];
   const times = [1_000, 1_037];
@@ -343,6 +371,33 @@ test("rejects malformed and oversized request bodies", async () => {
 
   const oversized = request("/refresh", { refresh_token: "x".repeat(17 * 1024) });
   assert.equal((await worker.fetch(oversized, env)).status, 413);
+});
+
+test("bounds chunked request bodies while streaming", async () => {
+  let pulls = 0;
+  let cancelled = false;
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      if (pulls > 6) throw new Error("worker read beyond the configured limit");
+      controller.enqueue(new Uint8Array(4 * 1024));
+    },
+    cancel() {
+      cancelled = true;
+    }
+  });
+  const chunked = new Request("https://broker.example/refresh", {
+    method: "POST",
+    headers: { Origin: env.ALLOWED_ORIGINS, "Content-Type": "application/json" },
+    body,
+    duplex: "half"
+  });
+
+  const response = await worker.fetch(chunked, env);
+
+  assert.equal(response.status, 413);
+  assert.equal(cancelled, true);
+  assert.ok(pulls <= 6);
 });
 
 function request(path, body, origin = env.ALLOWED_ORIGINS, method = "POST") {
