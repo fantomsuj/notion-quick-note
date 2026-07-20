@@ -26,7 +26,7 @@ interface BrokerConfig {
   brokerUrl: string;
 }
 
-interface ExchangePayload {
+interface ExchangePayload extends Record<string, unknown> {
   access_token: string;
   connection_handle: string;
   bot_id: string;
@@ -36,7 +36,17 @@ interface ExchangePayload {
   refresh_token?: never;
 }
 
-interface RefreshPayload {
+interface ValidatedExchangePayload extends Record<string, unknown> {
+  access_token: string;
+  connection_handle: string;
+  bot_id: string;
+  workspace_id: string;
+  workspace_name?: string;
+  workspace_icon?: string;
+  refresh_token?: unknown;
+}
+
+interface RefreshPayload extends Record<string, unknown> {
   access_token: string;
   bot_id?: string;
   workspace_id?: string;
@@ -326,34 +336,30 @@ function base64UrlEncode(bytes: Uint8Array): string {
 }
 
 function validateExchangePayload(payload: Record<string, unknown>): ExchangePayload {
-  const accessToken = requirePayloadString(payload, "access_token", INVALID_TOKEN_RESPONSE);
-  const connectionHandle = requirePayloadString(payload, "connection_handle", INVALID_TOKEN_RESPONSE);
-  const botId = requirePayloadString(payload, "bot_id", INVALID_TOKEN_RESPONSE);
-  const workspaceId = requirePayloadString(payload, "workspace_id", INVALID_TOKEN_RESPONSE);
-  validateOptionalString(payload, "workspace_name", INVALID_TOKEN_RESPONSE);
-  validateOptionalString(payload, "workspace_icon", INVALID_TOKEN_RESPONSE);
-  return {
-    access_token: accessToken,
-    connection_handle: connectionHandle,
-    bot_id: botId,
-    workspace_id: workspaceId,
-    ...(typeof payload.workspace_name === "string" ? { workspace_name: payload.workspace_name } : {}),
-    ...(typeof payload.workspace_icon === "string" ? { workspace_icon: payload.workspace_icon } : {})
-  };
+  assertExchangePayload(payload);
+  const { refresh_token: _refreshToken, ...safePayload } = payload;
+  return safePayload;
 }
 
 function validateRefreshPayload(payload: Record<string, unknown>): RefreshPayload {
-  const accessToken = requirePayloadString(payload, "access_token", INVALID_TOKEN_RESPONSE);
+  assertRefreshPayload(payload);
+  return payload;
+}
+
+function assertExchangePayload(payload: Record<string, unknown>): asserts payload is ValidatedExchangePayload {
+  requirePayloadString(payload, "access_token", INVALID_TOKEN_RESPONSE);
+  requirePayloadString(payload, "connection_handle", INVALID_TOKEN_RESPONSE);
+  requirePayloadString(payload, "bot_id", INVALID_TOKEN_RESPONSE);
+  requirePayloadString(payload, "workspace_id", INVALID_TOKEN_RESPONSE);
+  validateOptionalString(payload, "workspace_name", INVALID_TOKEN_RESPONSE);
+  validateOptionalString(payload, "workspace_icon", INVALID_TOKEN_RESPONSE);
+}
+
+function assertRefreshPayload(payload: Record<string, unknown>): asserts payload is RefreshPayload {
+  requirePayloadString(payload, "access_token", INVALID_TOKEN_RESPONSE);
   for (const field of ["bot_id", "workspace_id", "workspace_name", "workspace_icon"]) {
     validateOptionalString(payload, field, INVALID_TOKEN_RESPONSE);
   }
-  return {
-    access_token: accessToken,
-    ...(typeof payload.bot_id === "string" ? { bot_id: payload.bot_id } : {}),
-    ...(typeof payload.workspace_id === "string" ? { workspace_id: payload.workspace_id } : {}),
-    ...(typeof payload.workspace_name === "string" ? { workspace_name: payload.workspace_name } : {}),
-    ...(typeof payload.workspace_icon === "string" ? { workspace_icon: payload.workspace_icon } : {})
-  };
 }
 
 function validatePublicKey(value: unknown): asserts value is JsonWebKey {
@@ -374,7 +380,7 @@ function requirePayloadString(payload: Record<string, unknown>, field: string, m
 }
 
 function validateOptionalString(payload: Record<string, unknown>, field: string, message: string): void {
-  if (field in payload && payload[field] !== undefined && typeof payload[field] !== "string") throw new Error(message);
+  if (field in payload && typeof payload[field] !== "string") throw new Error(message);
 }
 
 function requireString(value: unknown, message: string): void {

@@ -54,6 +54,8 @@ export async function buildExtension({
       entryPoints: [path.join(projectRoot, "src/content.ts")],
       outfile: path.join(outdir, "content.js"),
       format: "iife",
+      charset: "utf8",
+      drop: debug ? [] : ["console"],
       minify: !debug
     }, watch),
     runBuild({

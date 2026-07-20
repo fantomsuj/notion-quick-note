@@ -15,6 +15,7 @@ Make capturing a thought into Notion take one gesture, focus immediately, requir
 | Local testing auth | Personal access token | Lets one developer test immediately |
 | Public auth | Notion OAuth through a broker | Keeps the mandatory client secret out of extension code |
 | Permissions | `tabs` plus Notion API | Reads active-page title and URL while the panel is open without reading page bodies |
+| Keyboard shortcut | Browser-scoped `Command+Shift+Space` on macOS; `Ctrl+Shift+Space` elsewhere | Uses Chrome's reliable action command, remains customizable through Settings and `chrome://extensions/shortcuts`, and works only while the browser is active |
 | Draft ownership | One active regular-profile draft | A thought and its visible sources follow the persistent panel across tabs |
 | Recent editing | Local drafts first, then five latest saved notes, plus recent Notion pages the integration can see | Makes returning to prior work immediate while still letting users pull in Notion-originating docs |
 | Capture persistence | One IndexedDB row per regular draft/capture; one session key per Incognito record | Keeps autosaves proportional to the note being edited and preserves atomic draft-to-queue transitions |

@@ -37,6 +37,94 @@ export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   oauthBrokerUrl: ""
 });
 
+const STRING_SETTING_KEYS = [
+  "token", "connectionHandle", "workspaceId", "workspaceName", "workspaceIcon", "botId", "connectionId",
+  "legacyOAuthBotId", "legacyOAuthConnectionId", "destinationId", "destinationDatabaseId", "destinationName",
+  "destinationUrl", "titleProperty", "destinationMarker", "destinationConnectionId", "oauthClientId", "oauthBrokerUrl"
+] as const satisfies readonly (keyof Settings)[];
+
+const BOOLEAN_SETTING_KEYS = [
+  "managedDestination", "onboardingComplete", "includeSource", "aiEnabled", "aiSuggestTitle", "aiExtractTodos"
+] as const satisfies readonly (keyof Settings)[];
+
+export function normalizeSettings(value: unknown): Settings {
+  const source = isRecord(value) ? value : {};
+  const normalized: Settings = { ...DEFAULT_SETTINGS, destinationProperties: {} };
+
+  if (source.authType === "oauth" || source.authType === "token") normalized.authType = source.authType;
+  if (source.destinationType === "page" || source.destinationType === "database") normalized.destinationType = source.destinationType;
+  for (const key of STRING_SETTING_KEYS) {
+    const candidate = source[key];
+    if (typeof candidate === "string") normalized[key] = candidate;
+  }
+  for (const key of BOOLEAN_SETTING_KEYS) {
+    const candidate = source[key];
+    if (typeof candidate === "boolean") normalized[key] = candidate;
+  }
+  if (typeof source.destinationSchemaVersion === "number" && Number.isFinite(source.destinationSchemaVersion)) {
+    normalized.destinationSchemaVersion = source.destinationSchemaVersion;
+  }
+  normalized.destinationProperties = normalizeDestinationProperties(source.destinationProperties);
+  normalized.databaseProvisioning = normalizeDatabaseProvisioning(source.databaseProvisioning);
+  if (typeof source.oauthReconnectRequired === "boolean") normalized.oauthReconnectRequired = source.oauthReconnectRequired;
+  return normalized;
+}
+
+function normalizeDestinationProperties(value: unknown): Settings["destinationProperties"] {
+  if (!isRecord(value)) return {};
+  const properties: Settings["destinationProperties"] = {};
+  for (const [key, property] of Object.entries(value)) {
+    if (!isRecord(property) || typeof property.id !== "string" || typeof property.name !== "string") continue;
+    properties[key] = { id: property.id, name: property.name };
+  }
+  return properties;
+}
+
+function normalizeDatabaseProvisioning(value: unknown): Settings["databaseProvisioning"] {
+  if (!isRecord(value) || typeof value.connectionId !== "string" || typeof value.marker !== "string") return null;
+
+  if ((value.status === "pending" || value.status === "uncertain") && isFiniteNumber(value.attemptedAt)) {
+    return {
+      connectionId: value.connectionId,
+      marker: value.marker,
+      status: value.status === "pending" ? "recovering" : "uncertain",
+      startedAt: value.attemptedAt,
+      lastAttemptAt: value.attemptedAt,
+      lastError: null
+    };
+  }
+
+  if (!isProvisioningStatus(value.status) || !isFiniteNumber(value.startedAt) || !isFiniteNumber(value.lastAttemptAt)) return null;
+  const lastError = normalizeProvisioningError(value.lastError);
+  if (value.lastError !== undefined && value.lastError !== null && !lastError) return null;
+  return {
+    connectionId: value.connectionId,
+    marker: value.marker,
+    status: value.status,
+    startedAt: value.startedAt,
+    lastAttemptAt: value.lastAttemptAt,
+    lastError: lastError ?? null
+  };
+}
+
+function normalizeProvisioningError(value: unknown): NonNullable<Settings["databaseProvisioning"]>["lastError"] {
+  if (value === null) return null;
+  if (!isRecord(value) || typeof value.message !== "string" || !isFiniteNumber(value.status) || typeof value.code !== "string") return undefined;
+  return { message: value.message, status: value.status, code: value.code };
+}
+
+function isProvisioningStatus(value: unknown): value is NonNullable<Settings["databaseProvisioning"]>["status"] {
+  return value === "recovering" || value === "creating" || value === "uncertain" || value === "failed";
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function hasBundledOAuthConfig(config: Partial<PublicProductConfig> = {}): boolean {
   return Boolean(String(config.notionClientId || "").trim() && String(config.oauthBrokerUrl || "").trim());
 }

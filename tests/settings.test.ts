@@ -6,7 +6,8 @@ import {
   connectionTransitionForAuthorization,
   DEFAULT_SETTINGS,
   hasBundledOAuthConfig,
-  migrateLegacyOAuthCredentials
+  migrateLegacyOAuthCredentials,
+  normalizeSettings
 } from "../src/settings.js";
 
 test("AI actions default on but retain master and per-feature controls", async () => {
@@ -22,6 +23,98 @@ test("AI actions default on but retain master and per-feature controls", async (
   for (const key of ["aiEnabled", "aiSuggestTitle", "aiExtractTodos"]) assert.match(script, new RegExp(key));
   assert.match(script, /chrome\.storage\.local\.set\(\{ aiEnabled:/);
   assert.match(script, /chrome\.storage\.local\.set\(\{ \[key\]:/);
+});
+
+test("normalizes partial historical settings without trusting malformed storage values", () => {
+  const settings = normalizeSettings({
+    authType: "token",
+    token: "secret",
+    workspaceName: "Personal",
+    destinationType: "invalid",
+    destinationName: 42,
+    includeSource: false,
+    aiEnabled: "yes",
+    destinationSchemaVersion: Number.NaN,
+    oauthReconnectRequired: true,
+    ignored: "not part of Settings"
+  });
+
+  assert.equal(settings.authType, "token");
+  assert.equal(settings.token, "secret");
+  assert.equal(settings.workspaceName, "Personal");
+  assert.equal(settings.destinationType, DEFAULT_SETTINGS.destinationType);
+  assert.equal(settings.destinationName, DEFAULT_SETTINGS.destinationName);
+  assert.equal(settings.includeSource, false);
+  assert.equal(settings.aiEnabled, DEFAULT_SETTINGS.aiEnabled);
+  assert.equal(settings.destinationSchemaVersion, DEFAULT_SETTINGS.destinationSchemaVersion);
+  assert.equal(settings.oauthReconnectRequired, true);
+  assert.equal("ignored" in settings, false);
+});
+
+test("deeply normalizes destination properties and preserves each valid historical entry", () => {
+  const settings = normalizeSettings({
+    destinationProperties: {
+      title: { id: "title-id", name: "Name" },
+      captureId: { id: "capture-id", name: "Capture ID", extra: true },
+      malformedName: { id: "bad-id", name: 7 },
+      malformedEntry: "bad"
+    }
+  });
+
+  assert.deepEqual(settings.destinationProperties, {
+    title: { id: "title-id", name: "Name" },
+    captureId: { id: "capture-id", name: "Capture ID" }
+  });
+});
+
+test("preserves the full persisted provisioning recovery state", () => {
+  const settings = normalizeSettings({
+    databaseProvisioning: {
+      connectionId: "connection-1",
+      marker: "marker-1",
+      status: "failed",
+      startedAt: 100,
+      lastAttemptAt: 200,
+      lastError: { message: "Notion unavailable", status: 503, code: "service_unavailable" }
+    }
+  });
+
+  assert.deepEqual(settings.databaseProvisioning, {
+    connectionId: "connection-1",
+    marker: "marker-1",
+    status: "failed",
+    startedAt: 100,
+    lastAttemptAt: 200,
+    lastError: { message: "Notion unavailable", status: 503, code: "service_unavailable" }
+  });
+});
+
+test("migrates legacy provisioning state and rejects malformed recovery state", () => {
+  assert.deepEqual(normalizeSettings({
+    databaseProvisioning: {
+      connectionId: "connection-1",
+      marker: "marker-1",
+      status: "pending",
+      attemptedAt: 123
+    }
+  }).databaseProvisioning, {
+    connectionId: "connection-1",
+    marker: "marker-1",
+    status: "recovering",
+    startedAt: 123,
+    lastAttemptAt: 123,
+    lastError: null
+  });
+
+  assert.equal(normalizeSettings({
+    databaseProvisioning: {
+      connectionId: "connection-1",
+      marker: "marker-1",
+      status: "uncertain",
+      startedAt: "yesterday",
+      lastAttemptAt: 123
+    }
+  }).databaseProvisioning, null);
 });
 
 test("OAuth connections use the Notion bot ID as a stable queue identity", () => {

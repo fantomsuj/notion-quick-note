@@ -28,6 +28,25 @@
 
       <div id="message" class="message" role="status" aria-live="polite" hidden></div>
 
+      <section class="shortcut-settings" aria-labelledby="keyboard-shortcut-heading">
+        <div class="shortcut-settings-heading">
+          <p class="kicker">Browser shortcut</p>
+          <h2 id="keyboard-shortcut-heading">Keyboard shortcut</h2>
+          <p>Use Quick Note while this browser is active. Your browser owns this assignment and resolves any extension conflicts.</p>
+        </div>
+        <div class="shortcut-control">
+          <div class="shortcut-summary">
+            <span id="shortcut-assignment-status" class="shortcut-status" data-state="loading">Checking…</span>
+            <div id="shortcut-keycaps" class="shortcut-keycaps" aria-live="polite" aria-label="Checking shortcut"></div>
+          </div>
+          <p id="shortcut-warning" class="shortcut-warning" role="status" hidden></p>
+          <button id="change-shortcut" class="button secondary" type="button">Change shortcut</button>
+          <p id="shortcut-manual-instructions" class="shortcut-manual-instructions" hidden>
+            Arc could not open the shortcut editor. Enter <code>chrome://extensions/shortcuts</code> in the address bar, then find Notion Quick Note.
+          </p>
+        </div>
+      </section>
+
       <section id="connect-panel" class="stage" aria-labelledby="connect-heading">
         <div class="stage-number">01</div>
         <div class="stage-body">
@@ -139,14 +158,6 @@
           <h2 id="ready-heading">Your next thought has somewhere to go.</h2>
           <p class="stage-copy">Quick Note is connected to <strong id="ready-workspace">Notion</strong> and will save to <strong id="ready-destination">your destination</strong>.</p>
           <p id="ready-outcome" class="ready-outcome"></p>
-
-          <div class="shortcut-card" aria-label="Quick Note shortcuts">
-            <div><small>Browser active · From any app</small><b>Open Quick Note</b></div>
-            <div class="shortcut-keys">
-              <kbd title="While your browser is active">⌥ Z</kbd>
-              <kbd title="From any app">⌘ ⇧ 0</kbd>
-            </div>
-          </div>
 
           <div class="ready-actions">
             <button id="finish" class="button primary" type="button">Start capturing</button>

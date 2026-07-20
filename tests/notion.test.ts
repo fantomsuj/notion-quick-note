@@ -404,7 +404,11 @@ test("resolves a database URL to its first data source before saving", async () 
     calls.push({ url, options });
     if (url.includes("/data_sources/")) return response(404, { message: "not a data source" });
     if (url.includes("/databases/")) return response(200, { data_sources: [{ id: "resolved-source" }] });
-    return response(200, { id: "created" });
+    return response(200, {
+      id: "created",
+      url: "https://notion.so/created",
+      last_edited_time: "2026-07-20T00:00:00.000Z"
+    });
   };
 
   await sendCapture({
@@ -416,6 +420,49 @@ test("resolves a database URL to its first data source before saving", async () 
 
   const finalBody = parseBody(must(calls.at(-1)).options);
   assert.equal(mustRecord(finalBody.parent).data_source_id, "resolved-source");
+});
+
+test("rejects malformed successful page appends before exposing a remote target", async () => {
+  const malformedResults: unknown[] = [
+    {},
+    { results: "not-an-array" },
+    { results: [{}] },
+    { results: [{ id: 42 }] },
+    { results: [{ id: "block-1", last_edited_time: 42 }] }
+  ];
+
+  for (const payload of malformedResults) {
+    await assert.rejects(
+      sendCapture({
+        token: "secret",
+        settings: { destinationType: "page", destinationId: "page-id", destinationUrl: "https://notion.so/page-id" },
+        capture: { text: "Page note", includeSource: false },
+        fetchImpl: async () => response(200, payload)
+      }),
+      (error) => error instanceof NotionApiError && error.code === "invalid_response"
+    );
+  }
+});
+
+test("rejects malformed successful database creates before exposing a remote target", async () => {
+  const malformedResults: unknown[] = [
+    {},
+    { id: 42, url: "https://notion.so/page", last_edited_time: "2026-07-20T00:00:00.000Z" },
+    { id: "page-id", url: 42, last_edited_time: "2026-07-20T00:00:00.000Z" },
+    { id: "page-id", url: "https://notion.so/page", last_edited_time: 42 }
+  ];
+
+  for (const payload of malformedResults) {
+    await assert.rejects(
+      sendCapture({
+        token: "secret",
+        settings: { destinationType: "database", destinationId: "data-source-id", destinationUrl: "https://notion.so/database" },
+        capture: { text: "Database note", includeSource: false },
+        fetchImpl: async () => response(200, payload)
+      }),
+      (error) => error instanceof NotionApiError && error.code === "invalid_response"
+    );
+  }
 });
 
 test("builds a workspace-level Quick Notes database with a title property", () => {
@@ -743,6 +790,33 @@ test("validates selected page and database access and preserves permission failu
   );
 });
 
+test("rejects malformed consumed destination-health fields", async () => {
+  const malformedPages: unknown[] = [
+    { id: 42, archived: false, in_trash: false },
+    { id: "page-id", archived: 0, in_trash: false },
+    { id: "page-id", archived: false, in_trash: 0 }
+  ];
+  for (const payload of malformedPages) {
+    await assert.rejects(
+      validateDestinationHealth({
+        token: "secret",
+        settings: { destinationType: "page", destinationId: "page-id" },
+        fetchImpl: async () => response(200, payload)
+      }),
+      (error) => error instanceof NotionApiError && error.code === "invalid_response"
+    );
+  }
+
+  await assert.rejects(
+    validateDestinationHealth({
+      token: "secret",
+      settings: { destinationType: "database", destinationId: "source-id", managedDestination: true },
+      fetchImpl: async () => response(200, { id: "source-id", in_trash: 0 })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+});
+
 test("populates managed source metadata using stable property IDs", () => {
   const request = buildCaptureRequest({
     destinationType: "database",
@@ -888,6 +962,49 @@ test("paginates recovery before deciding to create another managed database", as
   assert.equal(searchBodies.length, 2);
   assert.equal(item(searchBodies, 1).start_cursor, "page-2");
   assert.equal(must(destination).databaseId, "database-id");
+});
+
+test("rejects malformed pagination envelopes before advancing search or block cursors", async () => {
+  const malformedEnvelopes: unknown[] = [
+    { results: [], has_more: "yes", next_cursor: "page-2" },
+    { results: [], has_more: true, next_cursor: 2 },
+    { results: [], has_more: false, next_cursor: {} }
+  ];
+
+  for (const payload of malformedEnvelopes) {
+    let searchCalls = 0;
+    await assert.rejects(
+      findManagedQuickNotesDatabase({
+        token: "secret",
+        marker: "wanted",
+        fetchImpl: async () => {
+          searchCalls += 1;
+          if (searchCalls > 1) throw new Error("Search advanced past a malformed pagination envelope.");
+          return response(200, payload);
+        }
+      }),
+      (error) => error instanceof NotionApiError && error.code === "invalid_response"
+    );
+    assert.equal(searchCalls, 1);
+
+    let blockCalls = 0;
+    await assert.rejects(
+      loadRemoteNote({
+        token: "secret",
+        record: { remote: { kind: "page", id: "page-id", pageId: "page-id" } },
+        fetchImpl: async (url) => {
+          if (String(url).includes("/children")) {
+            blockCalls += 1;
+            if (blockCalls > 1) throw new Error("Block retrieval advanced past a malformed pagination envelope.");
+            return response(200, payload);
+          }
+          return response(200, { id: "page-id", properties: {}, last_edited_time: "2026-07-19T00:00:00.000Z" });
+        }
+      }),
+      (error) => error instanceof NotionApiError && error.code === "invalid_response"
+    );
+    assert.equal(blockCalls, 1);
+  }
 });
 
 test("rejects malformed parent database IDs during retrieval and recovery", async () => {

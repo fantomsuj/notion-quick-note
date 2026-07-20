@@ -10,13 +10,12 @@ const bundle = await readFile(bundleUrl, "utf8");
 new vm.Script(bundle, { filename: "dist/content.js" });
 assert.doesNotMatch(bundle, /^\s*import(?:\s|\{|\*)/m, "dist/content.js must not contain top-level imports");
 
-const loader = await readFile(new URL("../src/content-loader.ts", import.meta.url), "utf8");
 const background = await readFile(new URL("../src/background.ts", import.meta.url), "utf8");
-const bundlePath = loader.match(/QUICK_NOTE_BUNDLE\s*=\s*["']([^"']+)["']/)?.[1];
-assert.equal(bundlePath, "dist/content.js", "content runtime bundle path changed unexpectedly");
-const injectedFiles = [...`${loader}\n${background}`.matchAll(/files:\s*\[\s*([^\],\s]+)/g)]
-  .map((match) => match[1]);
-assert.deepEqual(injectedFiles, ["QUICK_NOTE_BUNDLE"], "runtime injection must use only dist/content.js");
+assert.doesNotMatch(
+  background,
+  /(?:chrome\.)?scripting\s*\.\s*executeScript|content(?:Runtime)?Loader|files:\s*\[\s*["']dist\/content\.js["']/,
+  "the background must not inject the composer into webpages"
+);
 
 if (size > budgetBytes) {
   throw new Error(`dist/content.js is ${size.toLocaleString()} bytes; the production budget is ${budgetBytes.toLocaleString()} bytes.`);

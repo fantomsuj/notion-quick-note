@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   createQuickNotesDatabase,
   findManagedCaptureById,
@@ -21,8 +20,8 @@ import {
 } from "./constants.js";
 import { createAccessTokenRefresher, revokeAccessToken } from "./oauth.js";
 import { PRODUCT_CONFIG } from "./product-config.js";
-import { createDatabaseProvisioner } from "./provisioning.js";
-import { DEFAULT_SETTINGS, migrateLegacyOAuthCredentials } from "./settings.js";
+import { createDatabaseProvisioner, type ManagedDestination, type ProvisioningSettings } from "./provisioning.js";
+import { DEFAULT_SETTINGS, migrateLegacyOAuthCredentials, normalizeSettings } from "./settings.js";
 import {
   badgeForState,
   DELIVERY_STATES,
@@ -32,14 +31,40 @@ import {
 import { createIncognitoCapturePersistence, createRegularCapturePersistence } from "./capture-persistence.js";
 import { createDeliveryQueue } from "./capture-queue.js";
 import { createRecoveryExport } from "./capture-export.js";
-import { assertNever, isRuntimeRequest, type RuntimeRequest } from "./contracts.js";
+import {
+  assertNever,
+  isPanelRegistrationMessage,
+  isRecord,
+  isRuntimeRequest,
+  type CaptureChangeEvent,
+  type CaptureContext,
+  type CaptureDestination,
+  type CaptureDraft,
+  type CaptureDraftInput,
+  type CapturePayload,
+  type CaptureRecord,
+  type CaptureSource,
+  type CaptureState,
+  type Destination,
+  type EditorNode,
+  type KeyValueStoragePort,
+  type RemoteTarget,
+  type RecentItem,
+  type RuntimeRequest,
+  type RuntimeResponse,
+  type Settings,
+  type SyncJournal,
+  type PanelNavigationMessage
+} from "./contracts.js";
+import { createPanelCoordinator } from "./panel-coordinator.js";
+import { preparePanelDraft, shouldPublishExplicitContext } from "./panel-lifecycle.js";
+import { quickSettingsResponse, requiredCaptureRecordResponse, validatedRuntimeResponse } from "./background-dispatch.js";
 
 const DELIVERY_ALARM = "notion-quick-note-delivery";
 const BROWSER_SESSION_KEY = "notionQuickNoteBrowserSessionV1";
-const QUICK_NOTE_COMMANDS = new Set(["toggle-quick-note", "open-quick-note-global"]);
 const PANEL_PORT_NAME = "notion-quick-note-panel";
-const panelPorts = new Map();
-let activeInitialization;
+const panelCoordinator = createPanelCoordinator();
+let activeInitialization: Promise<void> | undefined;
 let initializationComplete = false;
 const isIncognito = Boolean(chrome.extension?.inIncognitoContext);
 const captureStorage = isIncognito ? chrome.storage.session : chrome.storage.local;
@@ -48,42 +73,51 @@ const captureRepository = isIncognito
   : createRegularCapturePersistence({ storage: captureStorage, indexedDB });
 captureRepository.setChangeHandler(handleCaptureRepositoryChange);
 
-const refreshStoredTokenInternal = createAccessTokenRefresher({
-  loadSettings: getSettings,
+const refreshStoredTokenInternal = createAccessTokenRefresher<Settings & Record<string, unknown>>({
+  loadSettings: async () => ({ ...(await getSettings()) }),
   saveSettings: (values) => chrome.storage.local.set(values),
-  brokerUrlForSettings: (settings) => PRODUCT_CONFIG.oauthBrokerUrl || settings.oauthBrokerUrl
+  brokerUrlForSettings: (settings) => PRODUCT_CONFIG.oauthBrokerUrl || String(settings.oauthBrokerUrl || "")
 });
 
-async function refreshStoredToken(settings) {
+async function refreshStoredToken(settings: Settings): Promise<Settings> {
   try {
-    return await refreshStoredTokenInternal(settings);
-  } catch (error) {
-    const deviceProofUnavailable = error?.code === "oauth_device_unavailable"
-      || error?.code === "device_proof_invalid"
-      || /secure device (?:storage|cryptography)|invalid proof signature/i.test(String(error?.message || ""));
+    return await refreshStoredTokenInternal({ ...settings });
+  } catch (error: unknown) {
+    const detail = errorRecord(error);
+    const deviceProofUnavailable = detail.code === "oauth_device_unavailable"
+      || detail.code === "device_proof_invalid"
+      || /secure device (?:storage|cryptography)|invalid proof signature/i.test(String(detail.message || ""));
     if (!isIncognito || !deviceProofUnavailable) throw error;
-    const mapped = new Error("Open Quick Note in a regular window to renew the Notion connection. This Incognito capture will remain saved for this session.");
-    mapped.status = 401;
-    mapped.code = "oauth_device_unavailable";
+    const mapped = new NotionApiError("Open Quick Note in a regular window to renew the Notion connection. This Incognito capture will remain saved for this session.", { status: 401, code: "oauth_device_unavailable" });
     throw mapped;
   }
 }
 
 const databaseProvisioner = createDatabaseProvisioner({
-  loadSettings: getSettings,
+  loadSettings: async () => provisioningSettings(await getSettings()),
   saveSettings: (values) => chrome.storage.local.set(values),
   api: {
-    create: (settings, marker) => createQuickNotesDatabase({ token: settings.token, marker }),
-    recover: (settings, marker, allowAnyMarker) => findManagedQuickNotesDatabase({ token: settings.token, marker, allowAnyMarker }),
-    migrate: (settings, marker) => migrateManagedQuickNotesDatabase({ token: settings.token, settings, marker })
+    create: async (settings, marker) => managedDestination(await createQuickNotesDatabase({ token: requiredToken(settings.token), marker })),
+    recover: async (settings, marker, allowAnyMarker) => {
+      const destination = await findManagedQuickNotesDatabase({ token: requiredToken(settings.token), marker, allowAnyMarker });
+      return destination ? managedDestination(destination) : null;
+    },
+    migrate: async (settings, marker) => managedDestination(await migrateManagedQuickNotesDatabase({ token: requiredToken(settings.token), settings: notionSettings(settings), marker }))
   }
 });
 
 const deliveryQueue = createDeliveryQueue({
   repository: captureRepository,
   getConnection: currentConnection,
-  deliver: deliverRecord,
-  findExisting: findExistingRecord,
+  deliver: async (record) => {
+    const connection = await currentConnection();
+    if (!connection.configured) throw new Error("Connect Notion before delivering captures.");
+    return deliverRecord(record, connection);
+  },
+  findExisting: async (record) => {
+    const connection = await currentConnection();
+    return connection.configured ? findExistingRecord(record, connection) : null;
+  },
   onChanged: updateQueueSurfaces
 });
 void initializeWorker();
@@ -122,40 +156,27 @@ chrome.action.onClicked.addListener((tab) => openQuickNote(tab));
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== PANEL_PORT_NAME) return;
-  let panelWindowId;
-  port.onMessage.addListener((message) => {
-    if (message?.type !== "REGISTER_PANEL" || !Number.isInteger(message.windowId)) return;
-    panelWindowId = message.windowId;
-    panelPorts.set(panelWindowId, port);
-    void publishActivePage(panelWindowId);
+  let panelWindowId: number | undefined;
+  port.onMessage.addListener((message: unknown) => {
+    if (!isPanelRegistrationMessage(message)) return;
+    const windowId = message.windowId;
+    panelWindowId = windowId;
+    panelCoordinator.register(windowId, port);
+    void publishActivePage(windowId);
   });
   port.onDisconnect.addListener(() => {
-    if (panelWindowId !== undefined && panelPorts.get(panelWindowId) === port) panelPorts.delete(panelWindowId);
+    if (panelWindowId !== undefined) panelCoordinator.unregister(panelWindowId, port);
   });
 });
 
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  if (panelPorts.has(windowId)) void publishActivePage(windowId, tabId);
+  if (panelCoordinator.has(windowId)) void publishActivePage(windowId, tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!tab.active || !panelPorts.has(tab.windowId)) return;
+  if (!tab.active || !panelCoordinator.has(tab.windowId)) return;
   if (changeInfo.status !== "complete" && !changeInfo.url && !changeInfo.title) return;
   void publishActivePage(tab.windowId, tabId);
-});
-
-chrome.commands.onCommand.addListener(async (command, commandTab) => {
-  if (!QUICK_NOTE_COMMANDS.has(command)) return;
-  const [lastFocusedTab] = commandTab?.id
-    ? [commandTab]
-    : await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const tab = lastFocusedTab;
-  if (command === "open-quick-note-global" && tab?.windowId !== undefined) {
-    await chrome.windows.update(tab.windowId, { focused: true }).catch((error) => {
-      console.warn("Could not bring the Quick Note window forward", error);
-    });
-  }
-  await openQuickNote(tab);
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -163,7 +184,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   await openQuickNote(tab, info.selectionText || "");
 });
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) return false;
   if (!isRuntimeRequest(message)) {
     sendResponse({ ok: false, error: "Malformed Quick Note message.", code: "invalid_runtime_message" });
@@ -176,11 +197,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-async function handleMessage(message: RuntimeRequest, sender: chrome.runtime.MessageSender) {
+async function handleMessage(message: RuntimeRequest, sender: chrome.runtime.MessageSender): Promise<RuntimeResponse<RuntimeRequest>> {
   await initializeWorker();
-  switch (message.type) {
+  const response: unknown = await (async () => {
+    switch (message.type) {
     case "GET_QUICK_SETTINGS": {
-      return quickSettings(await getSettings());
+      return quickSettingsResponse(quickSettings(await getSettings()));
     }
     case "GET_OR_CREATE_DRAFT":
       return { ok: true, draft: await getOrCreateDraft(message, sender) };
@@ -206,17 +228,17 @@ async function handleMessage(message: RuntimeRequest, sender: chrome.runtime.Mes
     case "CONVERT_EDIT_TO_NEW_DRAFT":
       return { ok: true, draft: await captureRepository.convertEditDraftToNew(requiredId(message.id)) };
     case "ACTIVATE_DRAFT":
-      return { ok: true, draft: await captureRepository.activateDraft(requiredId(message.id), { returnDraftId: message.returnDraftId }) };
+      return { ok: true, draft: await captureRepository.activateDraft(requiredId(message.id), { ...(message.returnDraftId === undefined ? {} : { returnDraftId: message.returnDraftId }) }) };
     case "RELEASE_COMPOSER_SURFACE":
       return releaseComposerSurface(message.sessionId, sender.tab?.id);
     case "GET_PANEL_DRAFT":
       return { ok: true, draft: await getPanelDraft(message, sender) };
     case "RETRY_CAPTURE":
-      return { ok: true, record: await deliveryQueue.retry(requiredId(message.id), { force: Boolean(message.force) }) };
+      return requiredCaptureRecordResponse(message.type, deliveryQueue.retry(requiredId(message.id), { force: Boolean(message.force) }));
     case "RETARGET_CAPTURE":
-      return { ok: true, record: await deliveryQueue.retry(requiredId(message.id), { force: Boolean(message.force), retarget: true }) };
+      return requiredCaptureRecordResponse(message.type, deliveryQueue.retry(requiredId(message.id), { force: Boolean(message.force), retarget: true }));
     case "MARK_CAPTURE_DELIVERED":
-      return { ok: true, record: await deliveryQueue.markDelivered(requiredId(message.id), message.remote) };
+      return requiredCaptureRecordResponse(message.type, deliveryQueue.markDelivered(requiredId(message.id), message.remote));
     case "DELETE_CAPTURE":
       return deleteCapture(message.id);
     case "DELETE_DELIVERED_HISTORY":
@@ -246,9 +268,11 @@ async function handleMessage(message: RuntimeRequest, sender: chrome.runtime.Mes
     case "OPEN_SETTINGS":
       await chrome.runtime.openOptionsPage();
       return { ok: true };
-    default:
-      return assertNever(message);
-  }
+      default:
+        return assertNever(message);
+    }
+  })();
+  return validatedRuntimeResponse(message, response);
 }
 
 function initializeWorker() {
@@ -284,7 +308,7 @@ async function runInitialization() {
   void deliveryQueue.drain();
 }
 
-async function setTrustedAccess(area) {
+async function setTrustedAccess(area: KeyValueStoragePort & { setAccessLevel?: (options: { accessLevel: "TRUSTED_CONTEXTS" }) => Promise<void> }): Promise<void> {
   try {
     await area.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
   } catch (error) {
@@ -292,11 +316,11 @@ async function setTrustedAccess(area) {
   }
 }
 
-async function getSettings() {
-  return { ...DEFAULT_SETTINGS, ...(await chrome.storage.local.get(DEFAULT_SETTINGS)) };
+async function getSettings(): Promise<Settings> {
+  return normalizeSettings(await chrome.storage.local.get(DEFAULT_SETTINGS));
 }
 
-function quickSettings(settings) {
+function quickSettings(settings: Settings) {
   return {
     destinationName: settings.destinationName,
     includeSource: settings.includeSource,
@@ -316,7 +340,7 @@ async function broadcastQuickSettings() {
     : undefined));
 }
 
-function destinationSnapshot(settings) {
+function destinationSnapshot(settings: Settings): CaptureDestination | null {
   if (!settings.destinationId) return null;
   return {
     destinationId: settings.destinationId,
@@ -333,19 +357,38 @@ function destinationSnapshot(settings) {
   };
 }
 
-async function currentConnection() {
+type BackgroundConnection = {
+  configured: true;
+  token: string;
+  connectionHandle: string;
+  connectionId: string;
+  destination: CaptureDestination | null;
+  settings: Settings;
+} | {
+  configured: false;
+  token: string;
+  connectionHandle: string;
+  connectionId: string;
+  destination: CaptureDestination | null;
+  settings: Settings;
+};
+
+async function currentConnection(): Promise<BackgroundConnection> {
   const settings = await getSettings();
-  return {
-    configured: Boolean(settings.token && settings.destinationId),
+  const configured = Boolean(settings.token && settings.destinationId);
+  const connection = {
     token: settings.token,
     connectionHandle: settings.connectionHandle,
     connectionId: settings.connectionId || settings.workspaceId || "",
     destination: destinationSnapshot(settings),
     settings
   };
+  return configured ? { configured: true, ...connection } : { configured: false, ...connection };
 }
 
-async function enqueueCapture(message, sender) {
+type EnqueueRequest = Extract<RuntimeRequest, { type: "ENQUEUE_CAPTURE" | "SAVE_CAPTURE" }>;
+
+async function enqueueCapture(message: EnqueueRequest, sender: chrome.runtime.MessageSender) {
   const capture = validateCapture(message.capture);
   const connection = await currentConnection();
   const draftId = message.draftId || "";
@@ -384,8 +427,8 @@ async function enqueueCapture(message, sender) {
   return { ok: true, accepted: true, record: captureStatusRecord(record) };
 }
 
-async function getCaptureStatus(message) {
-  const id = String(message.id || message.captureId || "");
+async function getCaptureStatus(message: Extract<RuntimeRequest, { type: "GET_CAPTURE_STATUS" }>) {
+  const id = String(message.id || "");
   const draftId = String(message.draftId || "");
   if (!id && !draftId) throw new Error("Capture ID or draft ID is required.");
   const record = id
@@ -394,7 +437,7 @@ async function getCaptureStatus(message) {
   return { ok: true, record: captureStatusRecord(record) };
 }
 
-function captureStatusRecord(record) {
+function captureStatusRecord(record: CaptureRecord | null) {
   if (!record) return null;
   return {
     id: record.id,
@@ -413,7 +456,17 @@ function captureStatusRecord(record) {
   };
 }
 
-function validateCapture(capture = {}) {
+type CaptureRequestPayload = EnqueueRequest["capture"];
+interface ValidatedCapture {
+  document: CapturePayload["document"];
+  pageTitle: string;
+  url: string;
+  includeSource: boolean;
+  sources: CaptureSource[];
+  selection: string;
+}
+
+function validateCapture(capture: CaptureRequestPayload): ValidatedCapture {
   const doc = capture.document?.doc;
   if (!doc || doc.type !== "doc") throw new Error("Quick Note received an invalid document.");
   notionBlocksFromDocument(doc);
@@ -422,7 +475,7 @@ function validateCapture(capture = {}) {
   if (characters > MAX_CAPTURE_CHARACTERS) throw new Error("Quick Notes can contain up to 8,000 characters.");
   return {
     document: {
-      version: Number(capture.document.version || 1),
+      version: 1,
       title: truncateCharacters(capture.document.title, MAX_CAPTURE_TITLE_CHARACTERS),
       doc
     },
@@ -434,10 +487,11 @@ function validateCapture(capture = {}) {
   };
 }
 
-function validateDraft(draft = {}, sender) {
+function validateDraft(draft: CaptureDraftInput, sender: chrome.runtime.MessageSender): CaptureDraft {
   if (!draft.id) throw new Error("Draft ID is required.");
   if (!draft.doc || draft.doc.type !== "doc") throw new Error("Draft content is invalid.");
   return {
+    version: 2,
     id: String(draft.id),
     tabId: sender.tab?.id ?? draft.tabId ?? null,
     context: validateContext(draft.context),
@@ -452,11 +506,13 @@ function validateDraft(draft = {}, sender) {
     baseFingerprint: String(draft.baseFingerprint || ""),
     title: truncateCharacters(draft.title, MAX_CAPTURE_TITLE_CHARACTERS),
     includeSource: draft.includeSource !== false,
-    doc: draft.doc
+    doc: draft.doc,
+    createdAt: Number(draft.createdAt || Date.now()),
+    updatedAt: Number(draft.updatedAt || Date.now())
   };
 }
 
-function validateContext(context = {}) {
+function validateContext(context: Partial<CaptureContext> = {}): CaptureContext {
   return {
     version: 1,
     title: String(context.title || "").slice(0, 1000),
@@ -467,32 +523,42 @@ function validateContext(context = {}) {
   };
 }
 
-async function getOrCreateDraft(message, sender) {
+async function getOrCreateDraft(message: Extract<RuntimeRequest, { type: "GET_OR_CREATE_DRAFT" }>, sender: chrome.runtime.MessageSender): Promise<CaptureDraft> {
   const context = validateContext(message.context || {});
   const tabId = sender.tab?.id ?? message.tabId ?? null;
   const existing = await captureRepository.getOrCreateDraft({
     tabId,
     context,
     includeSource: message.includeSource !== false,
-    sessionId: message.sessionId,
-    draftId: message.draftId
+    ...(message.sessionId === undefined ? {} : { sessionId: message.sessionId }),
+    ...(message.draftId === undefined ? {} : { draftId: message.draftId })
   });
   if (!context.url) return existing;
 
   const legacyKey = `draft:${context.url}`;
-  const legacy = (await chrome.storage.session.get(legacyKey))[legacyKey];
+  const legacy: unknown = (await chrome.storage.session.get(legacyKey))[legacyKey];
   if (legacy === undefined || existing.updatedAt !== existing.createdAt) return existing;
   const migrated = await captureRepository.upsertDraft({
     ...existing,
-    title: typeof legacy === "object" ? legacy.title || "" : "",
-    includeSource: typeof legacy === "object" ? legacy.includeSource !== false : message.includeSource !== false,
-    doc: legacy?.doc?.type === "doc" ? legacy.doc : paragraphDocument(typeof legacy === "string" ? legacy : "")
+    title: isRecord(legacy) && typeof legacy.title === "string" ? legacy.title : "",
+    includeSource: isRecord(legacy) ? legacy.includeSource !== false : message.includeSource !== false,
+    doc: isRecord(legacy) && isRecord(legacy.doc) && legacy.doc.type === "doc" ? normalizeEditorDocument(legacy.doc) : paragraphDocument(typeof legacy === "string" ? legacy : "")
   }, existing.revision);
   await chrome.storage.session.remove(legacyKey);
+  if (!migrated) throw new Error("Quick Note could not migrate the saved draft.");
   return migrated;
 }
 
-async function getPanelDraft(message, sender) {
+async function getPanelDraft(message: Extract<RuntimeRequest, { type: "GET_PANEL_DRAFT" }>, sender: chrome.runtime.MessageSender): Promise<CaptureDraft> {
+  if (message.draftId) {
+    const requestedDraft = await captureRepository.getDraft(message.draftId);
+    if (!requestedDraft) {
+      const error = new Error("That draft is no longer available.") as Error & { code: string };
+      error.code = "draft_not_found";
+      throw error;
+    }
+    return requestedDraft;
+  }
   let tab = sender.tab;
   const requestedTabId = Number(message.tabId);
   if (Number.isInteger(requestedTabId)) tab = await chrome.tabs.get(requestedTabId).catch(() => tab);
@@ -504,12 +570,11 @@ async function getPanelDraft(message, sender) {
   return captureRepository.getOrCreateDraft({
     tabId: tab?.id ?? null,
     context,
-    includeSource: (await getSettings()).includeSource,
-    draftId: message.draftId
+    includeSource: (await getSettings()).includeSource
   });
 }
 
-async function deliverRecord(record, connection) {
+async function deliverRecord(record: CaptureRecord, connection: Extract<BackgroundConnection, { configured: true }>): Promise<RemoteTarget> {
   let settings = { ...connection.settings, ...record.destination };
   let token = connection.token;
   let refreshedToken = false;
@@ -518,47 +583,31 @@ async function deliverRecord(record, connection) {
     try {
       if (record.operation === "update") {
         const latest = await captureRepository.getCapture(record.id) || record;
-        return await updateRemoteNote({
+        if (!latest.pendingCapture) throw new Error("The pending edit is missing its capture payload.");
+        return normalizeRemoteTarget(await updateRemoteNote({
           token,
-          record: latest,
-          capture: latest.pendingCapture,
+          record: notionRecord(latest),
+          capture: notionCapture(latest.pendingCapture),
           baseFingerprint: latest.baseFingerprint,
           journal: latest.syncJournal || {},
-          onJournal: (syncJournal) => captureRepository.updateCapture(record.id, { syncJournal })
-        });
+          onJournal: async (syncJournal: SyncJournal) => { await captureRepository.updateCapture(record.id, { syncJournal }); }
+        }));
       }
-      const result = await sendCapture({ token, settings, capture: record.pendingCapture || record.capture });
+      const remote = await sendCapture({ token, settings, capture: record.pendingCapture || record.capture });
       if (!isIncognito) {
         await chrome.storage.local.set({
           lastCapture: { savedAt: new Date().toISOString(), destinationName: settings.destinationName }
         });
       }
-      if (settings.destinationType === "database") {
-        return {
-          kind: "page",
-          id: result.id || "",
-          pageId: result.id || "",
-          url: result.url || settings.destinationUrl || "",
-          blockIds: [],
-          fingerprint: String(result.last_edited_time || "")
-        };
-      }
-      const blocks = (result.results || []).filter((block) => block.id);
-      return {
-        kind: "section",
-        id: settings.destinationId,
-        pageId: settings.destinationId,
-        url: settings.destinationUrl || "",
-        blockIds: blocks.map((block) => block.id),
-        fingerprint: blocks.map((block) => `${block.id}:${block.last_edited_time || ""}:0`).join("|")
-      };
-    } catch (error) {
+      return remote;
+    } catch (error: unknown) {
       if (isUnauthorized(error) && connection.connectionHandle && !refreshedToken) {
         let refreshed;
         try {
           refreshed = await refreshStoredToken({ ...connection.settings, token });
-        } catch (error) {
-          throw new NotionApiError(error.message || "Reconnect Notion to deliver this capture.", { status: 401, code: error.code || "refresh_failed" });
+        } catch (refreshError: unknown) {
+          const detail = errorRecord(refreshError);
+          throw new NotionApiError(String(detail.message || "Reconnect Notion to deliver this capture."), { status: 401, code: String(detail.code || "refresh_failed") });
         }
         token = refreshed.token;
         refreshedToken = true;
@@ -570,40 +619,45 @@ async function deliverRecord(record, connection) {
           settings,
           marker: settings.destinationMarker || crypto.randomUUID()
         });
-        settings = { ...settings, ...destinationToSettings(destination) };
-        await chrome.storage.local.set(destinationToSettings(destination));
+        const normalizedDestination = managedDestination(destination);
+        settings = { ...settings, ...destinationToSettings(normalizedDestination) };
+        await chrome.storage.local.set(destinationToSettings(normalizedDestination));
         refreshedSchema = true;
         continue;
       }
-      if (error?.code === "network_error" && typeof navigator !== "undefined") error.offline = navigator.onLine === false;
+      const detail = errorRecord(error);
+      if (detail.code === "network_error" && typeof navigator !== "undefined") detail.offline = navigator.onLine === false;
       throw error;
     }
   }
 }
 
-async function findExistingRecord(record, connection) {
+async function findExistingRecord(record: CaptureRecord, connection: Extract<BackgroundConnection, { configured: true }>): Promise<RemoteTarget | null> {
   if (!record.destination?.managedDestination) return null;
   try {
-    return await findManagedCaptureById({
+    const existing = await findManagedCaptureById({
       token: connection.token,
       settings: record.destination,
       captureId: record.id
     });
-  } catch (error) {
+    return existing ? normalizeRemoteTarget(existing) : null;
+  } catch (error: unknown) {
     if (!isUnauthorized(error) || !connection.connectionHandle) throw error;
     let refreshed;
     try {
       refreshed = await refreshStoredToken(connection.settings);
-    } catch (error) {
-      throw new NotionApiError(error.message || "Reconnect Notion to verify this capture.", { status: 401, code: error.code || "refresh_failed" });
+    } catch (refreshError: unknown) {
+      const detail = errorRecord(refreshError);
+      throw new NotionApiError(String(detail.message || "Reconnect Notion to verify this capture."), { status: 401, code: String(detail.code || "refresh_failed") });
     }
     connection.token = refreshed.token;
     connection.settings = refreshed;
-    return findManagedCaptureById({
+    const existing = await findManagedCaptureById({
       token: refreshed.token,
       settings: record.destination,
       captureId: record.id
     });
+    return existing ? normalizeRemoteTarget(existing) : null;
   }
 }
 
@@ -620,7 +674,7 @@ async function captureActivity() {
   };
 }
 
-async function listRecentItems(query = "", limit = 5) {
+async function listRecentItems(query = "", limit = 5): Promise<{ drafts: RecentItem[]; notes: RecentItem[]; notionPages: RecentItem[]; notionError: string }> {
   const needle = String(query || "").trim();
   const searching = Boolean(needle);
   const localLimit = Math.max(1, Math.min(Number(limit) || 5, searching ? 100 : 5));
@@ -635,17 +689,17 @@ async function listRecentItems(query = "", limit = 5) {
       .map((note) => normalizeNotionId(note.remotePageId || ""))
       .filter(Boolean)
   );
-  let notionPages = [];
+  let notionPages: RecentItem[] = [];
   let notionError = "";
   try {
     notionPages = await recentNotionPages(needle, notionLimit, localPageIds);
-  } catch (error) {
-    notionError = error?.message || "Notion recent pages are unavailable.";
+  } catch (error: unknown) {
+    notionError = errorMessage(error) || "Notion recent pages are unavailable.";
   }
   return { drafts, notes, notionPages, notionError };
 }
 
-async function recentDrafts(query = "", limit = 5) {
+async function recentDrafts(query = "", limit = 5): Promise<RecentItem[]> {
   const needle = String(query || "").trim().toLowerCase();
   return (await captureRepository.listDrafts())
     .filter((draft) => documentText(draft.doc).trim())
@@ -662,7 +716,7 @@ async function recentDrafts(query = "", limit = 5) {
     .map(recentDraftSummary);
 }
 
-async function recentNotes(query = "", limit = 5) {
+async function recentNotes(query = "", limit = 5): Promise<RecentItem[]> {
   const needle = String(query || "").trim().toLowerCase();
   return (await captureRepository.listCaptures({ statuses: [DELIVERY_STATES.delivered, DELIVERY_STATES.blockedConflict] }))
     .filter((record) => record.status === DELIVERY_STATES.delivered || record.status === DELIVERY_STATES.blockedConflict)
@@ -681,14 +735,14 @@ async function recentNotes(query = "", limit = 5) {
     .map(recentNoteSummary);
 }
 
-async function recentNotionPages(query = "", limit = 5, excludePageIds = new Set()) {
+async function recentNotionPages(query = "", limit = 5, excludePageIds: Set<string> = new Set()): Promise<RecentItem[]> {
   const settings = await getSettings();
   if (!settings.token) return [];
   let pages;
   try {
     pages = await searchRecentPages({ token: settings.token, query, limit: Math.max(limit + excludePageIds.size, limit) });
   } catch (error) {
-    if (!(error instanceof NotionApiError) || error.status !== 401 || !settings.refreshToken) throw error;
+    if (!(error instanceof NotionApiError) || error.status !== 401 || !settings.connectionHandle) throw error;
     const refreshed = await refreshStoredToken(settings);
     pages = await searchRecentPages({ token: refreshed.token, query, limit: Math.max(limit + excludePageIds.size, limit) });
   }
@@ -711,7 +765,7 @@ async function recentNotionPages(query = "", limit = 5, excludePageIds = new Set
     }));
 }
 
-function recentDraftSummary(draft) {
+function recentDraftSummary(draft: CaptureDraft): RecentItem {
   const explicitTitle = String(draft.title || "").trim();
   const body = documentText(draft.doc).trim();
   const lines = body.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -731,7 +785,7 @@ function recentDraftSummary(draft) {
   };
 }
 
-function recentNoteSummary(record) {
+function recentNoteSummary(record: CaptureRecord): RecentItem {
   const capture = record.pendingCapture || record.syncedCapture || record.capture || {};
   const explicitTitle = String(capture.document?.title || "").trim();
   const body = documentText(capture.document?.doc).trim();
@@ -752,15 +806,18 @@ function recentNoteSummary(record) {
   };
 }
 
-async function loadRecentNote(message, sender) {
+type LoadRecentRequest = Extract<RuntimeRequest, { type: "LOAD_RECENT_NOTE" }>;
+type LoadNotionRequest = Extract<RuntimeRequest, { type: "LOAD_NOTION_PAGE" }>;
+
+async function loadRecentNote(message: LoadRecentRequest, sender: chrome.runtime.MessageSender) {
   const id = requiredId(message.id);
   const record = await captureRepository.getCapture(id);
   if (!record) throw new Error("That recent note is no longer stored locally.");
   return hydrateEditDraftFromRecord(record, message, sender);
 }
 
-async function loadNotionPage(message, sender) {
-  const pageId = normalizeNotionId(requiredId(message.pageId || message.id));
+async function loadNotionPage(message: LoadNotionRequest, sender: chrome.runtime.MessageSender) {
+  const pageId = normalizeNotionId(requiredId(message.pageId));
   if (!pageId) throw new Error("A Notion page ID is required.");
   const connection = await currentConnection();
   if (!connection.token) throw new Error("Reconnect Notion before opening a Notion page.");
@@ -791,23 +848,32 @@ async function loadNotionPage(message, sender) {
       fingerprint: ""
     }
   });
+  if (!placeholder) throw new Error("Quick Note could not prepare this Notion page.");
 
   return hydrateEditDraftFromRecord(placeholder, { ...message, id: placeholder.id, reloadLatest: true }, sender);
 }
 
-async function hydrateEditDraftFromRecord(record, message, sender) {
+interface HydrationRequest {
+  id: string;
+  tabId?: number;
+  sessionId?: string;
+  reloadLatest?: boolean;
+}
+
+async function hydrateEditDraftFromRecord(record: CaptureRecord, message: HydrationRequest, sender: chrome.runtime.MessageSender) {
   const id = record.id;
   const activeDraft = await captureRepository.getActiveDraft();
   const returnDraftId = activeDraft?.mode === "edit" && activeDraft.targetRecordId === id
     ? activeDraft.returnDraftId || ""
     : activeDraft?.id || "";
   let loaded;
-  const usePendingConflict = record.status === DELIVERY_STATES.blockedConflict && !message.reloadLatest && record.pendingCapture;
-  if (usePendingConflict) {
+  const pendingConflict = record.status === DELIVERY_STATES.blockedConflict && !message.reloadLatest ? record.pendingCapture : null;
+  const usePendingConflict = Boolean(pendingConflict);
+  if (pendingConflict) {
     loaded = {
-      title: record.pendingCapture.document?.title || "",
-      doc: record.pendingCapture.document?.doc,
-      sources: normalizeSources(record.pendingCapture.sources || []),
+      title: pendingConflict.document.title || "",
+      doc: pendingConflict.document.doc,
+      sources: normalizeSources(pendingConflict.sources || []),
       remote: record.remote,
       baseFingerprint: record.baseFingerprint || record.remote?.fingerprint || ""
     };
@@ -818,15 +884,15 @@ async function hydrateEditDraftFromRecord(record, message, sender) {
       throw new Error("Reconnect the Notion workspace that owns this note.");
     }
     try {
-      loaded = await loadRemoteNote({ token: connection.token, record });
+      loaded = await loadRemoteNote({ token: connection.token, record: notionRecord(record) });
     } catch (error) {
       if (!isUnauthorized(error) || !connection.connectionHandle) throw error;
       const refreshed = await refreshStoredToken(connection.settings);
-      loaded = await loadRemoteNote({ token: refreshed.token, record });
+      loaded = await loadRemoteNote({ token: refreshed.token, record: notionRecord(record) });
     }
     if (!record.remote?.fingerprint || message.reloadLatest) {
       await captureRepository.updateCapture(id, {
-        remote: loaded.remote,
+        remote: normalizeRemoteTarget(loaded.remote),
         syncedCapture: {
           ...(record.syncedCapture || record.capture || {}),
           document: {
@@ -834,7 +900,7 @@ async function hydrateEditDraftFromRecord(record, message, sender) {
             title: loaded.title,
             doc: loaded.doc
           },
-          sources: loaded.sources,
+          sources: normalizeSources(loaded.sources),
           includeSource: loaded.sources.length > 0
         },
         destination: record.destination || {
@@ -865,7 +931,7 @@ async function hydrateEditDraftFromRecord(record, message, sender) {
   return { ok: true, draft, returnDraftId, conflict: usePendingConflict };
 }
 
-async function deleteCapture(id) {
+async function deleteCapture(id: string) {
   const record = await captureRepository.getCapture(requiredId(id));
   if (!record) return { ok: true, deleted: false };
   if (record.status !== DELIVERY_STATES.delivered) throw new Error("Resolve or mark this capture delivered before deleting its local record.");
@@ -891,9 +957,10 @@ async function storageDiagnostics() {
   const area = isIncognito ? chrome.storage.session : chrome.storage.local;
   const [chromeBytes, estimate, persisted] = await Promise.all([
     typeof area.getBytesInUse === "function" ? area.getBytesInUse(null).catch(() => 0) : 0,
-    typeof navigator.storage?.estimate === "function" ? navigator.storage.estimate().catch(() => ({})) : {},
+    typeof navigator.storage?.estimate === "function" ? navigator.storage.estimate().catch((): StorageEstimate => ({})) : {},
     typeof navigator.storage?.persisted === "function" ? navigator.storage.persisted().catch(() => false) : false
   ]);
+  const storageEstimate: StorageEstimate = estimate;
   return {
     profile: isIncognito ? "incognito" : "regular",
     backend: captureRepository.backendName,
@@ -914,13 +981,13 @@ async function storageDiagnostics() {
       delivered: captures.filter((record) => record.status === DELIVERY_STATES.delivered).length
     },
     originStorage: {
-      usedBytes: Number(estimate?.usage || 0),
-      quotaBytes: Number(estimate?.quota || 0)
+      usedBytes: Number(storageEstimate.usage || 0),
+      quotaBytes: Number(storageEstimate.quota || 0)
     }
   };
 }
 
-async function exportCaptureRecovery(format) {
+async function exportCaptureRecovery(format: "json" | "markdown") {
   const [drafts, captures] = await Promise.all([
     captureRepository.listDrafts(),
     captureRepository.listCaptures()
@@ -929,11 +996,11 @@ async function exportCaptureRecovery(format) {
     drafts: drafts.sort((left, right) => right.updatedAt - left.updatedAt),
     captures: captures.sort((left, right) => right.updatedAt - left.updatedAt),
     profile: isIncognito ? "incognito" : "regular",
-    format: String(format || "")
+    format
   });
 }
 
-async function openCaptureResult(id, explicitUrl = "") {
+async function openCaptureResult(id: string, explicitUrl = "") {
   const directUrl = String(explicitUrl || "").trim();
   if (directUrl) {
     if (!/^https:\/\/([\w-]+\.)*notion\.(so|site)\//i.test(directUrl)) {
@@ -949,7 +1016,7 @@ async function openCaptureResult(id, explicitUrl = "") {
   return { ok: true };
 }
 
-async function handleCaptureRepositoryChange(event) {
+async function handleCaptureRepositoryChange(event: CaptureChangeEvent): Promise<void> {
   if (event.structural) {
     if (event.kind !== "maintenance") await captureRepository.maintain({ recoverInterrupted: false });
     await updateQueueSurfaces();
@@ -959,7 +1026,7 @@ async function handleCaptureRepositoryChange(event) {
 
 async function updateQueueSurfaces() {
   const records = await captureRepository.listCaptures();
-  const state = { captures: Object.fromEntries(records.map((record) => [record.id, record])) };
+  const state: CaptureState = { version: 2, drafts: {}, activeDraftId: "", captures: Object.fromEntries(records.map((record) => [record.id, record])) };
   const badge = badgeForState(state);
   await Promise.all([
     chrome.action.setBadgeBackgroundColor({ color: badge.color }),
@@ -972,14 +1039,14 @@ async function updateQueueSurfaces() {
   if (nextAttempt) await chrome.alarms.create(DELIVERY_ALARM, { when: Math.max(Date.now() + 30_000, nextAttempt) });
 }
 
-async function findDestinations(query) {
+async function findDestinations(query: string): Promise<Destination[]> {
   let settings = await getSettings();
   try {
-    return await searchDestinations({ token: settings.token, query });
+    return (await searchDestinations({ token: settings.token, query })).map(normalizeDestination).filter((item): item is Destination => item !== null);
   } catch (error) {
     if (!(error instanceof NotionApiError) || error.status !== 401 || !settings.connectionHandle) throw error;
     settings = await refreshStoredToken(settings);
-    return searchDestinations({ token: settings.token, query });
+    return (await searchDestinations({ token: settings.token, query })).map(normalizeDestination).filter((item): item is Destination => item !== null);
   }
 }
 
@@ -1026,15 +1093,16 @@ async function validateConnection() {
   }
 }
 
-async function validateDestinationSelection(destination = {}) {
+async function validateDestinationSelection(destination: Destination) {
   const settings = await getSettings();
   if (!settings.token) return { ok: false, ready: false, error: "Reconnect Notion before choosing a destination.", reconnect: true };
+  const destinationType: "page" | "database" = destination.type === "page" ? "page" : "database";
   const candidate = {
-    ...settings,
     destinationId: String(destination.id || ""),
-    destinationType: destination.type === "page" ? "page" : "database",
+    destinationType,
     titleProperty: String(destination.titleProperty || "Name"),
-    managedDestination: false
+    managedDestination: false,
+    destinationProperties: settings.destinationProperties
   };
   try {
     await validateDestinationHealth({ token: settings.token, settings: candidate });
@@ -1053,18 +1121,19 @@ async function validateDestinationSelection(destination = {}) {
   }
 }
 
-function destinationErrorResponse(error) {
+function destinationErrorResponse(error: unknown) {
   const response = errorResponse(error);
-  if (Number(error?.status || 0) === 403 || Number(error?.status || 0) === 404) {
+  const detail = errorRecord(error);
+  if (Number(detail.status || 0) === 403 || Number(detail.status || 0) === 404) {
     response.kind = "capability";
     response.error = "Quick Note cannot access this destination. Reshare it with the integration and make sure the integration has Insert Content capability.";
   }
   return response;
 }
 
-async function disconnectNotion(confirmed) {
+async function disconnectNotion(confirmed: boolean) {
   const records = await captureRepository.listCaptures();
-  const state = { captures: Object.fromEntries(records.map((record) => [record.id, record])) };
+  const state: CaptureState = { version: 2, drafts: {}, activeDraftId: "", captures: Object.fromEntries(records.map((record) => [record.id, record])) };
   const count = unresolvedCount(state);
   if (count && !confirmed) return { ok: false, requiresConfirmation: true, pendingCount: count };
   const settings = await getSettings();
@@ -1087,33 +1156,52 @@ async function disconnectNotion(confirmed) {
     await captureRepository.updateCapture(record.id, {
       status: DELIVERY_STATES.blockedAuth,
       nextAttemptAt: 0,
-      lastError: { kind: "disconnected", message: "Reconnect or retarget this capture to deliver it." }
+      lastError: { kind: "auth", message: "Reconnect or retarget this capture to deliver it." }
     });
   }
   await updateQueueSurfaces();
   return { ok: true, warning };
 }
 
-async function openQuickNote(tab, forcedSelection = "") {
-  if (tab?.windowId === undefined) return openComposerTab(null, "compose");
-  const windowId = tab.windowId;
+async function openQuickNote(tab: chrome.tabs.Tab | undefined, forcedSelection = "") {
+  const activeTab = tab?.windowId === undefined ? await resolvePanelTab(tab) : tab;
+  if (activeTab?.windowId === undefined) return openComposerTab(null, "compose");
+  const windowId = activeTab.windowId;
   const panelOpening = chrome.sidePanel.open({ windowId: windowId });
-  let draft = null;
+  let draft: CaptureDraft | null = null;
+  let reusedActiveDraft = false;
   try {
-    const context = panelContextFromTab(tab, forcedSelection);
-    draft = await captureRepository.getOrCreateDraft({
-      tabId: tab.id ?? null,
-      context,
-      includeSource: (await getSettings()).includeSource,
-      sessionId: crypto.randomUUID()
+    const includeSource = (await getSettings()).includeSource;
+    draft = await preparePanelDraft({
+      connected: panelCoordinator.has(windowId),
+      getActiveDraft: async () => {
+        const activeDraft = await captureRepository.getActiveDraft();
+        reusedActiveDraft = Boolean(activeDraft);
+        return activeDraft;
+      },
+      createDraft: async () => captureRepository.getOrCreateDraft({
+          tabId: activeTab.id ?? null,
+          context: panelContextFromTab(activeTab, forcedSelection),
+          includeSource,
+          sessionId: crypto.randomUUID()
+        })
     });
   } catch (error) {
     console.warn("Quick Note could not prepare the active draft", error);
   }
   try {
     await panelOpening;
-    if (draft && panelPorts.has(windowId)) {
-      panelPorts.get(windowId).postMessage({ type: "OPEN_DRAFT", draft });
+    panelCoordinator.navigate(windowId, {
+      type: "SHOW_COMPOSER",
+      ...(draft?.id ? { draftId: draft.id } : {}),
+      ...(activeTab.id === undefined ? {} : { tabId: activeTab.id })
+    });
+    if (shouldPublishExplicitContext(forcedSelection, reusedActiveDraft) && activeTab.id !== undefined) {
+      panelCoordinator.publishContext(windowId, {
+        type: "ACTIVE_PAGE_CONTEXT",
+        tabId: activeTab.id,
+        page: panelContextFromTab(activeTab, forcedSelection)
+      });
     }
     return { ok: true, surface: "side_panel" };
   } catch (error) {
@@ -1122,7 +1210,7 @@ async function openQuickNote(tab, forcedSelection = "") {
   }
 }
 
-function panelContextFromTab(tab, selection = "") {
+function panelContextFromTab(tab: chrome.tabs.Tab | null | undefined, selection = ""): CaptureContext {
   return validateContext({
     title: tab?.title || "Current tab",
     url: tab?.url || "",
@@ -1130,22 +1218,18 @@ function panelContextFromTab(tab, selection = "") {
   });
 }
 
-async function publishActivePage(windowId, tabId) {
-  const port = panelPorts.get(windowId);
-  if (!port) return;
+async function publishActivePage(windowId: number, tabId?: number): Promise<void> {
+  if (!panelCoordinator.has(windowId)) return;
   const tab = tabId === undefined
     ? (await chrome.tabs.query({ active: true, windowId }))[0]
     : await chrome.tabs.get(tabId).catch(() => null);
   const context = panelContextFromTab(tab);
   if (!supportsAutomaticContext(context.url) || isPdfUrl(context.url)) return;
-  try {
-    port.postMessage({ type: "ACTIVE_PAGE_CONTEXT", tabId: tab.id, page: context });
-  } catch {
-    if (panelPorts.get(windowId) === port) panelPorts.delete(windowId);
-  }
+  if (tab?.id === undefined) return;
+  panelCoordinator.publishContext(windowId, { type: "ACTIVE_PAGE_CONTEXT", tabId: tab.id, page: context });
 }
 
-function supportsAutomaticContext(url = "") {
+function supportsAutomaticContext(url = ""): boolean {
   try {
     return ["http:", "https:"].includes(new URL(url).protocol);
   } catch {
@@ -1153,7 +1237,7 @@ function supportsAutomaticContext(url = "") {
   }
 }
 
-async function releaseComposerSurface(_sessionId, _tabId) {
+async function releaseComposerSurface(_sessionId: string, _tabId?: number) {
   return { ok: true };
 }
 
@@ -1165,12 +1249,19 @@ function isPdfUrl(url = "") {
   }
 }
 
-async function openComposerFallback(tab, draft, view) {
-  const path = panelPath({ draftId: draft?.id || "", tabId: tab?.id, view });
+type ComposerView = "compose" | "activity";
+
+async function openGlobalPanel(
+  tab: chrome.tabs.Tab | undefined,
+  message: PanelNavigationMessage,
+  draft: CaptureDraft | null,
+  view: ComposerView
+) {
+  const activeTab = tab?.windowId === undefined ? await resolvePanelTab(tab) : tab;
+  if (activeTab?.windowId === undefined) return openComposerTab(draft, view);
   try {
-    if (!tab?.id) throw new Error("No tab is available for a side panel.");
-    await chrome.sidePanel.setOptions({ tabId: tab.id, path, enabled: true });
-    await chrome.sidePanel.open({ tabId: tab.id });
+    await chrome.sidePanel.open({ windowId: activeTab.windowId });
+    panelCoordinator.navigate(activeTab.windowId, message);
     return { ok: true, surface: "side_panel" };
   } catch (error) {
     console.warn("Quick Note side panel unavailable; opening an extension tab", error);
@@ -1178,28 +1269,37 @@ async function openComposerFallback(tab, draft, view) {
   }
 }
 
-async function openComposerTab(draft, view) {
+async function openComposerTab(draft: CaptureDraft | null, view: ComposerView) {
   await chrome.tabs.create({ url: chrome.runtime.getURL(panelPath({ draftId: draft?.id || "", view })) });
   return { ok: true, surface: "tab" };
 }
 
-async function openActivity(tab) {
-  return openComposerFallback(tab, null, "activity");
+async function openActivity(tab: chrome.tabs.Tab | undefined) {
+  return openGlobalPanel(tab, { type: "SHOW_ACTIVITY" }, null, "activity");
 }
 
-async function openSavedDraftFallback(draftId, tab) {
+async function openSavedDraftFallback(draftId: string, tab: chrome.tabs.Tab | undefined) {
   const draft = await captureRepository.getDraft(String(draftId || ""));
-  return openComposerFallback(tab, draft || null, draft ? "compose" : "activity");
+  return openGlobalPanel(
+    tab,
+    draft ? { type: "SHOW_COMPOSER", draftId: draft.id, ...(draft.tabId === null ? {} : { tabId: draft.tabId }) } : { type: "SHOW_ACTIVITY" },
+    draft || null,
+    draft ? "compose" : "activity"
+  );
 }
 
-function panelPath({ draftId = "", tabId = "", view = "compose" } = {}) {
+async function resolvePanelTab(tab: chrome.tabs.Tab | undefined): Promise<chrome.tabs.Tab | undefined> {
+  if (tab?.windowId !== undefined) return tab;
+  return (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+}
+
+function panelPath({ draftId = "", view = "compose" }: { draftId?: string; view?: ComposerView } = {}): string {
   const query = new URLSearchParams({ view });
   if (draftId) query.set("draft", draftId);
-  if (tabId !== "" && tabId !== undefined) query.set("tab", String(tabId));
   return `sidepanel/index.html?${query}`;
 }
 
-function notionSourceUrl(url, includeSource) {
+function notionSourceUrl(url: string, includeSource: boolean): string {
   if (!includeSource) return "";
   try {
     const parsed = new URL(url);
@@ -1210,7 +1310,7 @@ function notionSourceUrl(url, includeSource) {
   }
 }
 
-function destinationToSettings(destination) {
+function destinationToSettings(destination: ManagedDestination) {
   return {
     destinationId: destination.id,
     destinationDatabaseId: destination.databaseId,
@@ -1225,55 +1325,174 @@ function destinationToSettings(destination) {
   };
 }
 
-function isUnauthorized(error) {
+function isUnauthorized(error: unknown): error is NotionApiError {
   return error instanceof NotionApiError && error.status === 401;
 }
 
-function isManagedSchemaError(error, settings) {
+function isManagedSchemaError(error: unknown, settings: Settings): error is NotionApiError {
   return settings.managedDestination && error instanceof NotionApiError && error.status === 400 && error.code === "validation_error";
 }
 
-function errorResponse(error) {
+function errorResponse(error: unknown) {
+  const detail = errorRecord(error);
   return {
     ok: false,
-    error: error.message,
-    status: error.status || 0,
-    code: error.code || "",
+    error: errorMessage(error),
+    status: Number(detail.status || 0),
+    code: String(detail.code || ""),
     kind: errorKind(error),
-    retryAfter: error.retryAfter || 0,
-    reconnect: error.status === 401
+    retryAfter: Number(detail.retryAfter || 0),
+    reconnect: detail.status === 401
   };
 }
 
-function errorKind(error) {
-  if (error.code === "provisioning_uncertain") return "recovering";
-  if (error.status === 401) return "authentication";
-  if (error.status === 403 || error.status === 404) return "capability";
-  if (error.status === 429) return "rate_limited";
-  if (!error.status || error.status >= 500) return "transient";
+function errorKind(error: unknown): string {
+  const detail = errorRecord(error);
+  if (detail.code === "provisioning_uncertain") return "recovering";
+  if (detail.status === 401) return "authentication";
+  if (detail.status === 403 || detail.status === 404) return "capability";
+  if (detail.status === 429) return "rate_limited";
+  if (!detail.status || Number(detail.status) >= 500) return "transient";
   return "generic";
 }
 
-function unresolvedCount(state) {
+function unresolvedCount(state: CaptureState): number {
   return Object.values(state.captures).filter((record) => record.status !== DELIVERY_STATES.delivered).length;
 }
 
-function requiredId(value) {
+function requiredId(value: unknown): string {
   if (typeof value !== "string" || !value) throw new Error("Capture ID is required.");
   return value;
 }
 
-function documentText(node) {
+function documentText(node: EditorNode | undefined): string {
   if (!node) return "";
   if (node.type === "text") return node.text || "";
   if (node.type === "hardBreak") return "\n";
   return (node.content || []).map(documentText).join(node.type === "doc" ? "\n" : "").trim();
 }
 
-function paragraphDocument(text) {
+function paragraphDocument(text: string): EditorNode {
   return { type: "doc", content: [{ type: "paragraph", ...(text ? { content: [{ type: "text", text }] } : {}) }] };
 }
 
-function truncateCharacters(value, limit) {
+function truncateCharacters(value: unknown, limit: number): string {
   return Array.from(String(value || "")).slice(0, limit).join("");
+}
+
+function provisioningSettings(settings: Settings): ProvisioningSettings {
+  return { ...settings };
+}
+
+function notionSettings(settings: ProvisioningSettings): Omit<ProvisioningSettings, "databaseProvisioning"> {
+  const { databaseProvisioning: _databaseProvisioning, ...rest } = settings;
+  return rest;
+}
+
+function requiredToken(value: string | undefined): string {
+  if (!value) throw new Error("Connect Notion first.");
+  return value;
+}
+
+function managedDestination(value: unknown): ManagedDestination {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.databaseId !== "string"
+    || typeof value.name !== "string" || typeof value.titleProperty !== "string"
+    || typeof value.schemaVersion !== "number" || typeof value.marker !== "string") {
+    throw new Error("Notion returned an invalid managed destination.");
+  }
+  const properties: Record<string, { id: string; name: string }> = {};
+  if (isRecord(value.properties)) {
+    for (const [name, property] of Object.entries(value.properties)) {
+      if (isRecord(property) && typeof property.id === "string") {
+        properties[name] = { id: property.id, name: typeof property.name === "string" ? property.name : name };
+      }
+    }
+  }
+  return {
+    id: value.id,
+    databaseId: value.databaseId,
+    type: "database",
+    name: value.name,
+    url: typeof value.url === "string" ? value.url : "",
+    icon: typeof value.icon === "string" ? value.icon : "",
+    titleProperty: value.titleProperty,
+    managedDestination: true,
+    schemaVersion: value.schemaVersion,
+    marker: value.marker,
+    properties
+  };
+}
+
+function normalizeEditorDocument(value: Record<string, unknown>): EditorNode {
+  return {
+    type: typeof value.type === "string" ? value.type : "doc",
+    ...(typeof value.text === "string" ? { text: value.text } : {}),
+    ...(Array.isArray(value.content) ? {
+      content: value.content.filter(isRecord).map(normalizeEditorDocument)
+    } : {})
+  };
+}
+
+function normalizeRemoteTarget(value: unknown): RemoteTarget {
+  if (!isRecord(value)) throw new Error("Notion returned an invalid remote target.");
+  const kind = value.kind === "section" || value.kind === "legacy_section" ? value.kind : "page";
+  const pageId = typeof value.pageId === "string" ? value.pageId : "";
+  return {
+    kind,
+    id: typeof value.id === "string" ? value.id : pageId,
+    pageId,
+    url: typeof value.url === "string" ? value.url : "",
+    blockIds: Array.isArray(value.blockIds) ? value.blockIds.filter((id): id is string => typeof id === "string") : [],
+    fingerprint: typeof value.fingerprint === "string" ? value.fingerprint : "",
+    ...(typeof value.lastEditedTime === "string" ? { lastEditedTime: value.lastEditedTime } : {})
+  };
+}
+
+function notionCapture(capture: CapturePayload) {
+  return {
+    document: capture.document,
+    captureId: capture.captureId,
+    sources: capture.sources,
+    includeSource: capture.includeSource
+  };
+}
+
+function notionRecord(record: CaptureRecord) {
+  return {
+    capture: notionCapture(record.capture),
+    ...(record.remote ? { remote: record.remote } : {}),
+    ...(record.syncJournal ? { syncJournal: record.syncJournal } : {}),
+    ...(record.pendingCapture ? { pendingCapture: notionCapture(record.pendingCapture) } : {}),
+    ...(record.syncedCapture ? { syncedCapture: notionCapture(record.syncedCapture) } : {}),
+    ...(record.destination ? { destination: record.destination } : {})
+  };
+}
+
+function normalizeDestination(value: unknown): Destination | null {
+  if (!isRecord(value) || typeof value.id !== "string" || !value.id
+    || (value.type !== "page" && value.type !== "database") || typeof value.name !== "string") return null;
+  return {
+    id: value.id,
+    type: value.type,
+    name: value.name,
+    ...(typeof value.databaseId === "string" ? { databaseId: value.databaseId } : {}),
+    ...(typeof value.url === "string" ? { url: value.url } : {}),
+    ...(typeof value.icon === "string" ? { icon: value.icon } : {}),
+    ...(typeof value.titleProperty === "string" ? { titleProperty: value.titleProperty } : {}),
+    ...(typeof value.managedDestination === "boolean" ? { managedDestination: value.managedDestination } : {}),
+    ...(typeof value.schemaVersion === "number" ? { schemaVersion: value.schemaVersion } : {}),
+    ...(typeof value.marker === "string" ? { marker: value.marker } : {})
+  };
+}
+
+function errorRecord(error: unknown): Record<string, unknown> {
+  if (isRecord(error)) return error;
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message, cause: error.cause ?? null };
+  }
+  return {};
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || "Unknown error");
 }

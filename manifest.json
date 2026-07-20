@@ -55,20 +55,11 @@
     }
   ],
   "commands": {
-    "toggle-quick-note": {
+    "_execute_action": {
       "suggested_key": {
         "default": "Ctrl+Shift+Space",
-        "mac": "Option+Z"
-      },
-      "description": "Open or close Quick Note"
-    },
-    "open-quick-note-global": {
-      "suggested_key": {
-        "default": "Ctrl+Shift+0",
-        "mac": "Command+Shift+0"
-      },
-      "description": "Open Quick Note from any app",
-      "global": true
+        "mac": "Command+Shift+Space"
+      }
     }
   }
 }

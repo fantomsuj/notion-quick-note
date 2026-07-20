@@ -1,24 +1,273 @@
-// @ts-nocheck
 import { Editor, Extension, InputRule, Mark as TiptapMark, Node as TiptapNode, markInputRule, wrappingInputRule } from "@tiptap/core";
-import StarterKit from "@tiptap/starter-kit";
 import Blockquote from "@tiptap/extension-blockquote";
+import Bold from "@tiptap/extension-bold";
+import BulletList from "@tiptap/extension-bullet-list";
+import Code from "@tiptap/extension-code";
+import CodeBlock from "@tiptap/extension-code-block";
+import Document from "@tiptap/extension-document";
+import Gapcursor from "@tiptap/extension-gapcursor";
+import HardBreak from "@tiptap/extension-hard-break";
+import Heading from "@tiptap/extension-heading";
+import HorizontalRule from "@tiptap/extension-horizontal-rule";
+import Italic from "@tiptap/extension-italic";
 import Link from "@tiptap/extension-link";
+import ListItem from "@tiptap/extension-list-item";
 import OrderedList from "@tiptap/extension-ordered-list";
+import Paragraph from "@tiptap/extension-paragraph";
 import Placeholder from "@tiptap/extension-placeholder";
 import Strike from "@tiptap/extension-strike";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
+import Text from "@tiptap/extension-text";
 import Underline from "@tiptap/extension-underline";
+import { TrailingNode, UndoRedo } from "@tiptap/extensions";
 import { MAX_CAPTURE_CHARACTERS, MAX_CAPTURE_TITLE_CHARACTERS } from "./constants.js";
-import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime-message.js";
+import { enqueueWithReconciliation, isContentRuntimeResponse, withRuntimeMessageDeadline, type ContentRuntimeRequest } from "./runtime-message.js";
 import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailability, suggestNoteTitle } from "./ai-note-actions.js";
+import { isEditorNode, isRecord, type CaptureContext, type CaptureDraft, type CaptureDraftInput, type CaptureSource, type CaptureStatusRecord, type EditorNode, type NotionColorName, type QuickSettings, type RecentItem, type RemoteTarget, type RuntimeRequest, type RuntimeResponse } from "./contracts.js";
+
+type HTMLElementConstructor<T extends HTMLElement = HTMLElement> = { new(): T };
+interface ComposerElements {
+  "link[rel=stylesheet]": HTMLLinkElement; ".sheet": HTMLElement; ".status": HTMLSpanElement;
+  ".more": HTMLButtonElement; ".recent": HTMLButtonElement; ".ai": HTMLButtonElement;
+  ".safe-close": HTMLButtonElement; ".save": HTMLButtonElement; ".close": HTMLButtonElement;
+  ".setup": HTMLButtonElement; ".page-menu": HTMLDivElement; ".manage-sources": HTMLButtonElement;
+  ".open-settings": HTMLButtonElement; ".discard-draft": HTMLButtonElement; ".recent-panel": HTMLElement;
+  ".recent-search": HTMLInputElement; ".recent-list": HTMLDivElement; ".source-panel": HTMLElement;
+  ".source-panel-close": HTMLButtonElement; ".source-list": HTMLDivElement; ".source-empty": HTMLDivElement;
+  ".add-current-source": HTMLButtonElement; ".ai-panel": HTMLElement; ".ai-panel-close": HTMLButtonElement;
+  ".ai-action-list": HTMLDivElement; '[data-ai-action="title"]': HTMLButtonElement; '[data-ai-action="todos"]': HTMLButtonElement;
+  ".ai-review": HTMLDivElement; ".ai-preview-title-wrap": HTMLLabelElement; ".ai-preview-title": HTMLInputElement;
+  ".ai-preview-todos-wrap": HTMLLabelElement; ".ai-preview-todos": HTMLTextAreaElement; ".ai-review-back": HTMLButtonElement;
+  ".ai-apply-title": HTMLButtonElement; ".ai-insert-todos": HTMLButtonElement; ".ai-status": HTMLParagraphElement;
+  ".edit-banner": HTMLDivElement; ".edit-banner-copy": HTMLSpanElement; ".conflict-actions": HTMLSpanElement;
+  ".reload-remote": HTMLButtonElement; ".save-conflict-new": HTMLButtonElement; ".open-conflict-remote": HTMLButtonElement;
+  ".return-draft": HTMLButtonElement; ".stale-banner": HTMLDivElement; ".reload-draft": HTMLButtonElement;
+  ".page-title": HTMLInputElement; ".editor": HTMLDivElement; ".character-limit": HTMLSpanElement; ".bubble": HTMLDivElement;
+  ".block-type": HTMLButtonElement; ".format-menu": HTMLDivElement; ".link-editor": HTMLDivElement;
+  ".link-input": HTMLInputElement; ".apply-link": HTMLButtonElement; ".slash-menu": HTMLDivElement; ".toast": HTMLDivElement;
+  ".format-overflow-button": HTMLButtonElement; ".format-overflow": HTMLDivElement;
+  '.color-palette[data-palette="text"]': HTMLDivElement; '.color-palette[data-palette="highlight"]': HTMLDivElement;
+  '[data-palette-trigger="text"]': HTMLButtonElement; '[data-palette-trigger="highlight"]': HTMLButtonElement;
+  '[data-command="link"]': HTMLButtonElement;
+}
+interface ComposerLists {
+  ".destination-value": HTMLElement; ".source-count": HTMLElement; "[data-ai-action]": HTMLButtonElement;
+  ".bubble [data-command]": HTMLButtonElement; ".format-menu [data-block]": HTMLButtonElement;
+  "button:not(.close)": HTMLButtonElement; ".format-overflow [data-command]": HTMLButtonElement;
+  ".format-overflow [data-palette-trigger]": HTMLButtonElement; ".color-swatch": HTMLButtonElement;
+  ".bubble [data-command], .format-overflow [data-command]": HTMLButtonElement;
+  ".color-palette": HTMLDivElement; "[data-palette-trigger]": HTMLButtonElement;
+  ".block-type, .format-overflow-button, [data-palette-trigger]": HTMLButtonElement;
+}
+type ComposerSelector = keyof ComposerElements;
+type ComposerListSelector = keyof ComposerLists;
+
+type ComposerConstructorGroup = readonly [HTMLElementConstructor, readonly string[]];
+const COMPOSER_ELEMENT_GROUPS = [
+  [HTMLLinkElement, ["link[rel=stylesheet]"]],
+  [HTMLElement, [".sheet", ".recent-panel", ".source-panel", ".ai-panel"]],
+  [HTMLSpanElement, [".status", ".edit-banner-copy", ".conflict-actions", ".character-limit"]],
+  [HTMLButtonElement, [
+    ".more", ".recent", ".ai", ".safe-close", ".save", ".close", ".setup", ".manage-sources",
+    ".open-settings", ".discard-draft", ".source-panel-close", ".add-current-source", ".ai-panel-close",
+    '[data-ai-action="title"]', '[data-ai-action="todos"]', ".ai-review-back", ".ai-apply-title",
+    ".ai-insert-todos", ".reload-remote", ".save-conflict-new", ".open-conflict-remote", ".return-draft",
+    ".reload-draft", ".block-type", ".apply-link", ".format-overflow-button", '[data-palette-trigger="text"]',
+    '[data-palette-trigger="highlight"]', '[data-command="link"]'
+  ]],
+  [HTMLDivElement, [
+    ".page-menu", ".recent-list", ".source-list", ".source-empty", ".ai-action-list", ".ai-review",
+    ".edit-banner", ".stale-banner", ".editor", ".bubble", ".format-menu", ".link-editor", ".slash-menu",
+    ".toast", ".format-overflow", '.color-palette[data-palette="text"]', '.color-palette[data-palette="highlight"]'
+  ]],
+  [HTMLInputElement, [".recent-search", ".ai-preview-title", ".page-title", ".link-input"]],
+  [HTMLLabelElement, [".ai-preview-title-wrap", ".ai-preview-todos-wrap"]],
+  [HTMLTextAreaElement, [".ai-preview-todos"]],
+  [HTMLParagraphElement, [".ai-status"]]
+] as const satisfies readonly ComposerConstructorGroup[];
+const COMPOSER_LIST_GROUPS = [
+  [HTMLElement, [".destination-value", ".source-count"]],
+  [HTMLButtonElement, [
+    "[data-ai-action]", ".bubble [data-command]", ".format-menu [data-block]", "button:not(.close)",
+    ".format-overflow [data-command]", ".format-overflow [data-palette-trigger]", ".color-swatch",
+    ".bubble [data-command], .format-overflow [data-command]", "[data-palette-trigger]",
+    ".block-type, .format-overflow-button, [data-palette-trigger]"
+  ]],
+  [HTMLDivElement, [".color-palette"]]
+] as const satisfies readonly ComposerConstructorGroup[];
+
+function constructorForSelector<T extends HTMLElement>(
+  selector: string,
+  groups: readonly ComposerConstructorGroup[]
+): HTMLElementConstructor<T> {
+  const match = groups.find(([, selectors]) => selectors.includes(selector));
+  if (!match) throw new Error(`Unknown element: ${selector}`);
+  return match[0] as HTMLElementConstructor<T>;
+}
+
+function requiredComposerElements<T extends HTMLElement>(
+  root: ParentNode,
+  selector: string,
+  constructor: HTMLElementConstructor<T>
+): [T, ...T[]] {
+  const elements = [...root.querySelectorAll(selector)];
+  if (!elements.length || elements.some((element) => !(element instanceof constructor))) {
+    throw new Error(`Invalid element: ${selector}`);
+  }
+  return elements as [T, ...T[]];
+}
+
+class ComposerRoot {
+  constructor(readonly shadow: ShadowRoot) {
+    for (const [constructor, selectors] of COMPOSER_LIST_GROUPS) {
+      for (const selector of selectors) requiredComposerElements(shadow, selector, constructor);
+    }
+    for (const [constructor, selectors] of COMPOSER_ELEMENT_GROUPS) {
+      for (const selector of selectors) requiredComposerElements(shadow, selector, constructor);
+    }
+  }
+
+  querySelector<S extends ComposerSelector>(selector: S): ComposerElements[S] {
+    return requiredComposerElements(this.shadow, selector, constructorForSelector<ComposerElements[S]>(selector, COMPOSER_ELEMENT_GROUPS))[0];
+  }
+
+  querySelectorAll<S extends ComposerListSelector>(selector: S): ComposerLists[S][] {
+    return requiredComposerElements(this.shadow, selector, constructorForSelector<ComposerLists[S]>(selector, COMPOSER_LIST_GROUPS));
+  }
+
+  optional<T extends HTMLElement>(selector: string, constructor: HTMLElementConstructor<T>): T | null {
+    const element = this.shadow.querySelector(selector);
+    if (element === null) return null;
+    if (!(element instanceof constructor)) throw new Error(`Quick Note found an invalid ${selector}.`);
+    return element;
+  }
+
+  get activeElement(): Element | null { return this.shadow.activeElement; }
+}
+type AiAvailability = Awaited<ReturnType<typeof languageModelAvailability>> | "checking";
+interface PopupInstance {
+  host: HTMLDialogElement; surface: HTMLDivElement; root: ComposerRoot; page: CaptureContext; previousFocus: Element | null;
+  editor: Editor | null; settings: Partial<QuickSettings> | null; settingsPromise: Promise<Partial<QuickSettings>> | null;
+  draftId: string; tabId: number | null; sessionId: string; revision: number; mode: "new" | "edit";
+  targetRecordId: string; returnDraftId: string; sources: CaptureSource[]; dismissedSourceUrls: string[];
+  remote: RemoteTarget | null; baseFingerprint: string; conflict: boolean;
+  draftTimer: ReturnType<typeof setTimeout> | null; draftFeedbackTimer: ReturnType<typeof setTimeout> | null;
+  draftDirty: boolean; draftWritePromise: Promise<CaptureDraftInput | null> | null; toastTimer: ReturnType<typeof setTimeout> | null;
+  timers: Set<ReturnType<typeof setTimeout>>; userEdited: boolean; hasStoredDraft: boolean; saving: boolean; accepted: boolean;
+  captureId: string; deliveryStartedAt: number; safeToClose: boolean; closed: boolean; contextLost: boolean; handoff: boolean;
+  onFullscreenChange: () => void; removalCount: number; removalObserver: MutationObserver | null;
+  aiController: AbortController | null; aiAvailability: AiAvailability; aiBusy: boolean;
+}
+interface DraftView extends Partial<CaptureDraftInput> {
+  version: 2; title: string; includeSource: boolean; sources: CaptureSource[]; doc: EditorNode; conflict?: boolean;
+}
+interface SlashCommand { id: string; label: string; hint: string; keys: string; run(editor: Editor): boolean }
+interface RecentGroups { drafts: RecentItem[]; notes: RecentItem[]; notionPages: RecentItem[]; notionError: string }
+type AiAction = "title" | "todos";
+type ToastTone = "" | "error" | "success";
+type InlineCommand = "bold" | "italic" | "underline" | "strike" | "code" | "link";
+type PaletteKind = "text" | "highlight";
+type BlockCommand = "paragraph" | `heading${1 | 2 | 3}` | "bulletList" | "orderedList" | "taskList" | "blockquote" | "codeBlock";
+type PrimaryAction = "close" | "settings" | "activity" | "save";
+type EnqueueResponse = RuntimeResponse<Extract<RuntimeRequest, { type: "ENQUEUE_CAPTURE" | "SAVE_CAPTURE" }>>;
+type IconName = "check" | "close" | "more" | "recent" | "sparkle" | "search" | "source" | "open" | "settings" | "trash";
+interface OpenOptions { draft?: CaptureDraft; page?: CaptureContext; draftId?: string; tabId?: number | null; sessionId?: string; revision?: number; replaceWithoutPersist?: boolean }
+interface ContentPage { version?: 1; title: string; url: string; selection: string; capturedAt?: number; frameUrl?: string }
+interface ContextUpdate { page: CaptureContext; tabId?: number | null; explicit?: boolean }
+type ContentMessage =
+  | { type: "QUICK_NOTE_PING" }
+  | { type: "FLUSH_AND_CLOSE_QUICK_NOTE"; sessionId?: string }
+  | { type: "QUICK_SETTINGS_CHANGED"; settings: Partial<QuickSettings> }
+  | { type: "TOGGLE_QUICK_NOTE"; page: ContentPage; draftId?: string; tabId?: number | null; sessionId?: string; revision?: number };
+interface ContextLossError extends Error { code: "quick_note_context_lost" }
+
+const NOTION_COLORS: NotionColorName[] = ["default", "gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"];
+
+function asComposerRoot(root: ShadowRoot): ComposerRoot {
+  return new ComposerRoot(root);
+}
+
+function requiredDescendant(root: ParentNode, selector: string): HTMLElement {
+  const element = root.querySelector(selector);
+  if (!(element instanceof HTMLElement)) throw new Error(`Quick Note template is missing ${selector}.`);
+  return element;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return isRecord(error) && typeof error.message === "string" && error.message ? error.message : fallback;
+}
+
+function errorCode(error: unknown): string {
+  return isRecord(error) && typeof error.code === "string" ? error.code : "";
+}
+
+function isQuickSettingsPatch(value: unknown): value is Partial<QuickSettings> {
+  if (!isRecord(value)) return false;
+  return (value.destinationName === undefined || typeof value.destinationName === "string")
+    && (value.includeSource === undefined || typeof value.includeSource === "boolean")
+    && (value.aiEnabled === undefined || typeof value.aiEnabled === "boolean")
+    && (value.aiSuggestTitle === undefined || typeof value.aiSuggestTitle === "boolean")
+    && (value.aiExtractTodos === undefined || typeof value.aiExtractTodos === "boolean")
+    && (value.connected === undefined || typeof value.connected === "boolean")
+    && (value.configured === undefined || typeof value.configured === "boolean")
+    && (value.authType === undefined || value.authType === "oauth" || value.authType === "token");
+}
+
+function isContentPage(value: unknown): value is ContentPage {
+  return isRecord(value)
+    && (value.version === undefined || value.version === 1)
+    && typeof value.title === "string"
+    && typeof value.url === "string"
+    && typeof value.selection === "string"
+    && (value.capturedAt === undefined || (typeof value.capturedAt === "number" && Number.isFinite(value.capturedAt)))
+    && (value.frameUrl === undefined || typeof value.frameUrl === "string");
+}
+
+function normalizeContentPage(page: ContentPage): CaptureContext {
+  return {
+    version: 1,
+    title: page.title,
+    url: page.url,
+    selection: page.selection,
+    capturedAt: page.capturedAt ?? Date.now(),
+    ...(page.frameUrl === undefined ? {} : { frameUrl: page.frameUrl })
+  };
+}
+
+function isNotionColorName(value: unknown): value is NotionColorName {
+  return typeof value === "string" && NOTION_COLORS.some((color) => color === value);
+}
+
+function isContentMessage(value: unknown): value is ContentMessage {
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+  if (value.type === "QUICK_NOTE_PING") return true;
+  if (value.type === "FLUSH_AND_CLOSE_QUICK_NOTE") return value.sessionId === undefined || typeof value.sessionId === "string";
+  if (value.type === "QUICK_SETTINGS_CHANGED") return isQuickSettingsPatch(value.settings);
+  return value.type === "TOGGLE_QUICK_NOTE"
+    && isContentPage(value.page)
+    && (value.draftId === undefined || typeof value.draftId === "string")
+    && (value.tabId === undefined || value.tabId === null || (typeof value.tabId === "number" && Number.isInteger(value.tabId)))
+    && (value.sessionId === undefined || typeof value.sessionId === "string")
+    && (value.revision === undefined || (typeof value.revision === "number" && Number.isInteger(value.revision)));
+}
+
+function requireEditor(instance: PopupInstance): Editor {
+  if (!instance.editor) throw new Error("Quick Note editor has not been initialized.");
+  return instance.editor;
+}
+
+function currentEditor(editor: Editor | undefined): Editor {
+  if (!editor) throw new Error("Quick Note editor is unavailable.");
+  return editor;
+}
 
 (() => {
   const PROTOCOL = 1;
   const DRAFT_VERSION = 2;
   const KEYBOARD_EVENTS = ["keydown", "keypress", "keyup"];
   const handledKeyboardEvents = new WeakSet();
-  const slashCommands = [
+  const slashCommands: SlashCommand[] = [
     { id: "text", label: "Text", hint: "Plain paragraph", keys: "", run: (editor) => editor.chain().focus().setParagraph().run() },
     { id: "h1", label: "Heading 1", hint: "Large section heading", keys: "#", run: (editor) => editor.chain().focus().toggleHeading({ level: 1 }).run() },
     { id: "h2", label: "Heading 2", hint: "Medium section heading", keys: "##", run: (editor) => editor.chain().focus().toggleHeading({ level: 2 }).run() },
@@ -33,19 +282,20 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
   ];
   const suggestedSlashCommandIds = ["text", "h1", "todo", "bullet"];
 
-  let popup;
-  let editor;
+  let popup: PopupInstance | undefined;
+  let editor: Editor | undefined;
   let slashIndex = 0;
-  let lastSlashQuery = null;
+  let lastSlashQuery: string | null = null;
 
   let disposed = false;
-  const instances = new Set();
+  const instances = new Set<PopupInstance>();
 
   window.__notionQuickNoteRuntime?.dispose?.();
-  delete window.__notionQuickNoteInstalled;
+  Reflect.deleteProperty(window, "__notionQuickNoteInstalled");
   document.querySelectorAll("[data-notion-quick-note-owned='true']").forEach((element) => element.remove());
 
-  const onMessage = (message, _sender, sendResponse) => {
+  const onMessage = (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void): boolean => {
+    if (!isContentMessage(message)) return false;
     if (message?.type === "QUICK_NOTE_PING") {
       sendResponse({ ready: true, protocol: PROTOCOL, open: Boolean(popup), sessionId: popup?.sessionId || "" });
       return false;
@@ -57,16 +307,16 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       }
       const surface = popup;
       surface.handoff = true;
-      clearTimeout(surface.draftTimer);
+      if (surface.draftTimer !== null) clearTimeout(surface.draftTimer);
       surface.draftTimer = null;
       void persistDraft(surface)
         .then(() => {
           close(surface, true);
           sendResponse({ ok: true, closed: true });
         })
-        .catch((error) => {
+        .catch((error: unknown) => {
           surface.handoff = false;
-          sendResponse({ ok: false, error: error?.message || "Draft flush failed." });
+          sendResponse({ ok: false, error: errorMessage(error, "Draft flush failed.") });
         });
       return true;
     }
@@ -79,36 +329,111 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
     if (message?.type !== "TOGGLE_QUICK_NOTE") return false;
     if (popup) close(popup);
-    else open(message.page, message.draftId, message.tabId, message.sessionId, message.revision);
+    else open(normalizeContentPage(message.page), message.draftId, message.tabId, message.sessionId, message.revision);
     return false;
   };
 
-  const openFromPage = ({ page, draftId, tabId, sessionId, revision } = {}) => {
+  const openFromPage = async ({ draft, page, draftId, tabId, sessionId, revision, replaceWithoutPersist = false }: OpenOptions): Promise<void> => {
+    const requestedDraftId = draft?.id || draftId || "";
+    if (popup && requestedDraftId && popup.draftId === requestedDraftId) {
+      if (replaceWithoutPersist && draft) {
+        popup.tabId = draft.tabId;
+        popup.sessionId = draft.sessionId;
+        popup.revision = draft.revision;
+        popup.hasStoredDraft = true;
+      }
+      resumeComposer();
+      return;
+    }
+    if (popup && draft) {
+      const current = popup;
+      if (!current.accepted && !replaceWithoutPersist) {
+        try {
+          await persistDraft(current);
+        } catch (error) {
+          if (!current.closed) scheduleDraft(current);
+          throw error;
+        }
+      }
+      if (popup !== current || current.closed) return;
+      stopTimers(current);
+      current.page = draft.context || page || current.page;
+      current.tabId = draft.tabId ?? tabId ?? current.tabId;
+      current.accepted = false;
+      current.saving = false;
+      current.safeToClose = false;
+      current.captureId = "";
+      current.contextLost = false;
+      current.root.querySelector(".stale-banner").hidden = true;
+      closeTransientUi(current.root);
+      applyDraftToInstance(current.root, current, draft);
+      resumeComposer();
+      return;
+    }
     if (popup) close(popup);
-    open(page || { title: "Quick Note", url: "", selection: "" }, draftId, tabId, sessionId, revision);
+    open(page || draft?.context || { version: 1, title: "Quick Note", url: "", selection: "", capturedAt: Date.now() }, requestedDraftId, tabId, sessionId, revision, draft);
   };
-  const updateContext = ({ page, tabId, explicit = false } = {}) => {
+  const updateContext = ({ page, tabId, explicit = false }: ContextUpdate): void => {
     if (!popup || !page) return;
     updatePageContext(popup, page, tabId, explicit);
+  };
+  const suspendComposer = () => {
+    if (!popup || popup.closed) return;
+    if (popup.host.open) popup.host.close();
+    popup.host.hidden = true;
+  };
+  const resumeComposer = () => {
+    if (!popup || popup.closed) return;
+    popup.host.hidden = false;
+    if (popup.host.isConnected && !popup.host.open) popup.host.showModal();
+  };
+  const prepareDiscard = async (draftId: string): Promise<boolean> => {
+    const current = popup;
+    if (!current || current.closed || current.draftId !== draftId) return false;
+    current.accepted = true;
+    current.draftDirty = false;
+    stopTimers(current);
+    await current.draftWritePromise?.catch(() => null);
+    current.draftDirty = false;
+    return popup === current && !current.closed;
+  };
+  const finishDiscard = (draftId: string, discarded: boolean): void => {
+    const current = popup;
+    if (!current || current.closed || current.draftId !== draftId) return;
+    if (!discarded) {
+      current.accepted = false;
+      scheduleDraft(current);
+      return;
+    }
+    emitTerminal(current, "discarded");
+    disposePopup(current);
   };
   const runtime = { protocol: PROTOCOL, dispose };
   chrome.runtime.onMessage.addListener(onMessage);
   window.__notionQuickNoteOpen = openFromPage;
   window.__notionQuickNoteUpdateContext = updateContext;
+  window.__notionQuickNoteSuspend = suspendComposer;
+  window.__notionQuickNoteResume = resumeComposer;
+  window.__notionQuickNotePrepareDiscard = prepareDiscard;
+  window.__notionQuickNoteFinishDiscard = finishDiscard;
   window.__notionQuickNoteRuntime = runtime;
 
   function dispose() {
     if (disposed) return;
     disposed = true;
     globalThis.chrome?.runtime?.onMessage?.removeListener?.(onMessage);
-    if (window.__notionQuickNoteOpen === openFromPage) delete window.__notionQuickNoteOpen;
-    if (window.__notionQuickNoteUpdateContext === updateContext) delete window.__notionQuickNoteUpdateContext;
-    if (window.__notionQuickNoteRuntime === runtime) delete window.__notionQuickNoteRuntime;
+    if (window.__notionQuickNoteOpen === openFromPage) Reflect.deleteProperty(window, "__notionQuickNoteOpen");
+    if (window.__notionQuickNoteUpdateContext === updateContext) Reflect.deleteProperty(window, "__notionQuickNoteUpdateContext");
+    if (window.__notionQuickNoteSuspend === suspendComposer) Reflect.deleteProperty(window, "__notionQuickNoteSuspend");
+    if (window.__notionQuickNoteResume === resumeComposer) Reflect.deleteProperty(window, "__notionQuickNoteResume");
+    if (window.__notionQuickNotePrepareDiscard === prepareDiscard) Reflect.deleteProperty(window, "__notionQuickNotePrepareDiscard");
+    if (window.__notionQuickNoteFinishDiscard === finishDiscard) Reflect.deleteProperty(window, "__notionQuickNoteFinishDiscard");
+    if (window.__notionQuickNoteRuntime === runtime) Reflect.deleteProperty(window, "__notionQuickNoteRuntime");
     for (const instance of [...instances]) disposePopup(instance);
     document.querySelectorAll("[data-notion-quick-note-owned='true']").forEach((element) => element.remove());
   }
 
-  function open(page, draftId = "", tabId = null, sessionId = crypto.randomUUID(), revision = 0) {
+  function open(page: CaptureContext, draftId = "", tabId: number | null = null, sessionId: string = crypto.randomUUID(), revision = 0, providedDraft: CaptureDraft | null = null): void {
     const previousFocus = document.activeElement;
     const dialog = document.createElement("dialog");
     dialog.id = document.getElementById("notion-quick-note-root")
@@ -121,11 +446,12 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     const backdropStyle = document.createElement("style");
     backdropStyle.textContent = `#${CSS.escape(dialog.id)}::backdrop{background:transparent}`;
     const surface = document.createElement("div");
-    const root = surface.attachShadow({ mode: "open" });
-    root.innerHTML = template();
+    const shadowRoot = surface.attachShadow({ mode: "open" });
+    shadowRoot.innerHTML = template();
+    const root = asComposerRoot(shadowRoot);
     dialog.append(backdropStyle, surface);
 
-    const instance = {
+    const instance: PopupInstance = {
       host: dialog,
       surface,
       root,
@@ -139,12 +465,12 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       sessionId,
       revision: Number(revision) || 0,
       mode: "new",
-      targetRecordId: null,
-      returnDraftId: null,
+      targetRecordId: "",
+      returnDraftId: "",
       sources: [],
       dismissedSourceUrls: [],
       remote: null,
-      baseFingerprint: null,
+      baseFingerprint: "",
       conflict: false,
       draftTimer: null,
       draftFeedbackTimer: null,
@@ -162,7 +488,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       closed: false,
       contextLost: false,
       handoff: false,
-      onFullscreenChange: null,
+      onFullscreenChange: () => undefined,
       removalCount: 0,
       removalObserver: null,
       aiController: null,
@@ -177,13 +503,14 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       close(instance);
     });
     containKeyboard(instance);
-    const initialDraft = normalizeDraft(undefined, instance);
+    const initialDraft = normalizeDraft(providedDraft, instance);
     hydrateShell(root, initialDraft, instance);
     (document.fullscreenElement || document.documentElement).append(dialog);
     dialog.showModal();
     createEditor(root, initialDraft, instance);
     wire(root, instance);
-    instance.editor.commands.focus("end");
+    if (providedDraft) applyDraftToInstance(root, instance, providedDraft);
+    requireEditor(instance).commands.focus("end");
 
     instance.onFullscreenChange = () => promoteAfterFullscreenChange(instance);
     document.addEventListener("fullscreenchange", instance.onFullscreenChange);
@@ -201,55 +528,55 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
 
     instance.settingsPromise = sendRuntimeMessage({ type: "GET_QUICK_SETTINGS" }, instance)
       .then((settings) => {
-        instance.settings = settings || {};
+        instance.settings = settings?.ok ? settings : {};
         if (popup === instance && !instance.closed) hydrateSettings(instance);
         return instance.settings;
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         instance.settings = {};
         if (popup === instance && !instance.closed) {
           setStatus(instance.root, "Settings unavailable");
-          showToast(instance.root, error?.message || "Quick Note could not load settings.", "error", instance);
+          showToast(instance.root, errorMessage(error, "Quick Note could not load settings."), "error", instance);
         }
         return instance.settings;
       });
-    void hydrateDraft(instance).catch((error) => {
+    if (!providedDraft) void hydrateDraft(instance).catch((error: unknown) => {
       if (popup === instance && !instance.closed && !instance.contextLost) {
         setStatus(instance.root, "Draft not loaded");
-        showToast(instance.root, error?.message || "Quick Note could not load the local draft.", "error", instance);
+        showToast(instance.root, errorMessage(error, "Quick Note could not load the local draft."), "error", instance);
       }
     });
   }
 
-  function containKeyboard(instance) {
+  function containKeyboard(instance: PopupInstance): void {
     for (const type of KEYBOARD_EVENTS) {
-      instance.root.addEventListener(type, (event) => {
-        if (type === "keydown") handleRootKeyDown(instance.root, event, instance);
+      instance.root.shadow.addEventListener(type, (event) => {
+        if (type === "keydown" && event instanceof KeyboardEvent) handleRootKeyDown(instance.root, event, instance);
         event.stopPropagation();
       });
       instance.host.addEventListener(type, (event) => event.stopPropagation());
     }
   }
 
-  function promoteAfterFullscreenChange(instance) {
+  function promoteAfterFullscreenChange(instance: PopupInstance): void {
     requestAnimationFrame(() => {
       if (popup !== instance || instance.closed || !instance.host.isConnected) return;
       const menuButton = instance.root.querySelector(".more");
       const active = menuButton.getAttribute("aria-expanded") === "true"
         ? menuButton
-        : instance.root.activeElement || instance.root.querySelector(".ProseMirror");
+        : instance.root.activeElement || instance.root.optional(".ProseMirror", HTMLElement);
       if (instance.host.open) instance.host.close();
       const fullscreenContainer = document.fullscreenElement || document.documentElement;
       if (instance.host.parentElement !== fullscreenContainer) fullscreenContainer.append(instance.host);
       instance.host.showModal();
-      active?.focus({ preventScroll: true });
+      if (active instanceof HTMLElement) active.focus({ preventScroll: true });
       requestAnimationFrame(() => {
-        if (popup === instance && !instance.closed) active?.focus({ preventScroll: true });
+        if (popup === instance && !instance.closed && active instanceof HTMLElement) active.focus({ preventScroll: true });
       });
     });
   }
 
-  function recoverRemovedOverlay(instance) {
+  function recoverRemovedOverlay(instance: PopupInstance): void {
     if (instance.closed || instance.host.isConnected) return;
     instance.removalCount += 1;
     if (instance.removalCount === 1) {
@@ -259,7 +586,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     fallbackFromOverlay(instance);
   }
 
-  function fallbackFromOverlay(instance) {
+  function fallbackFromOverlay(instance: PopupInstance): void {
     if (instance.closed) return;
     void persistDraft(instance)
       .catch(() => undefined)
@@ -267,7 +594,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     close(instance, true);
   }
 
-  function close(instance = popup, force = false) {
+  function close(instance: PopupInstance | undefined = popup, force = false): void {
     if (!instance || instance.closed) return;
     if (!force && instance.saving && !instance.safeToClose) {
       setStatus(instance.root, instance.accepted ? "Sending to Notion…" : "Saving locally…");
@@ -297,10 +624,10 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       instance.host.remove();
       instances.delete(instance);
       if (!popup) restoreFocus(instance.previousFocus);
-    }, delay);
+    }, delay, "Couldn’t finish closing Quick Note.");
   }
 
-  function disposePopup(instance) {
+  function disposePopup(instance: PopupInstance): void {
     instance.closed = true;
     if (popup === instance) popup = undefined;
     if (editor === instance.editor) editor = undefined;
@@ -314,10 +641,10 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     instances.delete(instance);
   }
 
-  function stopTimers(instance) {
-    clearTimeout(instance.draftTimer);
-    clearTimeout(instance.draftFeedbackTimer);
-    clearTimeout(instance.toastTimer);
+  function stopTimers(instance: PopupInstance): void {
+    if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
+    if (instance.draftFeedbackTimer !== null) clearTimeout(instance.draftFeedbackTimer);
+    if (instance.toastTimer !== null) clearTimeout(instance.toastTimer);
     instance.draftTimer = null;
     instance.draftFeedbackTimer = null;
     instance.toastTimer = null;
@@ -327,9 +654,36 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     instance.timers.clear();
   }
 
-  function isContextLossError(error) {
-    if (error?.code === "quick_note_context_lost") return true;
-    const message = String(error?.message || error || "").toLowerCase();
+  function emitTerminal(instance: PopupInstance, reason: "saved" | "discarded"): void {
+    try {
+      window.__notionQuickNoteOnTerminal?.({ draftId: instance.draftId, reason });
+    } catch {
+      // Panel cache notifications must never interrupt durable save or discard completion.
+    }
+  }
+
+  function reportAsyncFailure(instance: PopupInstance, error: unknown, fallback: string): void {
+    if (isContextLossError(error)) {
+      handleContextLoss(instance);
+      return;
+    }
+    if (instance.closed) return;
+    if (instance.aiBusy) {
+      instance.aiController?.abort();
+      instance.aiController = null;
+      instance.aiBusy = false;
+      setAiActionButtonsDisabled(instance.root, instance.aiAvailability === "unavailable");
+    }
+    showToast(instance.root, errorMessage(error, fallback), "error", instance);
+  }
+
+  function observeInstancePromise(instance: PopupInstance, promise: PromiseLike<unknown>, fallback: string): void {
+    void Promise.resolve(promise).catch((error: unknown) => reportAsyncFailure(instance, error, fallback));
+  }
+
+  function isContextLossError(error: unknown): boolean {
+    if (errorCode(error) === "quick_note_context_lost") return true;
+    const message = errorMessage(error, String(error || "")).toLowerCase();
     return [
       "extension context invalidated",
       "receiving end does not exist",
@@ -341,37 +695,27 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     ].some((fragment) => message.includes(fragment));
   }
 
-  function contextLossError() {
-    const error = new Error("Quick Note extension context is unavailable.");
+  function contextLossError(): ContextLossError {
+    const error = new Error("Quick Note extension context is unavailable.") as ContextLossError;
     error.code = "quick_note_context_lost";
     return error;
   }
 
-  async function sendRuntimeMessage(message, instance = popup) {
+  async function sendRuntimeMessage<const T extends ContentRuntimeRequest>(message: T, instance: PopupInstance | undefined = popup): Promise<RuntimeResponse<T> | undefined> {
     try {
       const runtime = globalThis.chrome?.runtime;
       if (!runtime?.id || typeof runtime.sendMessage !== "function") throw contextLossError();
-      return await withRuntimeMessageDeadline(runtime.sendMessage(message));
-    } catch (error) {
+      const response: unknown = await withRuntimeMessageDeadline(runtime.sendMessage(message));
+      if (!isContentRuntimeResponse(message, response)) throw new Error(`Quick Note received a malformed response for ${message.type}.`);
+      return response;
+    } catch (error: unknown) {
       if (!isContextLossError(error)) throw error;
       handleContextLoss(instance);
       return undefined;
     }
   }
 
-  async function accessSessionStorage(method, value, instance = popup) {
-    try {
-      const storage = globalThis.chrome?.storage?.session;
-      if (typeof storage?.[method] !== "function") throw contextLossError();
-      return await storage[method](value);
-    } catch (error) {
-      if (!isContextLossError(error)) throw error;
-      handleContextLoss(instance);
-      return undefined;
-    }
-  }
-
-  function handleContextLoss(instance = popup) {
+  function handleContextLoss(instance: PopupInstance | undefined = popup): void {
     if (!instance || instance.closed || instance.contextLost) return;
     instance.contextLost = true;
     instance.saving = false;
@@ -388,7 +732,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     toast.hidden = false;
   }
 
-  function restoreFocus(element) {
+  function restoreFocus(element: Element | null): void {
     if (!(element instanceof HTMLElement) || !element.isConnected) return;
     try {
       element.focus({ preventScroll: true });
@@ -397,20 +741,20 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  async function hydrateDraft(instance) {
-    let response;
+  async function hydrateDraft(instance: PopupInstance): Promise<void> {
+    let response: RuntimeResponse<Extract<RuntimeRequest, { type: "GET_OR_CREATE_DRAFT" }>> | undefined;
     try {
       response = await sendRuntimeMessage({
         type: "GET_OR_CREATE_DRAFT",
         draftId: instance.draftId,
-        tabId: instance.tabId,
+        ...(instance.tabId === null ? {} : { tabId: instance.tabId }),
         sessionId: instance.sessionId,
         context: instance.page,
         includeSource: instance.settings?.includeSource !== false
       }, instance);
-    } catch (error) {
+    } catch (error: unknown) {
       if (!isContextLossError(error)) throw error;
-      response = {};
+      response = undefined;
     }
     if (popup !== instance || instance.closed || instance.userEdited) return;
     if (instance.contextLost) return;
@@ -425,8 +769,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     applyDraftToInstance(instance.root, instance, draft);
   }
 
-  function normalizeDraft(value, instance = popup) {
-    if (value?.doc?.type === "doc") {
+  function normalizeDraft(value: CaptureDraft | DraftView | string | null | undefined, instance: PopupInstance): DraftView {
+    if (typeof value !== "string" && value?.doc?.type === "doc") {
       return {
         ...value,
         version: DRAFT_VERSION,
@@ -470,37 +814,38 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     };
   }
 
-  function applyDraftToInstance(root, instance, draftValue) {
+  function applyDraftToInstance(root: ComposerRoot, instance: PopupInstance, draftValue: CaptureDraft | DraftView | string): void {
     const draft = normalizeDraft(draftValue, instance);
     instance.draftId = draft.id || instance.draftId;
     instance.revision = Number(draft.revision) || 0;
     instance.sessionId = draft.sessionId || instance.sessionId;
     instance.mode = draft.mode || "new";
-    instance.targetRecordId = draft.targetRecordId || null;
-    instance.returnDraftId = draft.returnDraftId || null;
+    instance.targetRecordId = draft.targetRecordId || "";
+    instance.returnDraftId = draft.returnDraftId || "";
     instance.sources = normalizeSources(draft.sources || sourceFromPage(draft.context || instance.page));
     instance.dismissedSourceUrls = normalizeDismissedSourceUrls(draft.dismissedSourceUrls);
     instance.remote = draft.remote || null;
-    instance.baseFingerprint = draft.baseFingerprint || null;
+    instance.baseFingerprint = draft.baseFingerprint || "";
     instance.conflict = Boolean(draft.conflict);
     instance.draftDirty = false;
     root.querySelector(".page-title").value = draft.title || "";
-    instance.editor.commands.setContent(draft.doc, { emitUpdate: false });
+    const draftEditor = requireEditor(instance);
+    draftEditor.commands.setContent(draft.doc, { emitUpdate: false });
     renderSources(root, instance);
     renderEditBanner(root, instance);
     instance.userEdited = false;
-    instance.editor.setEditable(true);
+    draftEditor.setEditable(true);
     root.querySelector(".page-title").readOnly = false;
     configureAiFeatures(instance);
-    instance.editor.commands.focus("end");
+    draftEditor.commands.focus("end");
     updateEditorUi(root);
   }
 
-  function sourceFromPage(page = {}) {
-    return page.url ? [{ title: page.title || hostname(page.url), url: page.url, capturedAt: Date.now() }] : [];
+  function sourceFromPage(page: CaptureContext): CaptureSource[] {
+    return page.url ? [{ title: page.title || hostname(page.url), url: page.url, selection: page.selection || "", capturedAt: Date.now() }] : [];
   }
 
-  function normalizePageUrl(value = "") {
+  function normalizePageUrl(value: unknown = ""): string {
     try {
       const url = new URL(String(value));
       if (!/^https?:$/.test(url.protocol)) return "";
@@ -511,15 +856,15 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function normalizeDismissedSourceUrls(values = []) {
-    return [...new Set((Array.isArray(values) ? values : []).map(normalizePageUrl).filter(Boolean))].slice(0, 100);
+  function normalizeDismissedSourceUrls(values: readonly unknown[] | undefined = []): string[] {
+    return [...new Set(values.map(normalizePageUrl).filter(Boolean))].slice(0, 100);
   }
 
-  function normalizeSources(sources = []) {
-    const seen = new Set();
+  function normalizeSources(sources: readonly Partial<CaptureSource>[] = []): CaptureSource[] {
+    const seen = new Set<string>();
     return sources.flatMap((source) => {
       if (!source?.url) return [];
-      let key;
+      let key: string;
       try {
         const url = new URL(source.url);
         url.hash = "";
@@ -538,7 +883,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }).slice(0, 20);
   }
 
-  function updatePageContext(instance, page, tabId, explicit) {
+  function updatePageContext(instance: PopupInstance, page: CaptureContext, tabId: number | null | undefined, explicit: boolean): void {
     const url = normalizePageUrl(page.url);
     if (!url) return;
     instance.page = { ...instance.page, ...page, url, selection: explicit ? page.selection || "" : "" };
@@ -559,14 +904,24 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     const sources = normalizeSources(instance.sources);
     const index = sources.findIndex((source) => source.url === url);
     const title = page.title || hostname(url);
+    const selectedText = explicit ? String(page.selection || "").trim() : "";
     let changed = false;
     if (index >= 0) {
-      if (sources[index].title !== title) {
-        sources[index] = { ...sources[index], title };
+      const existingSource = sources[index];
+      if (existingSource && (existingSource.title !== title || (selectedText && existingSource.selection !== selectedText))) {
+        sources[index] = { ...existingSource, title, ...(selectedText ? { selection: selectedText } : {}) };
         changed = true;
       }
     } else if (sources.length < 20) {
-      sources.push({ title, url, selection: "", capturedAt: Date.now() });
+      sources.push({ title, url, selection: selectedText, capturedAt: Date.now() });
+      changed = true;
+    }
+    const pageEditor = requireEditor(instance);
+    if (selectedText && !pageEditor.getText().includes(selectedText)) {
+      pageEditor.chain().focus("end").insertContent([
+        { type: "blockquote", content: [{ type: "paragraph", content: [{ type: "text", text: selectedText }] }] },
+        { type: "paragraph" }
+      ]).run();
       changed = true;
     }
     instance.sources = sources;
@@ -574,35 +929,36 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     if (changed || explicit) scheduleDraft(instance);
   }
 
-  function paragraphDocument(text) {
+  function paragraphDocument(text: string): EditorNode {
     return {
       type: "doc",
       content: [{ type: "paragraph", ...(text ? { content: [{ type: "text", text }] } : {}) }]
     };
   }
 
-  function hydrateShell(root, draft, instance) {
+  function hydrateShell(root: ComposerRoot, draft: DraftView, instance: PopupInstance): void {
     root.querySelector(".page-title").value = draft.title || "";
     root.querySelectorAll(".destination-value").forEach((element) => { element.textContent = "Notion Inbox"; });
     instance.sources = normalizeSources(draft.sources || sourceFromPage(instance.page));
     renderSources(root, instance);
   }
 
-  function hydrateSettings(instance) {
+  function hydrateSettings(instance: PopupInstance): void {
+    const settings = instance.settings ?? {};
     instance.root.querySelectorAll(".destination-value").forEach((element) => {
-      element.textContent = instance.settings.destinationName || "Notion Inbox";
+      element.textContent = settings.destinationName || "Notion Inbox";
     });
     const setup = instance.root.querySelector(".setup");
-    setup.hidden = instance.settings.configured !== false;
-    setup.querySelector("strong").textContent = instance.settings.connected ? "Finish setup" : "One minute of setup";
-    setup.querySelector("span").textContent = instance.settings.connected
+    setup.hidden = settings.configured !== false;
+    requiredDescendant(setup, "strong").textContent = settings.connected ? "Finish setup" : "One minute of setup";
+    requiredDescendant(setup, "span").textContent = settings.connected
       ? "Your token is connected. Choose where notes should land."
       : "Connect Notion and choose where notes should land.";
     configureAiFeatures(instance);
     renderSources(instance.root, instance);
   }
 
-  function hostname(url) {
+  function hostname(url: string): string {
     try {
       return new URL(url).hostname;
     } catch {
@@ -610,17 +966,25 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function createEditor(root, draft, instance) {
-    instance.editor = new Editor({
+  function createEditor(root: ComposerRoot, draft: DraftView, instance: PopupInstance): void {
+    const createdEditor = new Editor({
       element: root.querySelector(".editor"),
       extensions: [
-        StarterKit.configure({
-          blockquote: false,
-          link: false,
-          orderedList: false,
-          strike: false,
-          underline: false
-        }),
+        Bold,
+        BulletList,
+        Code,
+        CodeBlock,
+        Document,
+        Gapcursor,
+        HardBreak,
+        Heading,
+        HorizontalRule,
+        Italic,
+        ListItem,
+        Paragraph,
+        Text,
+        TrailingNode,
+        UndoRedo,
         NotionBlockquote,
         NotionOrderedList,
         NotionStrike,
@@ -661,11 +1025,31 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
         if (popup === instance && !instance.closed) updateBubble(root);
       }, 0)
     });
-    editor = instance.editor;
+    instance.editor = createdEditor;
+    editor = createdEditor;
     updateEditorUi(root);
   }
 
-  function wire(root, instance) {
+  async function discardDraft(root: ComposerRoot, instance: PopupInstance): Promise<void> {
+    const draftId = instance.draftId;
+    let discarded = false;
+    try {
+      await prepareDiscard(draftId);
+      const response = await sendRuntimeMessage({ type: "DISCARD_DRAFT", id: draftId }, instance);
+      if (!response?.ok) throw new Error(response?.error || "Couldn’t discard this draft.");
+      if (!response.discarded) throw new Error("Couldn’t discard this draft.");
+      discarded = true;
+    } catch (error) {
+      const check = await sendRuntimeMessage({ type: "GET_PANEL_DRAFT", draftId }, instance).catch(() => null);
+      discarded = check?.ok === false && check.code === "draft_not_found";
+      if (!discarded) throw error;
+    } finally {
+      finishDiscard(draftId, discarded);
+      if (!discarded && !instance.closed && !instance.contextLost) setStatus(root, "Draft preserved");
+    }
+  }
+
+  function wire(root: ComposerRoot, instance: PopupInstance): void {
     const title = root.querySelector(".page-title");
     const save = root.querySelector(".save");
     const menu = root.querySelector(".page-menu");
@@ -684,16 +1068,17 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       instance.userEdited = true;
       scheduleDraft(instance);
     });
-    title.addEventListener("keydown", (event) => {
+    title.addEventListener("keydown", (event: Event) => {
+      if (!(event instanceof KeyboardEvent)) return;
       if (event.key === "Enter") {
         event.preventDefault();
-        editor.commands.focus("start");
+        requireEditor(instance).commands.focus("start");
       }
     });
 
     root.querySelector(".close").addEventListener("click", () => close(instance));
     root.querySelector(".safe-close").addEventListener("click", () => close(instance));
-    menuButton.addEventListener("click", (event) => {
+    menuButton.addEventListener("click", (event: MouseEvent) => {
       const willOpen = menu.hidden;
       closeTransientUi(root);
       menu.hidden = !willOpen;
@@ -705,14 +1090,14 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       closeTransientUi(root);
       recentPanel.hidden = !willOpen;
       recentButton.setAttribute("aria-expanded", String(willOpen));
-      if (willOpen) void loadRecents(root, instance, "");
+      if (willOpen) observeInstancePromise(instance, loadRecents(root, instance, ""), "Recent notes are unavailable.");
     });
-    aiButton.addEventListener("click", (event) => {
+    aiButton.addEventListener("click", (event: MouseEvent) => {
       if (!event.isTrusted) return;
       const willOpen = aiPanel.hidden;
       closeTransientUi(root);
       if (willOpen) {
-        void openAiPanel(instance);
+        observeInstancePromise(instance, openAiPanel(instance), "Couldn’t open AI actions.");
       } else {
         aiPanel.hidden = true;
         aiButton.setAttribute("aria-expanded", "false");
@@ -724,16 +1109,21 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       aiButton.setAttribute("aria-expanded", "false");
       aiButton.focus();
     });
-    root.querySelectorAll("[data-ai-action]").forEach((button) => {
-      button.addEventListener("click", (event) => {
-        if (event.isTrusted) void runAiAction(instance, button.dataset.aiAction);
+    root.querySelectorAll("[data-ai-action]").forEach((button: HTMLButtonElement) => {
+      button.addEventListener("click", (event: MouseEvent) => {
+        const action = button.dataset.aiAction;
+        if (event.isTrusted && (action === "title" || action === "todos")) {
+          observeInstancePromise(instance, runAiAction(instance, action), "On-device AI couldn’t finish this action.");
+        }
       });
     });
     root.querySelector(".ai-review-back").addEventListener("click", () => showAiActions(root));
     root.querySelector(".ai-apply-title").addEventListener("click", () => applyAiTitle(instance));
     root.querySelector(".ai-insert-todos").addEventListener("click", () => insertAiTodos(instance));
-    root.querySelector(".recent-search").addEventListener("input", (event) => {
-      void loadRecents(root, instance, event.currentTarget.value);
+    root.querySelector(".recent-search").addEventListener("input", (event: Event) => {
+      if (event.currentTarget instanceof HTMLInputElement) {
+        observeInstancePromise(instance, loadRecents(root, instance, event.currentTarget.value), "Recent notes are unavailable.");
+      }
     });
     root.querySelector(".manage-sources").addEventListener("click", () => {
       closeTransientUi(root);
@@ -749,102 +1139,90 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       instance.userEdited = true;
     });
     root.querySelector(".open-settings").addEventListener("click", () => {
-      void sendRuntimeMessage({ type: "OPEN_SETTINGS" }, instance);
+      observeInstancePromise(instance, sendRuntimeMessage({ type: "OPEN_SETTINGS" }, instance), "Couldn’t open settings.");
     });
     root.querySelector(".setup").addEventListener("click", () => {
-      void sendRuntimeMessage({ type: "OPEN_SETTINGS" }, instance);
+      observeInstancePromise(instance, sendRuntimeMessage({ type: "OPEN_SETTINGS" }, instance), "Couldn’t open settings.");
     });
-    root.querySelector(".discard-draft").addEventListener("click", async () => {
-      const response = await sendRuntimeMessage({ type: "DISCARD_DRAFT", id: instance.draftId }, instance).catch((error) => {
-        if (isContextLossError(error)) return null;
-        throw error;
-      });
-      if (instance.contextLost) return;
-      if (!response?.ok) {
-        showToast(root, response?.error || "Couldn’t discard this draft.", "error", instance);
-        return;
-      }
-      instance.accepted = true;
-      close(instance);
+    root.querySelector(".discard-draft").addEventListener("click", () => {
+      observeInstancePromise(instance, discardDraft(root, instance), "Couldn’t discard this draft.");
     });
-    root.querySelector(".return-draft").addEventListener("click", async () => {
-      if (!instance.returnDraftId) return;
-      clearTimeout(instance.draftTimer);
-      instance.draftTimer = null;
-      await persistDraft(instance);
-      const response = await sendRuntimeMessage({ type: "ACTIVATE_DRAFT", id: instance.returnDraftId, sessionId: instance.sessionId }, instance);
-      if (!response?.ok || !response.draft) {
-        showToast(root, response?.error || "Couldn’t restore the stashed draft.", "error", instance);
-        return;
-      }
-      applyDraftToInstance(root, instance, response.draft);
-      showToast(root, "Stashed draft restored", "success", instance);
+    root.querySelector(".return-draft").addEventListener("click", () => {
+      observeInstancePromise(instance, (async () => {
+        if (!instance.returnDraftId) return;
+        if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
+        instance.draftTimer = null;
+        await persistDraft(instance);
+        const response = await sendRuntimeMessage({ type: "ACTIVATE_DRAFT", id: instance.returnDraftId, sessionId: instance.sessionId }, instance);
+        if (!response?.ok) throw new Error(response?.error || "Couldn’t restore the stashed draft.");
+        applyDraftToInstance(root, instance, response.draft);
+        showToast(root, "Stashed draft restored", "success", instance);
+      })(), "Couldn’t restore the stashed draft.");
     });
-    root.querySelector(".reload-remote").addEventListener("click", async () => {
-      const response = await sendRuntimeMessage({
-        type: "LOAD_RECENT_NOTE",
-        id: instance.targetRecordId,
-        sessionId: instance.sessionId,
-        reloadLatest: true
-      }, instance);
-      if (!response?.ok || !response.draft) {
-        showToast(root, response?.error || "Couldn’t reload the latest Notion version.", "error", instance);
-        return;
-      }
-      applyDraftToInstance(root, instance, response.draft);
-      setStatus(root, "Latest Notion version loaded");
+    root.querySelector(".reload-remote").addEventListener("click", () => {
+      observeInstancePromise(instance, (async () => {
+        const response = await sendRuntimeMessage({
+          type: "LOAD_RECENT_NOTE",
+          id: instance.targetRecordId,
+          sessionId: instance.sessionId,
+          reloadLatest: true
+        }, instance);
+        if (!response?.ok) throw new Error(response?.error || "Couldn’t reload the latest Notion version.");
+        applyDraftToInstance(root, instance, response.draft);
+        setStatus(root, "Latest Notion version loaded");
+      })(), "Couldn’t reload the latest Notion version.");
     });
-    root.querySelector(".save-conflict-new").addEventListener("click", async () => {
-      const response = await sendRuntimeMessage({ type: "CONVERT_EDIT_TO_NEW_DRAFT", id: instance.draftId }, instance);
-      if (!response?.ok || !response.draft) {
-        showToast(root, response?.error || "Couldn’t prepare a new note.", "error", instance);
-        return;
-      }
-      applyDraftToInstance(root, instance, response.draft);
-      await saveCapture(root, instance);
+    root.querySelector(".save-conflict-new").addEventListener("click", () => {
+      observeInstancePromise(instance, (async () => {
+        const response = await sendRuntimeMessage({ type: "CONVERT_EDIT_TO_NEW_DRAFT", id: instance.draftId }, instance);
+        if (!response?.ok) throw new Error(response?.error || "Couldn’t prepare a new note.");
+        applyDraftToInstance(root, instance, response.draft);
+        await saveCapture(root, instance);
+      })(), "Couldn’t prepare a new note.");
     });
     root.querySelector(".open-conflict-remote").addEventListener("click", () => {
-      void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: instance.targetRecordId }, instance);
+      observeInstancePromise(instance, sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: instance.targetRecordId }, instance), "Couldn’t open this note in Notion.");
     });
-    root.querySelector(".reload-draft").addEventListener("click", async () => {
-      const response = await sendRuntimeMessage({
-        type: "GET_OR_CREATE_DRAFT",
-        tabId: instance.tabId,
-        sessionId: instance.sessionId,
-        context: instance.page
-      }, instance);
-      if (!response?.ok || !response.draft) {
-        showToast(root, response?.error || "Couldn’t reload the latest draft.", "error", instance);
-        return;
-      }
-      root.querySelector(".stale-banner").hidden = true;
-      applyDraftToInstance(root, instance, response.draft);
-      setStatus(root, "Latest draft loaded");
+    root.querySelector(".reload-draft").addEventListener("click", () => {
+      observeInstancePromise(instance, (async () => {
+        const response = await sendRuntimeMessage({
+          type: "GET_OR_CREATE_DRAFT",
+          ...(instance.tabId === null ? {} : { tabId: instance.tabId }),
+          sessionId: instance.sessionId,
+          context: instance.page
+        }, instance);
+        if (!response?.ok) throw new Error(response?.error || "Couldn’t reload the latest draft.");
+        root.querySelector(".stale-banner").hidden = true;
+        applyDraftToInstance(root, instance, response.draft);
+        setStatus(root, "Latest draft loaded");
+      })(), "Couldn’t reload the latest draft.");
     });
     save.addEventListener("click", () => {
       const action = save.dataset.action || "save";
       if (action === "close") return close(instance);
-      if (action === "settings") return void sendRuntimeMessage({ type: "OPEN_SETTINGS" }, instance);
-      if (action === "activity") return void sendRuntimeMessage({ type: "OPEN_ACTIVITY" }, instance);
-      return saveCapture(root, instance);
+      if (action === "settings") return observeInstancePromise(instance, sendRuntimeMessage({ type: "OPEN_SETTINGS" }, instance), "Couldn’t open settings.");
+      if (action === "activity") return observeInstancePromise(instance, sendRuntimeMessage({ type: "OPEN_ACTIVITY" }, instance), "Couldn’t open activity.");
+      observeInstancePromise(instance, saveCapture(root, instance), "Couldn’t save this note.");
     });
 
-    root.querySelectorAll(".bubble [data-command]").forEach((button) => {
-      button.addEventListener("mousedown", (event) => event.preventDefault());
-      button.addEventListener("click", () => runInlineCommand(root, button.dataset.command));
+    root.shadow.addEventListener("click", (event) => {
+      const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("button") : null;
+      if (!button) return;
+      const command = button.dataset.command;
+      if (command && ["bold", "italic", "underline", "strike", "code", "link"].includes(command)) {
+        runInlineCommand(root, command as InlineCommand);
+        if (button.closest(".format-overflow")) closeToolbarMenus(root);
+      } else if (button.matches(".format-overflow-button")) toggleToolbarMenu(root, button, root.querySelector(".format-overflow"));
+      else if (button.matches(".block-type")) toggleToolbarMenu(root, button, root.querySelector(".format-menu"));
+      else if (button.dataset.paletteTrigger) openPalette(root, button, button.dataset.paletteTrigger as PaletteKind);
+      else if (button.dataset.color && isNotionColorName(button.dataset.color)) applyNotionColor(root, button.dataset.color, button.closest<HTMLElement>(".color-palette")?.dataset.palette === "highlight" ? "highlight" : "text");
+      else if (button.dataset.block) {
+        runBlockCommand(button.dataset.block as BlockCommand);
+        closeToolbarMenus(root);
+      }
     });
-    root.querySelector(".block-type").addEventListener("mousedown", (event) => event.preventDefault());
-    root.querySelector(".block-type").addEventListener("click", () => {
-      root.querySelector(".format-menu").hidden = !root.querySelector(".format-menu").hidden;
-    });
-    root.querySelectorAll(".format-menu [data-block]").forEach((button) => {
-      button.addEventListener("mousedown", (event) => event.preventDefault());
-      button.addEventListener("click", () => {
-        runBlockCommand(button.dataset.block);
-        root.querySelector(".format-menu").hidden = true;
-      });
-    });
-    root.querySelector(".link-input").addEventListener("keydown", (event) => {
+    root.querySelector(".link-input").addEventListener("keydown", (event: Event) => {
+      if (!(event instanceof KeyboardEvent)) return;
       if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) {
         handledKeyboardEvents.add(event);
         event.preventDefault();
@@ -858,7 +1236,11 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     });
     root.querySelector(".apply-link").addEventListener("click", () => applyLink(root));
 
-    root.addEventListener("mousedown", (event) => {
+    root.shadow.addEventListener("mousedown", (event: Event) => {
+      if (!(event instanceof MouseEvent)) return;
+      const toolbar = event.composedPath().some((item) => item instanceof Element && item.matches?.(".bubble, .format-menu, .format-overflow, .color-palette"));
+      if (toolbar) event.preventDefault();
+      else closeToolbarMenus(root);
       if (!event.composedPath().some((item) => item === menu || item === menuButton)) {
         menu.hidden = true;
         menuButton.setAttribute("aria-expanded", "false");
@@ -866,7 +1248,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     });
   }
 
-  function configureAiFeatures(instance) {
+  function configureAiFeatures(instance: PopupInstance): void {
     const root = instance.root;
     const enabled = instance.settings?.aiEnabled !== false;
     const titleEnabled = enabled && instance.settings?.aiSuggestTitle !== false;
@@ -882,29 +1264,29 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function aiActionsAllowed(instance) {
+  function aiActionsAllowed(instance: PopupInstance): boolean {
     return !instance.closed
       && !instance.contextLost
       && instance.editor?.isEditable !== false
       && !instance.root.querySelector(".page-title").readOnly;
   }
 
-  function aiActionEnabled(instance, action) {
+  function aiActionEnabled(instance: PopupInstance, action: AiAction): boolean {
     if (instance.settings?.aiEnabled === false) return false;
     if (action === "title") return instance.settings?.aiSuggestTitle !== false;
     if (action === "todos") return instance.settings?.aiExtractTodos !== false;
     return false;
   }
 
-  async function refreshAiSettings(instance) {
+  async function refreshAiSettings(instance: PopupInstance): Promise<boolean> {
     const latest = await sendRuntimeMessage({ type: "GET_QUICK_SETTINGS" }, instance);
-    if (!latest || instance.closed) return false;
-    instance.settings = { ...instance.settings, ...latest };
+    if (!latest?.ok || instance.closed) return false;
+    instance.settings = { ...(instance.settings ?? {}), ...latest };
     configureAiFeatures(instance);
     return true;
   }
 
-  async function openAiPanel(instance) {
+  async function openAiPanel(instance: PopupInstance): Promise<void> {
     if (!aiActionsAllowed(instance) || !await refreshAiSettings(instance)) return;
     const root = instance.root;
     if (root.querySelector(".ai").hidden) {
@@ -917,7 +1299,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     await refreshAiAvailability(instance);
   }
 
-  async function refreshAiAvailability(instance) {
+  async function refreshAiAvailability(instance: PopupInstance): Promise<void> {
     if (instance.closed || instance.aiBusy) return;
     const root = instance.root;
     instance.aiAvailability = "checking";
@@ -938,17 +1320,18 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  async function runAiAction(instance, action) {
+  async function runAiAction(instance: PopupInstance, action: AiAction): Promise<void> {
     if (instance.aiBusy || !aiActionsAllowed(instance)) return;
     const root = instance.root;
     if (!await refreshAiSettings(instance) || !aiActionEnabled(instance, action)) {
       showToast(root, "This AI action is turned off in Settings.", "error", instance);
       return;
     }
-    const note = instance.editor.getText().trim();
+    const aiEditor = requireEditor(instance);
+    const note = aiEditor.getText().trim();
     if (!note) {
       showToast(root, "Write something before using an AI action.", "error", instance);
-      instance.editor.commands.focus();
+      aiEditor.commands.focus();
       return;
     }
 
@@ -969,43 +1352,52 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     const controller = instance.aiController;
     const callbacks = {
       signal: instance.aiController.signal,
-      availability: instance.aiAvailability,
-      onStateChange(state) {
+      ...(instance.aiAvailability === "checking" ? {} : { availability: instance.aiAvailability }),
+      onStateChange(state: Exclude<AiAvailability, "checking"> | "generating") {
         if (state === "downloadable") setAiStatus(root, "Preparing Chrome’s on-device model…");
         else if (state === "downloading") setAiStatus(root, "Downloading Chrome’s on-device model…");
         else if (state === "generating") setAiStatus(root, action === "title" ? "Suggesting a title…" : "Finding action items…");
       },
-      onDownloadProgress(progress) {
+      onDownloadProgress(progress: number) {
         setAiStatus(root, `Downloading Chrome’s on-device model… ${Math.round(progress * 100)}%`);
       }
     };
 
     try {
-      const result = action === "title"
-        ? await suggestNoteTitle(context, callbacks)
-        : await extractNoteTodos(context, callbacks);
-      const currentContextKey = JSON.stringify({
-        note: instance.editor.getText().trim(),
-        pageTitle: instance.sources.some((source) => sameUrl(source.url, instance.page?.url)) ? instance.page?.title || "" : "",
-        sourceTitles: instance.sources.map((source) => source.title)
-      });
-      if (instance.aiController !== controller || root.querySelector(".ai-panel").hidden || currentContextKey !== contextKey) return;
-      if (!await refreshAiSettings(instance) || !aiActionEnabled(instance, action) || !aiActionsAllowed(instance)) {
-        showToast(root, "This AI action was turned off before its result was applied.", "error", instance);
-        return;
-      }
-      if (action === "title") renderAiTitleReview(root, result);
-      else {
-        const tasks = result;
+      if (action === "title") {
+        const title = await suggestNoteTitle(context, callbacks);
+        const currentContextKey = JSON.stringify({
+          note: aiEditor.getText().trim(),
+          pageTitle: instance.sources.some((source) => sameUrl(source.url, instance.page.url)) ? instance.page.title || "" : "",
+          sourceTitles: instance.sources.map((source) => source.title)
+        });
+        if (instance.aiController !== controller || root.querySelector(".ai-panel").hidden || currentContextKey !== contextKey) return;
+        if (!await refreshAiSettings(instance) || !aiActionEnabled(instance, action) || !aiActionsAllowed(instance)) {
+          showToast(root, "This AI action was turned off before its result was applied.", "error", instance);
+          return;
+        }
+        renderAiTitleReview(root, title);
+      } else {
+        const tasks = await extractNoteTodos(context, callbacks);
+        const currentContextKey = JSON.stringify({
+          note: aiEditor.getText().trim(),
+          pageTitle: instance.sources.some((source) => sameUrl(source.url, instance.page.url)) ? instance.page.title || "" : "",
+          sourceTitles: instance.sources.map((source) => source.title)
+        });
+        if (instance.aiController !== controller || root.querySelector(".ai-panel").hidden || currentContextKey !== contextKey) return;
+        if (!await refreshAiSettings(instance) || !aiActionEnabled(instance, action) || !aiActionsAllowed(instance)) {
+          showToast(root, "This AI action was turned off before its result was applied.", "error", instance);
+          return;
+        }
         if (!tasks.length) {
           setAiStatus(root, "No clear action items found. Nothing changed.");
         } else renderAiTodosReview(root, tasks);
       }
       instance.aiAvailability = "available";
-    } catch (error) {
-      if (error?.name !== "AbortError" && !instance.closed) {
-        if (error?.code === "unavailable") instance.aiAvailability = "unavailable";
-        setAiStatus(root, error?.message || "On-device AI couldn’t finish this action.", "error");
+    } catch (error: unknown) {
+      if (isRecord(error) && error.name !== "AbortError" && !instance.closed) {
+        if (errorCode(error) === "unavailable") instance.aiAvailability = "unavailable";
+        setAiStatus(root, errorMessage(error, "On-device AI couldn’t finish this action."), "error");
       }
     } finally {
       instance.aiBusy = false;
@@ -1014,7 +1406,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function renderAiTitleReview(root, title) {
+  function renderAiTitleReview(root: ComposerRoot, title: string): void {
     root.querySelector(".ai-action-list").hidden = true;
     root.querySelector(".ai-review").hidden = false;
     root.querySelector(".ai-preview-title-wrap").hidden = false;
@@ -1027,7 +1419,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     root.querySelector(".ai-preview-title").select();
   }
 
-  function renderAiTodosReview(root, tasks) {
+  function renderAiTodosReview(root: ComposerRoot, tasks: string[]): void {
     root.querySelector(".ai-action-list").hidden = true;
     root.querySelector(".ai-review").hidden = false;
     root.querySelector(".ai-preview-title-wrap").hidden = true;
@@ -1039,14 +1431,14 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     root.querySelector(".ai-preview-todos").focus();
   }
 
-  function showAiActions(root) {
+  function showAiActions(root: ComposerRoot): void {
     root.querySelector(".ai-review").hidden = true;
     root.querySelector(".ai-action-list").hidden = false;
     setAiStatus(root, "Ready on this device.");
-    root.querySelector("[data-ai-action]:not([hidden])")?.focus();
+    root.optional("[data-ai-action]:not([hidden])", HTMLButtonElement)?.focus();
   }
 
-  function applyAiTitle(instance) {
+  function applyAiTitle(instance: PopupInstance): void {
     const root = instance.root;
     if (!aiActionsAllowed(instance) || !aiActionEnabled(instance, "title")) return;
     const value = root.querySelector(".ai-preview-title").value.replace(/\s+/g, " ").trim().slice(0, MAX_CAPTURE_TITLE_CHARACTERS);
@@ -1059,7 +1451,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     showToast(root, "Title applied", "success", instance);
   }
 
-  function insertAiTodos(instance) {
+  function insertAiTodos(instance: PopupInstance): void {
     const root = instance.root;
     if (!aiActionsAllowed(instance) || !aiActionEnabled(instance, "todos")) return;
     const tasks = root.querySelector(".ai-preview-todos").value.split(/\r?\n/)
@@ -1067,7 +1459,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       .filter(Boolean)
       .slice(0, AI_NOTE_LIMITS.tasks);
     if (!tasks.length) return showToast(root, "Keep at least one task before inserting.", "error", instance);
-    const currentCharacters = Array.from(instance.editor.getText()).length;
+    const todoEditor = requireEditor(instance);
+    const currentCharacters = Array.from(todoEditor.getText()).length;
     const insertedCharacters = tasks.reduce((total, task) => total + Array.from(task).length, tasks.length);
     if (currentCharacters + insertedCharacters > MAX_CAPTURE_CHARACTERS) {
       return showToast(root, "These to-dos would exceed the 8,000-character note limit. Shorten the note or the task list first.", "error", instance);
@@ -1080,26 +1473,26 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
         content: [{ type: "paragraph", content: [{ type: "text", text: task }] }]
       }))
     };
-    instance.editor.chain().focus("end").insertContent(taskList).run();
+    todoEditor.chain().focus("end").insertContent(taskList).run();
     closeTransientUi(root);
-    instance.editor.commands.focus("end");
+    todoEditor.commands.focus("end");
     showToast(root, `${tasks.length} ${tasks.length === 1 ? "to-do" : "to-dos"} inserted`, "success", instance);
   }
 
-  function setAiActionButtonsDisabled(root, disabled) {
-    root.querySelectorAll("[data-ai-action]").forEach((button) => { button.disabled = disabled; });
+  function setAiActionButtonsDisabled(root: ComposerRoot, disabled: boolean): void {
+    root.querySelectorAll("[data-ai-action]").forEach((button: HTMLButtonElement) => { button.disabled = disabled; });
   }
 
-  function setAiStatus(root, text, tone = "") {
+  function setAiStatus(root: ComposerRoot, text: string, tone: ToastTone = ""): void {
     const status = root.querySelector(".ai-status");
     status.textContent = text;
     status.dataset.tone = tone;
   }
 
-  function renderSources(root, instance) {
+  function renderSources(root: ComposerRoot, instance: PopupInstance): void {
     const sources = normalizeSources(instance.sources);
     instance.sources = sources;
-    root.querySelectorAll(".source-count").forEach((node) => {
+    root.querySelectorAll(".source-count").forEach((node: HTMLElement) => {
       node.textContent = sources.length ? `${sources.length} attached` : "No attached pages";
     });
     const list = root.querySelector(".source-list");
@@ -1127,7 +1520,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     root.querySelector(".add-current-source").disabled = !instance.page?.url || sources.some((source) => sameUrl(source.url, instance.page.url)) || sources.length >= 20;
   }
 
-  function renderEditBanner(root, instance) {
+  function renderEditBanner(root: ComposerRoot, instance: PopupInstance): void {
     const banner = root.querySelector(".edit-banner");
     banner.hidden = instance.mode !== "edit";
     if (banner.hidden) return;
@@ -1138,13 +1531,14 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     root.querySelector(".conflict-actions").hidden = !instance.conflict;
   }
 
-  async function loadRecents(root, instance, query) {
+  async function loadRecents(root: ComposerRoot, instance: PopupInstance, query: string): Promise<void> {
     const panel = root.querySelector(".recent-panel");
     const list = root.querySelector(".recent-list");
     const requestId = crypto.randomUUID();
     panel.dataset.requestId = requestId;
     list.innerHTML = '<div class="popover-state">Loading recent notes…</div>';
-    const response = await sendRuntimeMessage({ type: "LIST_RECENT_NOTES", query, limit: query.trim() ? 100 : 5 }, instance).catch((error) => ({ ok: false, error: error?.message }));
+    const response = await sendRuntimeMessage({ type: "LIST_RECENT_NOTES", query, limit: query.trim() ? 100 : 5 }, instance)
+      .catch((error: unknown) => ({ ok: false as const, error: errorMessage(error, "Recent notes are unavailable.") }));
     if (panel.dataset.requestId !== requestId || instance.closed) return;
     if (!response?.ok) {
       list.innerHTML = `<div class="popover-state error">${escapeHtml(response?.error || "Recent notes are unavailable.")}</div>`;
@@ -1158,7 +1552,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     });
   }
 
-  function renderRecents(root, instance, groups) {
+  function renderRecents(root: ComposerRoot, instance: PopupInstance, groups: RecentGroups): void {
     const list = root.querySelector(".recent-list");
     const drafts = (groups.drafts || []).filter((draft) => draft.id !== instance.draftId);
     const notes = groups.notes || [];
@@ -1185,7 +1579,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     list.replaceChildren(...nodes);
   }
 
-  function recentSectionHeading(title, subtitle) {
+  function recentSectionHeading(title: string, subtitle: string): HTMLDivElement {
     const heading = document.createElement("div");
     heading.className = "recent-section";
     const label = document.createElement("b");
@@ -1196,7 +1590,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return heading;
   }
 
-  function recentRow(root, instance, record) {
+  function recentRow(root: ComposerRoot, instance: PopupInstance, record: RecentItem): HTMLDivElement {
     const row = document.createElement("div");
     row.className = "recent-row";
     row.dataset.source = record.source || "note";
@@ -1212,55 +1606,56 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     const metadata = document.createElement("small");
     metadata.textContent = record.editable === false ? `${recentSubtitle(record)} · Open in Notion only` : recentSubtitle(record);
     edit.append(title, preview, metadata);
-    edit.addEventListener("click", () => void openRecentItem(root, instance, record));
+    edit.addEventListener("click", () => observeInstancePromise(instance, openRecentItem(root, instance, record), "Couldn’t open this recent note."));
     const openRemote = document.createElement("button");
     openRemote.type = "button";
     openRemote.className = "recent-open";
     openRemote.innerHTML = icon("open");
     openRemote.setAttribute("aria-label", `Open ${record.title || "note"} in Notion`);
     openRemote.hidden = !record.remoteUrl || record.source === "draft";
-    openRemote.addEventListener("click", () => void sendRuntimeMessage({
+    openRemote.addEventListener("click", () => observeInstancePromise(instance, sendRuntimeMessage({
       type: "OPEN_CAPTURE_RESULT",
       id: record.source === "notion" ? "" : record.id,
       url: record.remoteUrl || ""
-    }, instance));
+    }, instance), "Couldn’t open this note in Notion."));
     row.append(edit, openRemote);
     return row;
   }
 
-  async function openRecentItem(root, instance, record) {
-    if (record.source === "draft") return void openRecentDraft(root, instance, record.id);
-    if (record.source === "notion") return void openNotionPage(root, instance, record);
+  async function openRecentItem(root: ComposerRoot, instance: PopupInstance, record: RecentItem): Promise<void> {
+    if (record.source === "draft") return openRecentDraft(root, instance, record.id);
+    if (record.source === "notion") return openNotionPage(root, instance, record);
     if (record.editable === false) {
-      return void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id, url: record.remoteUrl || "" }, instance);
+      await sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id, url: record.remoteUrl || "" }, instance);
+      return;
     }
-    return void openRecentNote(root, instance, record.id);
+    return openRecentNote(root, instance, record.id);
   }
 
-  async function openRecentDraft(root, instance, draftId) {
+  async function openRecentDraft(root: ComposerRoot, instance: PopupInstance, draftId: string): Promise<void> {
     if (!draftId || draftId === instance.draftId) {
       closeTransientUi(root);
       return;
     }
     try {
-      clearTimeout(instance.draftTimer);
+      if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
       instance.draftTimer = null;
       await persistDraft(instance);
       setStatus(root, "Opening draft…");
       const response = await sendRuntimeMessage({ type: "ACTIVATE_DRAFT", id: draftId, sessionId: instance.sessionId }, instance);
-      if (!response?.ok || !response.draft) throw new Error(response?.error || "Couldn’t open this draft.");
+      if (!response?.ok) throw new Error(response?.error || "Couldn’t open this draft.");
       applyDraftToInstance(root, instance, response.draft);
       closeTransientUi(root);
       setStatus(root, "Editing draft");
-    } catch (error) {
+    } catch (error: unknown) {
       setStatus(root, "Draft preserved");
-      showToast(root, error?.message || "Couldn’t open this draft.", "error", instance);
+      showToast(root, errorMessage(error, "Couldn’t open this draft."), "error", instance);
     }
   }
 
-  async function openNotionPage(root, instance, record) {
+  async function openNotionPage(root: ComposerRoot, instance: PopupInstance, record: RecentItem): Promise<void> {
     try {
-      clearTimeout(instance.draftTimer);
+      if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
       instance.draftTimer = null;
       await persistDraft(instance);
       setStatus(root, "Loading from Notion…");
@@ -1271,34 +1666,34 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
         url: record.remoteUrl || "",
         sessionId: instance.sessionId
       }, instance);
-      if (!response?.ok || !response.draft) throw new Error(response?.error || "Couldn’t load this Notion page.");
+      if (!response?.ok) throw new Error(response?.error || "Couldn’t load this Notion page.");
       applyDraftToInstance(root, instance, { ...response.draft, conflict: response.conflict });
       closeTransientUi(root);
       setStatus(root, "Editing Notion page");
-    } catch (error) {
+    } catch (error: unknown) {
       setStatus(root, "Draft preserved");
-      showToast(root, error?.message || "Couldn’t load this Notion page.", "error", instance);
+      showToast(root, errorMessage(error, "Couldn’t load this Notion page."), "error", instance);
     }
   }
 
-  async function openRecentNote(root, instance, recordId) {
+  async function openRecentNote(root: ComposerRoot, instance: PopupInstance, recordId: string): Promise<void> {
     try {
-      clearTimeout(instance.draftTimer);
+      if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
       instance.draftTimer = null;
       await persistDraft(instance);
       setStatus(root, "Loading latest from Notion…");
       const response = await sendRuntimeMessage({ type: "LOAD_RECENT_NOTE", id: recordId, sessionId: instance.sessionId }, instance);
-      if (!response?.ok || !response.draft) throw new Error(response?.error || "Couldn’t load this note.");
+      if (!response?.ok) throw new Error(response?.error || "Couldn’t load this note.");
       applyDraftToInstance(root, instance, { ...response.draft, conflict: response.conflict });
       closeTransientUi(root);
       setStatus(root, "Editing recent note");
-    } catch (error) {
+    } catch (error: unknown) {
       setStatus(root, "Draft preserved");
-      showToast(root, error?.message || "Couldn’t load this note.", "error", instance);
+      showToast(root, errorMessage(error, "Couldn’t load this note."), "error", instance);
     }
   }
 
-  function recentSubtitle(record) {
+  function recentSubtitle(record: RecentItem): string {
     if (record.source === "draft") {
       const kind = record.mode === "edit" ? "Edit draft" : "Draft";
       return `${kind} · ${relativeTime(record.updatedAt)}`;
@@ -1311,12 +1706,12 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return `${destination}${status}`;
   }
 
-  function truncatePreview(value, limit) {
+  function truncatePreview(value: string, limit: number): string {
     const characters = Array.from(String(value || "").replace(/\s+/g, " ").trim());
     return characters.length > limit ? `${characters.slice(0, limit).join("").trimEnd()}…` : characters.join("");
   }
 
-  function relativeTime(timestamp) {
+  function relativeTime(timestamp: number): string {
     const elapsed = Math.max(0, Date.now() - Number(timestamp || 0));
     if (elapsed < 60_000) return "Just now";
     if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m ago`;
@@ -1324,21 +1719,23 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return `${Math.floor(elapsed / 86_400_000)}d ago`;
   }
 
-  function sameUrl(left, right) {
-    return normalizeSources([{ url: left }, { url: right }]).length === 1;
+  function sameUrl(left: string, right: string): boolean {
+    const normalizedLeft = normalizePageUrl(left);
+    const normalizedRight = normalizePageUrl(right);
+    return Boolean(normalizedLeft && normalizedLeft === normalizedRight);
   }
 
-  function escapeHtml(value) {
+  function escapeHtml(value: unknown): string {
     const span = document.createElement("span");
     span.textContent = String(value || "");
     return span.innerHTML;
   }
 
-  function scheduleDraft(instance = popup) {
+  function scheduleDraft(instance: PopupInstance | undefined = popup): void {
     if (!instance || instance.closed || instance.contextLost || instance.accepted) return;
     instance.draftDirty = true;
-    clearTimeout(instance.draftTimer);
-    clearTimeout(instance.draftFeedbackTimer);
+    if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
+    if (instance.draftFeedbackTimer !== null) clearTimeout(instance.draftFeedbackTimer);
     instance.draftFeedbackTimer = null;
     if (instance.draftWritePromise || instance.saving) {
       instance.draftTimer = null;
@@ -1358,25 +1755,25 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       }, 750);
       try {
         const saved = await persistDraft(instance, { force: false });
-        clearTimeout(instance.draftFeedbackTimer);
+        if (instance.draftFeedbackTimer !== null) clearTimeout(instance.draftFeedbackTimer);
         instance.draftFeedbackTimer = null;
         if (saved && popup === instance && !instance.closed && !instance.contextLost) {
           const status = instance.root.querySelector(".status");
           if (showingSlowFeedback && status.textContent === "Saving locally…") setStatus(instance.root, "");
           if (status.textContent === "Local backup failed") setStatus(instance.root, "");
         }
-      } catch (error) {
-        clearTimeout(instance.draftFeedbackTimer);
+      } catch (error: unknown) {
+        if (instance.draftFeedbackTimer !== null) clearTimeout(instance.draftFeedbackTimer);
         instance.draftFeedbackTimer = null;
         if (popup === instance && !instance.closed && !instance.contextLost) {
           setStatus(instance.root, "Local backup failed");
-          showToast(instance.root, error?.message || "Local draft storage is unavailable.", "error", instance);
+          showToast(instance.root, errorMessage(error, "Local draft storage is unavailable."), "error", instance);
         }
       }
     }, 180);
   }
 
-  function persistDraft(instance = popup, { force = true } = {}) {
+  function persistDraft(instance: PopupInstance | undefined = popup, { force = true }: { force?: boolean } = {}): Promise<CaptureDraftInput | null> {
     if (!instance?.editor || !instance.draftId || instance.contextLost) return Promise.resolve(null);
     if (force && !instance.draftWritePromise) instance.draftDirty = true;
     if (instance.draftWritePromise) return instance.draftWritePromise;
@@ -1390,8 +1787,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return write;
   }
 
-  async function drainDraftWrites(instance) {
-    let latestSnapshot = null;
+  async function drainDraftWrites(instance: PopupInstance): Promise<CaptureDraftInput | null> {
+    let latestSnapshot: CaptureDraftInput | null = null;
     while (instance.draftDirty && !instance.contextLost) {
       instance.draftDirty = false;
       const snapshot = draftSnapshot(instance);
@@ -1406,10 +1803,10 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return instance.contextLost ? null : latestSnapshot;
   }
 
-  function draftSnapshot(instance) {
+  function draftSnapshot(instance: PopupInstance): CaptureDraftInput {
     const root = instance.root;
     return {
-      version: DRAFT_VERSION,
+      version: 2,
       id: instance.draftId,
       tabId: instance.tabId,
       sessionId: instance.sessionId,
@@ -1424,11 +1821,15 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       sources: structuredClone(instance.sources),
       dismissedSourceUrls: structuredClone(instance.dismissedSourceUrls),
       includeSource: instance.sources.length > 0,
-      doc: instance.editor.getJSON()
+      doc: (() => {
+        const value: unknown = requireEditor(instance).getJSON();
+        if (!isEditorNode(value)) throw new Error("Quick Note editor produced an invalid document.");
+        return value;
+      })()
     };
   }
 
-  async function writeDraftSnapshot(instance, snapshot) {
+  async function writeDraftSnapshot(instance: PopupInstance, snapshot: CaptureDraftInput): Promise<void> {
     const response = await sendRuntimeMessage({
       type: "UPSERT_DRAFT",
       expectedRevision: snapshot.revision,
@@ -1436,8 +1837,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }, instance);
     if (response?.ok === false) {
       if (response.code === "stale_draft") markStaleDraft(instance);
-      const error = new Error(response.error || "Local draft storage is unavailable.");
-      error.code = response.code;
+      const error = new Error(response.error || "Local draft storage is unavailable.") as Error & { code?: string };
+      if (response.code) error.code = response.code;
       throw error;
     }
     if (response?.draft) {
@@ -1450,7 +1851,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function markStaleDraft(instance) {
+  function markStaleDraft(instance: PopupInstance): void {
     if (!instance || instance.closed) return;
     instance.aiController?.abort();
     instance.editor?.setEditable(false);
@@ -1463,18 +1864,19 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     setStatus(instance.root, "Updated in another tab");
   }
 
-  async function saveCapture(root, instance) {
+  async function saveCapture(root: ComposerRoot, instance: PopupInstance): Promise<void> {
     if (instance.saving || instance.contextLost) return;
     await (instance.settings || instance.settingsPromise);
     if (popup !== instance || instance.closed) return;
-    if (!instance.editor.getText().trim()) {
+    const captureEditor = requireEditor(instance);
+    if (!captureEditor.getText().trim()) {
       showToast(root, "Write something before saving.", "error");
-      instance.editor.commands.focus();
+      captureEditor.commands.focus();
       return;
     }
 
-    clearTimeout(instance.draftTimer);
-    clearTimeout(instance.draftFeedbackTimer);
+    if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
+    if (instance.draftFeedbackTimer !== null) clearTimeout(instance.draftFeedbackTimer);
     instance.draftTimer = null;
     instance.draftFeedbackTimer = null;
     instance.saving = true;
@@ -1491,22 +1893,26 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     let savedDraft;
     try {
       savedDraft = await persistDraft(instance);
-    } catch (error) {
+    } catch (error: unknown) {
       instance.saving = false;
       save.disabled = false;
       save.textContent = "Save";
       root.querySelector(".close").disabled = false;
       setStatus(root, "Draft not saved");
-      showToast(root, error?.message || "Local storage is unavailable. Keep this composer open and try again.", "error", instance);
+      showToast(root, errorMessage(error, "Local storage is unavailable. Keep this composer open and try again."), "error", instance);
       return;
     }
     if (instance.contextLost) return;
     savedDraft ||= draftSnapshot(instance);
 
-    let response;
+    let response: EnqueueResponse;
     try {
       response = await enqueueWithReconciliation({
-        send: (message) => sendRuntimeMessage(message, instance),
+        send: async (message) => {
+          const result = await sendRuntimeMessage(message, instance);
+          if (!result) throw contextLossError();
+          return result;
+        },
         draftId: instance.draftId,
         message: {
           type: "ENQUEUE_CAPTURE",
@@ -1514,7 +1920,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
           context: instance.page,
           capture: {
             document: {
-              version: DRAFT_VERSION,
+              version: 1,
               title: savedDraft.title.trim(),
               doc: savedDraft.doc
             },
@@ -1525,12 +1931,12 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
           }
         }
       });
-    } catch (error) {
+    } catch (error: unknown) {
       response = {
         ok: false,
-        error: error?.code === "runtime_message_timeout"
+        error: errorCode(error) === "runtime_message_timeout"
           ? "The extension did not acknowledge delivery. Your draft is still local—try again to reconcile it."
-          : error?.message
+          : errorMessage(error, "Couldn’t save this note.")
       };
     }
 
@@ -1539,6 +1945,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     if (response?.ok && response.accepted) {
       if (popup !== instance || instance.closed) return;
       instance.accepted = true;
+      emitTerminal(instance, "saved");
       instance.captureId = response.record?.id || "";
       applyDeliveryRecord(root, instance, response.record);
       if (response.record?.status !== "delivered") pollCaptureStatus(root, instance);
@@ -1552,11 +1959,11 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     save.dataset.action = "save";
     root.querySelector(".close").disabled = false;
     setStatus(root, "Draft preserved");
-    showToast(root, response?.error || "Couldn’t save this note.", "error", instance);
+    showToast(root, "error" in response ? response.error : "Couldn’t save this note.", "error", instance);
     await persistDraft(instance);
   }
 
-  function pollCaptureStatus(root, instance) {
+  function pollCaptureStatus(root: ComposerRoot, instance: PopupInstance): void {
     if (!instance.captureId || instance.closed || !instance.accepted) return;
     const elapsed = Date.now() - instance.deliveryStartedAt;
     const delay = elapsed < 10_000 ? 500 : 2_000;
@@ -1565,7 +1972,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       let response;
       try {
         response = await sendRuntimeMessage({ type: "GET_CAPTURE_STATUS", id: instance.captureId }, instance);
-      } catch (error) {
+      } catch {
         if (popup === instance && !instance.closed) {
           applySlowDeliveryState(root, instance);
           pollCaptureStatus(root, instance);
@@ -1580,12 +1987,12 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       }
       applyDeliveryRecord(root, instance, response.record);
       if (["pending", "sending"].includes(response.record.status)) pollCaptureStatus(root, instance);
-    }, delay);
+    }, delay, "Couldn’t refresh the delivery status.");
   }
 
-  function applyDeliveryRecord(root, instance, record = {}) {
-    const status = record?.status;
-    const kind = record?.lastError?.kind || "";
+  function applyDeliveryRecord(root: ComposerRoot, instance: PopupInstance, record: CaptureStatusRecord): void {
+    const status = record.status;
+    const kind = record.lastError?.kind || "";
     if (status === "delivered") {
       instance.safeToClose = true;
       instance.saving = false;
@@ -1637,7 +2044,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function applySlowDeliveryState(root, instance) {
+  function applySlowDeliveryState(root: ComposerRoot, instance: PopupInstance): void {
     if (Date.now() - instance.deliveryStartedAt < 10_000) return;
     instance.safeToClose = true;
     setStatus(root, "Safe locally—Notion is taking longer");
@@ -1645,7 +2052,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     root.querySelector(".close").disabled = false;
   }
 
-  function setActionableDeliveryState(root, instance, message, label, action, showSecondaryClose = true) {
+  function setActionableDeliveryState(root: ComposerRoot, instance: PopupInstance, message: string, label: string, action: PrimaryAction, showSecondaryClose = true): void {
     instance.safeToClose = true;
     setStatus(root, message);
     setPrimaryAction(root, label, action, false);
@@ -1653,22 +2060,22 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     root.querySelector(".safe-close").hidden = !showSecondaryClose;
   }
 
-  function setPrimaryAction(root, label, action, disabled) {
+  function setPrimaryAction(root: ComposerRoot, label: string, action: PrimaryAction, disabled: boolean): void {
     const save = root.querySelector(".save");
     save.innerHTML = label;
     save.dataset.action = action;
     save.disabled = disabled;
   }
 
-  function schedule(instance, callback, delay) {
+  function schedule(instance: PopupInstance, callback: () => void | Promise<void>, delay: number, failureMessage = "Quick Note background task failed."): void {
     const timer = setTimeout(() => {
       instance.timers.delete(timer);
-      callback();
+      observeInstancePromise(instance, Promise.resolve().then(callback), failureMessage);
     }, delay);
     instance.timers.add(timer);
   }
 
-  function handleRootKeyDown(root, event, instance = popup) {
+  function handleRootKeyDown(root: ComposerRoot, event: KeyboardEvent, instance: PopupInstance | undefined = popup): void {
     if (!instance || handledKeyboardEvents.has(event) || event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && event.shiftKey) {
       event.preventDefault();
@@ -1676,6 +2083,24 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       return;
     }
     if (event.key === "Escape") {
+      const textPalette = root.querySelector('.color-palette[data-palette="text"]');
+      const highlightPalette = root.querySelector('.color-palette[data-palette="highlight"]');
+      const palette = !textPalette.hidden ? textPalette : !highlightPalette.hidden ? highlightPalette : null;
+      if (palette) {
+        event.preventDefault();
+        palette.hidden = true;
+        const trigger = palette === highlightPalette ? root.querySelector('[data-palette-trigger="highlight"]') : root.querySelector('[data-palette-trigger="text"]');
+        trigger.setAttribute("aria-expanded", "false");
+        trigger.focus();
+        return;
+      }
+      if (!root.querySelector(".format-overflow").hidden) {
+        event.preventDefault();
+        root.querySelector(".format-overflow").hidden = true;
+        root.querySelector(".format-overflow-button").setAttribute("aria-expanded", "false");
+        root.querySelector(".format-overflow-button").focus();
+        return;
+      }
       if (closeTransientUi(root)) {
         event.preventDefault();
         instance.editor?.commands.focus();
@@ -1703,14 +2128,18 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     if (event.key === "Tab") trapTab(root, event);
   }
 
-  function trapTab(root, event) {
-    const focusable = [...root.querySelectorAll("button, input, [contenteditable=true], [tabindex]")]
-      .filter((element) => !element.disabled && element.getAttribute("tabindex") !== "-1" && !element.closest("[hidden]"));
+  function trapTab(root: ComposerRoot, event: KeyboardEvent): void {
+    const focusable = [...root.shadow.querySelectorAll("button, input, [contenteditable=true], [tabindex]")]
+      .filter((element): element is HTMLElement => element instanceof HTMLElement
+        && (!(element instanceof HTMLButtonElement) || !element.disabled)
+        && element.getAttribute("tabindex") !== "-1"
+        && !element.closest("[hidden]"));
     if (!focusable.length) return;
     const active = root.activeElement;
-    const first = focusable[0];
+    const first = focusable.at(0);
     const last = focusable.at(-1);
-    if (event.shiftKey && (active === first || !focusable.includes(active))) {
+    if (!first || !last) return;
+    if (event.shiftKey && (active === first || !focusable.includes(active as HTMLElement))) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && active === last) {
@@ -1719,7 +2148,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function handleEditorKeyDown(root, event) {
+  function handleEditorKeyDown(root: ComposerRoot, event: KeyboardEvent): boolean {
+    const activeEditor = currentEditor(editor);
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "Enter") {
       handledKeyboardEvents.add(event);
       event.preventDefault();
@@ -1727,17 +2157,17 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       return true;
     }
     if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key === "Enter") {
-      if (editor.isActive("taskItem")) {
+      if (activeEditor.isActive("taskItem")) {
         handledKeyboardEvents.add(event);
         event.preventDefault();
-        const checked = editor.getAttributes("taskItem").checked === true;
-        return editor.chain().focus().updateAttributes("taskItem", { checked: !checked }).run();
+        const checked = activeEditor.getAttributes("taskItem").checked === true;
+        return activeEditor.chain().focus().updateAttributes("taskItem", { checked: !checked }).run();
       }
-      if (editor.isActive("toggleBlock")) {
+      if (activeEditor.isActive("toggleBlock")) {
         handledKeyboardEvents.add(event);
         event.preventDefault();
-        const open = editor.getAttributes("toggleBlock").open !== false;
-        return editor.chain().focus().updateAttributes("toggleBlock", { open: !open }).run();
+        const open = activeEditor.getAttributes("toggleBlock").open !== false;
+        return activeEditor.chain().focus().updateAttributes("toggleBlock", { open: !open }).run();
       }
     }
     const slash = root.querySelector(".slash-menu");
@@ -1769,17 +2199,19 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return false;
   }
 
-  function handleLinkPaste(event) {
+  function handleLinkPaste(event: ClipboardEvent): boolean {
+    const activeEditor = currentEditor(editor);
     const url = event.clipboardData?.getData("text/plain")?.trim();
-    const { from, to } = editor.state.selection;
+    const { from, to } = activeEditor.state.selection;
     if (from === to || !isUrl(url)) return false;
     event.preventDefault();
-    editor.chain().focus().setLink({ href: url }).run();
+    activeEditor.chain().focus().setLink({ href: url }).run();
     return true;
   }
 
-  function updateEditorUi(root) {
-    const characters = editor.getText().length;
+  function updateEditorUi(root: ComposerRoot): void {
+    const activeEditor = currentEditor(editor);
+    const characters = activeEditor.getText().length;
     root.querySelector(".character-limit").hidden = characters < MAX_CAPTURE_CHARACTERS * 0.9;
     root.querySelector(".character-limit").textContent = `${characters.toLocaleString()} / ${MAX_CAPTURE_CHARACTERS.toLocaleString()}`;
     if (characters > MAX_CAPTURE_CHARACTERS) root.querySelector(".character-limit").dataset.tone = "error";
@@ -1788,7 +2220,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     updateBubble(root);
   }
 
-  function updateSlashMenu(root) {
+  function updateSlashMenu(root: ComposerRoot): void {
+    const activeEditor = currentEditor(editor);
     const slash = root.querySelector(".slash-menu");
     const query = slashQuery();
     if (query === null) {
@@ -1808,7 +2241,10 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     const groups = query
       ? [{ label: "", commands: matches }]
       : [
-          { label: "Suggested", commands: suggestedSlashCommandIds.map((id) => slashCommands.find((command) => command.id === id)) },
+          { label: "Suggested", commands: suggestedSlashCommandIds.flatMap((id) => {
+            const command = slashCommands.find((candidate) => candidate.id === id);
+            return command ? [command] : [];
+          }) },
           { label: "Basic blocks", commands: slashCommands.filter((command) => command.id !== "code") },
           { label: "Advanced blocks", commands: slashCommands.filter((command) => command.id === "code") }
         ];
@@ -1838,19 +2274,20 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     const optionCount = scroll.querySelectorAll("button").length;
     slashIndex = Math.min(slashIndex, optionCount - 1);
     slash.hidden = false;
-    positionSlashMenu(root, slash, editor.state.selection.from);
+    positionSlashMenu(root, slash, activeEditor.state.selection.from);
     setSlashActive([...slash.querySelectorAll("button")]);
   }
 
-  function slashQuery() {
-    const { $from, empty } = editor.state.selection;
+  function slashQuery(): string | null {
+    const activeEditor = currentEditor(editor);
+    const { $from, empty } = activeEditor.state.selection;
     if (!empty || !$from.parent.isTextblock) return null;
     const before = $from.parent.textBetween(0, $from.parentOffset, "\n", "\n");
     const match = before.match(/^\/([a-z0-9-]*)$/i);
-    return match ? match[1].toLowerCase() : null;
+    return match ? (match[1] || "").toLowerCase() : null;
   }
 
-  function slashButton(command, index, root) {
+  function slashButton(command: SlashCommand, index: number, root: ComposerRoot): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "slash-item";
@@ -1858,19 +2295,20 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     button.setAttribute("role", "option");
     button.setAttribute("aria-label", `${command.label}, ${command.hint}`);
     button.innerHTML = `<span class="command-icon">${commandIcon(command.id)}</span><span class="slash-label">${command.label}</span><kbd>${command.keys}</kbd>`;
-    button.addEventListener("mousedown", (event) => event.preventDefault());
+    button.addEventListener("mousedown", (event: MouseEvent) => event.preventDefault());
     button.addEventListener("click", () => {
-      const { $from } = editor.state.selection;
+      const activeEditor = currentEditor(editor);
+      const { $from } = activeEditor.state.selection;
       const from = $from.start();
-      const to = editor.state.selection.from;
-      editor.chain().focus().deleteRange({ from, to }).run();
-      command.run(editor);
+      const to = activeEditor.state.selection.from;
+      activeEditor.chain().focus().deleteRange({ from, to }).run();
+      command.run(activeEditor);
       root.querySelector(".slash-menu").hidden = true;
     });
     return button;
   }
 
-  function setSlashActive(items) {
+  function setSlashActive(items: HTMLElement[]): void {
     items.forEach((item, index) => {
       item.classList.toggle("active", index === slashIndex);
       item.setAttribute("aria-selected", String(index === slashIndex));
@@ -1878,23 +2316,83 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     items[slashIndex]?.scrollIntoView({ block: "nearest" });
   }
 
-  function updateBubble(root) {
+  function updateBubble(root: ComposerRoot): void {
+    const activeEditor = currentEditor(editor);
     const bubble = root.querySelector(".bubble");
-    const { from, to } = editor.state.selection;
-    const shouldShow = editor.isFocused && from !== to && !root.querySelector(".link-editor").dataset.open;
+    const { from, to } = activeEditor.state.selection;
+    const toolbarFocused = root.activeElement instanceof Element && Boolean(root.activeElement.closest(".bubble, .format-menu, .format-overflow, .color-palette"));
+    const shouldShow = (activeEditor.isFocused || toolbarFocused) && from !== to && !root.querySelector(".link-editor").dataset.open;
     bubble.hidden = !shouldShow;
-    if (!shouldShow) return;
+    if (!shouldShow) {
+      closeToolbarMenus(root);
+      return;
+    }
     root.querySelector(".block-type").textContent = currentBlockLabel();
-    root.querySelectorAll(".bubble [data-command]").forEach((button) => {
-      button.classList.toggle("active", editor.isActive(button.dataset.command));
+    root.querySelectorAll(".bubble [data-command], .format-overflow [data-command]").forEach((button: HTMLButtonElement) => {
+      const command = button.dataset.command;
+      const active = command ? activeEditor.isActive(command) : false;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
     });
+    const link = root.querySelector('[data-command="link"]');
+    link.setAttribute("aria-label", activeEditor.isActive("link") ? "Edit link" : "Add link");
     positionFloating(root, bubble, from, to, true);
   }
 
-  function positionFloating(root, element, from, to = from, above = false) {
+  function closeToolbarMenus(root: ComposerRoot): void {
+    root.querySelector(".format-menu").hidden = true;
+    root.querySelector(".format-overflow").hidden = true;
+    root.querySelectorAll(".color-palette").forEach((menu) => { menu.hidden = true; });
+    root.querySelectorAll(".block-type, .format-overflow-button, [data-palette-trigger]").forEach((button) => button.setAttribute("aria-expanded", "false"));
+  }
+
+  function toggleToolbarMenu(root: ComposerRoot, button: HTMLElement, menu: HTMLElement): void {
+    const open = menu.hidden;
+    closeToolbarMenus(root);
+    menu.hidden = !open;
+    button.setAttribute("aria-expanded", String(open));
+    if (open) positionToolbarMenu(root, menu, button);
+  }
+
+  function positionToolbarMenu(root: ComposerRoot, menu: HTMLElement, button: HTMLElement): void {
+    const sheet = root.querySelector(".sheet").getBoundingClientRect();
+    const anchor = button.getBoundingClientRect();
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(anchor.left - sheet.left, sheet.width - rect.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(anchor.bottom - sheet.top + 4, sheet.height - rect.height - 8))}px`;
+  }
+
+  function openPalette(root: ComposerRoot, trigger: HTMLElement, kind: PaletteKind): void {
+    const palette = root.querySelector(`.color-palette[data-palette="${kind}"]`);
+    root.querySelectorAll(".color-palette").forEach((menu) => { menu.hidden = true; });
+    root.querySelectorAll("[data-palette-trigger]").forEach((button) => button.setAttribute("aria-expanded", "false"));
+    palette.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    updatePalette(root, palette, kind);
+    positionToolbarMenu(root, palette, trigger);
+    palette.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
+  }
+
+  function updatePalette(root: ComposerRoot, palette: HTMLElement, kind: PaletteKind): void {
+    const value = String(currentEditor(editor).getAttributes("notionColor").color || "default");
+    palette.querySelectorAll<HTMLButtonElement>(".color-swatch").forEach((button) => {
+      const expected = kind === "highlight" && button.dataset.color !== "default" ? `${button.dataset.color}_background` : button.dataset.color;
+      button.setAttribute("aria-checked", String(value === expected));
+    });
+  }
+
+  function applyNotionColor(root: ComposerRoot, color: NotionColorName, kind: PaletteKind): void {
+    const chain = currentEditor(editor).chain().focus().unsetMark("notionColor");
+    if (color !== "default") chain.setMark("notionColor", { color: kind === "highlight" ? `${color}_background` : color });
+    chain.run();
+    closeToolbarMenus(root);
+  }
+
+  function positionFloating(root: ComposerRoot, element: HTMLElement, from: number, to = from, above = false): void {
+    const activeEditor = currentEditor(editor);
     const sheetRect = root.querySelector(".sheet").getBoundingClientRect();
-    const start = editor.view.coordsAtPos(from);
-    const end = editor.view.coordsAtPos(to);
+    const start = activeEditor.view.coordsAtPos(from);
+    const end = activeEditor.view.coordsAtPos(to);
     const elementRect = element.getBoundingClientRect();
     const halfWidth = elementRect.width / 2;
     const left = Math.max(12 + halfWidth, Math.min((start.left + end.right) / 2 - sheetRect.left, sheetRect.width - 12 - halfWidth));
@@ -1905,9 +2403,10 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     element.style.transform = above ? "translate(-50%,-100%)" : "translateX(-50%)";
   }
 
-  function positionSlashMenu(root, element, position) {
+  function positionSlashMenu(root: ComposerRoot, element: HTMLElement, position: number): void {
+    const activeEditor = currentEditor(editor);
     const sheetRect = root.querySelector(".sheet").getBoundingClientRect();
-    const caret = editor.view.coordsAtPos(position);
+    const caret = activeEditor.view.coordsAtPos(position);
     const margin = 12;
     const gap = 8;
 
@@ -1935,16 +2434,22 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     element.dataset.placement = placeAbove ? "above" : "below";
   }
 
-  function runInlineCommand(root, command) {
+  function runInlineCommand(root: ComposerRoot, command: InlineCommand): void {
     if (command === "link") return openLinkEditor(root);
-    const names = { bold: "toggleBold", italic: "toggleItalic", underline: "toggleUnderline", strike: "toggleStrike", code: "toggleCode" };
-    editor.chain().focus()[names[command]]().run();
+    const chain = currentEditor(editor).chain().focus();
+    if (command === "bold") chain.toggleBold().run();
+    else if (command === "italic") chain.toggleItalic().run();
+    else if (command === "underline") chain.toggleUnderline().run();
+    else if (command === "strike") chain.toggleStrike().run();
+    else chain.toggleCode().run();
   }
 
-  function runBlockCommand(block) {
-    const chain = editor.chain().focus();
+  function runBlockCommand(block: BlockCommand): void {
+    const chain = currentEditor(editor).chain().focus();
     if (block === "paragraph") chain.setParagraph().run();
-    else if (block.startsWith("heading")) chain.toggleHeading({ level: Number(block.at(-1)) }).run();
+    else if (block === "heading1") chain.toggleHeading({ level: 1 }).run();
+    else if (block === "heading2") chain.toggleHeading({ level: 2 }).run();
+    else if (block === "heading3") chain.toggleHeading({ level: 3 }).run();
     else if (block === "bulletList") chain.toggleBulletList().run();
     else if (block === "orderedList") chain.toggleOrderedList().run();
     else if (block === "taskList") chain.toggleTaskList().run();
@@ -1952,50 +2457,54 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     else if (block === "codeBlock") chain.toggleCodeBlock().run();
   }
 
-  function currentBlockLabel() {
-    if (editor.isActive("heading", { level: 1 })) return "Heading 1";
-    if (editor.isActive("heading", { level: 2 })) return "Heading 2";
-    if (editor.isActive("heading", { level: 3 })) return "Heading 3";
-    if (editor.isActive("bulletList")) return "Bulleted list";
-    if (editor.isActive("orderedList")) return "Numbered list";
-    if (editor.isActive("taskList")) return "To-do";
-    if (editor.isActive("blockquote")) return "Quote";
-    if (editor.isActive("codeBlock")) return "Code";
+  function currentBlockLabel(): string {
+    const activeEditor = currentEditor(editor);
+    if (activeEditor.isActive("heading", { level: 1 })) return "Heading 1";
+    if (activeEditor.isActive("heading", { level: 2 })) return "Heading 2";
+    if (activeEditor.isActive("heading", { level: 3 })) return "Heading 3";
+    if (activeEditor.isActive("bulletList")) return "Bulleted list";
+    if (activeEditor.isActive("orderedList")) return "Numbered list";
+    if (activeEditor.isActive("taskList")) return "To-do";
+    if (activeEditor.isActive("blockquote")) return "Quote";
+    if (activeEditor.isActive("codeBlock")) return "Code";
     return "Text";
   }
 
-  function openLinkEditor(root) {
+  function openLinkEditor(root: ComposerRoot): void {
+    const activeEditor = currentEditor(editor);
     const editorElement = root.querySelector(".link-editor");
-    const href = editor.getAttributes("link").href || "";
+    const href = String(activeEditor.getAttributes("link").href || "");
     editorElement.dataset.open = "true";
     editorElement.hidden = false;
     root.querySelector(".bubble").hidden = true;
     root.querySelector(".link-input").value = href;
-    positionFloating(root, editorElement, editor.state.selection.from, editor.state.selection.to, true);
+    positionFloating(root, editorElement, activeEditor.state.selection.from, activeEditor.state.selection.to, true);
     root.querySelector(".link-input").focus();
   }
 
-  function closeLinkEditor(root) {
+  function closeLinkEditor(root: ComposerRoot): void {
     const link = root.querySelector(".link-editor");
     link.hidden = true;
     delete link.dataset.open;
-    editor.commands.focus();
+    currentEditor(editor).commands.focus();
   }
 
-  function applyLink(root) {
+  function applyLink(root: ComposerRoot): void {
+    const activeEditor = currentEditor(editor);
     const href = root.querySelector(".link-input").value.trim();
-    if (!href) editor.chain().focus().unsetLink().run();
-    else editor.chain().focus().extendMarkRange("link").setLink({ href: normalizeUrl(href) }).run();
+    if (!href) activeEditor.chain().focus().unsetLink().run();
+    else activeEditor.chain().focus().extendMarkRange("link").setLink({ href: normalizeUrl(href) }).run();
     closeLinkEditor(root);
   }
 
-  function closeTransientUi(root) {
+  function closeTransientUi(root: ComposerRoot): boolean {
     let closed = false;
     if (!root.querySelector(".ai-panel").hidden) {
       const instance = [...instances].find((candidate) => candidate.root === root);
       instance?.aiController?.abort();
     }
-    for (const selector of [".page-menu", ".recent-panel", ".source-panel", ".ai-panel", ".slash-menu", ".format-menu", ".link-editor"]) {
+    const transientSelectors = [".page-menu", ".recent-panel", ".source-panel", ".ai-panel", ".slash-menu", ".format-menu", ".link-editor"] as const satisfies readonly ComposerSelector[];
+    for (const selector of transientSelectors) {
       const element = root.querySelector(selector);
       if (!element.hidden) {
         element.hidden = true;
@@ -2009,16 +2518,16 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return closed;
   }
 
-  function setStatus(root, text) {
+  function setStatus(root: ComposerRoot, text: string): void {
     root.querySelector(".status").textContent = text;
   }
 
-  function showToast(root, text, tone, instance = popup) {
+  function showToast(root: ComposerRoot, text: string, tone: ToastTone, instance: PopupInstance | undefined = popup): void {
     const toast = root.querySelector(".toast");
     toast.textContent = text;
     toast.dataset.tone = tone;
     toast.hidden = false;
-    clearTimeout(instance?.toastTimer);
+    if (instance?.toastTimer !== null && instance?.toastTimer !== undefined) clearTimeout(instance.toastTimer);
     if (instance) {
       instance.toastTimer = setTimeout(() => {
         if (!instance.closed) toast.hidden = true;
@@ -2026,7 +2535,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function isUrl(value) {
+  function isUrl(value: string | undefined): value is string {
+    if (!value) return false;
     try {
       const url = new URL(normalizeUrl(value));
       return url.protocol === "http:" || url.protocol === "https:";
@@ -2035,14 +2545,14 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     }
   }
 
-  function normalizeUrl(value) {
+  function normalizeUrl(value: string): string {
     return /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : `https://${value}`;
   }
 
-  function commandIcon(id) {
-    const type = { text: "T", h1: "H1", h2: "H2", h3: "H3" };
+  function commandIcon(id: string): string {
+    const type: Record<string, string> = { text: "T", h1: "H1", h2: "H2", h3: "H3" };
     if (type[id]) return `<span class="command-type" aria-hidden="true">${type[id]}</span>`;
-    const paths = {
+    const paths: Record<string, string> = {
       bullet: '<circle cx="4" cy="5" r="1" fill="currentColor"/><circle cx="4" cy="10" r="1" fill="currentColor"/><circle cx="4" cy="15" r="1" fill="currentColor"/><path d="M8 5h10M8 10h10M8 15h10" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.35"/>',
       number: '<path d="M2.8 4.6h1.8V2.7L3 3.5M2.8 9.5c.15-1 .7-1.55 1.45-1.55.7 0 1.2.4 1.2 1 0 .85-1 1.5-2.55 3h2.7M3 15.2c.25.55.75.85 1.35.85.75 0 1.25-.4 1.25-1.05 0-.7-.55-1-1.35-1h-.6l1.6-1.7H3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.15"/><path d="M9 5h9M9 10h9M9 15h9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.35"/>',
       todo: '<path d="m2.5 5.4 1.5 1.5 2.8-3.2M9 5.5h9M2.5 12.5h4v4h-4zM9 14.5h9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"/>',
@@ -2054,8 +2564,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return `<svg class="command-svg" viewBox="0 0 22 20" aria-hidden="true">${paths[id] || ""}</svg>`;
   }
 
-  function icon(name) {
-    const paths = {
+  function icon(name: IconName): string {
+    const paths: Record<IconName, string> = {
       check: '<path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/>',
       close: '<path d="m4 4 8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/>',
       more: '<circle cx="3.25" cy="8" r="1" fill="currentColor"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="12.75" cy="8" r="1" fill="currentColor"/>',
@@ -2070,7 +2580,11 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return `<svg class="inline-icon" viewBox="0 0 16 16" aria-hidden="true">${paths[name]}</svg>`;
   }
 
-  function template() {
+  function palette(kind: PaletteKind): string {
+    return `<div class="color-palette" data-palette="${kind}" role="menu" aria-label="${kind === "text" ? "Text color" : "Highlight"}" hidden>${NOTION_COLORS.map((color) => `<button class="color-swatch" type="button" role="menuitemradio" aria-label="${color[0]?.toUpperCase()}${color.slice(1)}" aria-checked="false" data-color="${color}"><span></span>${color[0]?.toUpperCase()}${color.slice(1)}</button>`).join("")}</div>`;
+  }
+
+  function template(): string {
     return `
       <link rel="stylesheet" href="${chrome.runtime.getURL("styles/composer.css")}">
       <section class="sheet" role="document" aria-label="Quick note editor">
@@ -2128,14 +2642,12 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
           <span class="character-limit" hidden></span>
         </main>
         <div class="bubble" role="toolbar" aria-label="Text formatting" hidden>
-          <button class="block-type" type="button">Text</button>
-          <span class="toolbar-line"></span>
+          <button class="block-type" type="button" aria-haspopup="menu" aria-expanded="false">Text</button>
+          <button type="button" data-command="link" aria-label="Add link" aria-pressed="false">${icon("source")}</button>
           <button type="button" data-command="bold" aria-label="Bold"><b>B</b></button>
           <button type="button" data-command="italic" aria-label="Italic"><i>i</i></button>
           <button type="button" data-command="underline" aria-label="Underline"><u>U</u></button>
-          <button type="button" data-command="strike" aria-label="Strikethrough"><s>S</s></button>
-          <button type="button" data-command="code" aria-label="Inline code"><span class="code-icon">&lt;&gt;</span></button>
-          <button type="button" data-command="link" aria-label="Add link">↗</button>
+          <button class="format-overflow-button" type="button" aria-label="More formatting" aria-haspopup="menu" aria-expanded="false">${icon("more")}</button>
         </div>
         <div class="format-menu" role="menu" hidden>
           <button type="button" data-block="paragraph">Text</button>
@@ -2148,6 +2660,13 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
           <button type="button" data-block="blockquote">Quote</button>
           <button type="button" data-block="codeBlock">Code</button>
         </div>
+        <div class="format-overflow" role="menu" aria-label="More formatting" hidden>
+          <button type="button" role="menuitem" data-command="strike" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M5 4.5c.5-1 1.5-1.5 3-1.5 2 0 3 1 3 2M5 11c.7 1.3 1.8 2 3.4 2 1.8 0 2.8-.8 2.8-2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.3"/></svg><span>Strikethrough</span></button>
+          <button type="button" role="menuitem" data-command="code" aria-pressed="false">${commandIcon("code")}<span>Inline code</span></button>
+          <button type="button" role="menuitem" data-palette-trigger="text" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13h10M5 10l3-8 3 8M6 7h4" fill="none" stroke="currentColor" stroke-width="1.4"/></svg><span>Text color</span></button>
+          <button type="button" role="menuitem" data-palette-trigger="highlight" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 11 6-8 4 3-6 8H3v-3Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.4"/></svg><span>Highlight</span></button>
+        </div>
+        ${palette("text")}${palette("highlight")}
         <div class="link-editor" hidden><input class="link-input" type="url" aria-label="Link URL" placeholder="Paste a link"><button class="apply-link" type="button">Apply</button></div>
         <div class="slash-menu" role="listbox" aria-label="Block commands" hidden></div>
         <div class="toast" role="alert" hidden></div>
@@ -2251,13 +2770,20 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       })];
     },
     addNodeView() {
-      return ({ node, updateAttributes }) => {
+      return ({ node, getPos, editor: nodeEditor }) => {
         const dom = document.createElement("details");
         dom.dataset.type = "toggle-block";
         dom.open = node.attrs.open !== false;
         const contentDOM = document.createElement("summary");
         dom.append(contentDOM);
-        dom.addEventListener("toggle", () => updateAttributes({ open: dom.open }));
+        dom.addEventListener("toggle", () => {
+          const position = getPos();
+          if (typeof position !== "number") return;
+          nodeEditor.commands.command(({ tr }) => {
+            tr.setNodeMarkup(position, undefined, { ...node.attrs, open: dom.open });
+            return true;
+          });
+        });
         return {
           dom,
           contentDOM,
@@ -2274,17 +2800,19 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
   const NotionShortcuts = Extension.create({
     name: "notionShortcuts",
     addKeyboardShortcuts() {
-      const blockShortcut = (number) => () => {
+      const blockShortcut = (number: number): (() => boolean) => () => {
         const chain = this.editor.chain().focus();
         if (number === 0) return chain.setParagraph().run();
-        if (number <= 3) return chain.toggleHeading({ level: number }).run();
+        if (number === 1) return chain.toggleHeading({ level: 1 }).run();
+        if (number === 2) return chain.toggleHeading({ level: 2 }).run();
+        if (number === 3) return chain.toggleHeading({ level: 3 }).run();
         if (number === 4) return chain.toggleTaskList().run();
         if (number === 5) return chain.toggleBulletList().run();
         if (number === 6) return chain.toggleOrderedList().run();
         if (number === 7) return chain.setNode("toggleBlock").run();
         return chain.toggleCodeBlock().run();
       };
-      const shortcuts = {};
+      const shortcuts: Record<string, () => boolean> = {};
       for (let number = 0; number <= 8; number += 1) {
         shortcuts[`Mod-Alt-${number}`] = blockShortcut(number);
         shortcuts[`Mod-Shift-${number}`] = blockShortcut(number);

@@ -1,7 +1,7 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRecoveryExport, documentToMarkdown } from "../src/capture-export.js";
+import type { EditorNode } from "../src/contracts.js";
 
 test("JSON recovery export is versioned, complete, and strips credential-shaped fields", () => {
   const result = createRecoveryExport({
@@ -55,6 +55,6 @@ test("Markdown recovery export preserves supported blocks and labels opaque Noti
   assert.match(result.filename, /\.md$/);
 });
 
-function paragraph(text) {
+function paragraph(text: string): EditorNode {
   return { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text }] }] };
 }

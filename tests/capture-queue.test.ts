@@ -1,20 +1,38 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createDeliveryQueue, classifyDeliveryError } from "../src/capture-queue.js";
 import { createCaptureRepository, DELIVERY_STATES } from "../src/capture-store.js";
+import type { CaptureDestination, CaptureRecord, CaptureRepositoryPort, Clock, DeliveryState } from "../src/contracts.js";
 
-function repositoryFixture(now) {
-  const values = {};
+type TestRepository = ReturnType<typeof createCaptureRepository> & CaptureRepositoryPort;
+type TestConnection =
+  | { configured: false; connectionId?: string; destination?: CaptureDestination | null }
+  | { configured: true; connectionId: string; destination?: CaptureDestination | null };
+
+function repositoryFixture(now: Clock): TestRepository {
+  const values: Record<string, unknown> = {};
   let id = 0;
   const storage = {
-    async get(key) { return { [key]: values[key] }; },
-    async set(next) { Object.assign(values, structuredClone(next)); }
+    async get(key?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>> {
+      if (typeof key === "string") return { [key]: values[key] };
+      return structuredClone(values);
+    },
+    async set(next: Record<string, unknown>): Promise<void> { Object.assign(values, structuredClone(next)); },
+    async remove(keys: string | string[]): Promise<void> {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
+    }
   };
-  return createCaptureRepository({ storage, now, uuid: () => `capture-${++id}` });
+  const repository = createCaptureRepository({ storage, now, uuid: () => `capture-${++id}` });
+  return Object.assign(repository, {
+    backendName: "memory",
+    setChangeHandler: (_handler: Parameters<CaptureRepositoryPort["setChangeHandler"]>[0]) => undefined
+  });
 }
 
-async function enqueue(repository, overrides = {}) {
+async function enqueue(
+  repository: TestRepository,
+  overrides: { destination?: CaptureDestination; connectionId?: string; status?: DeliveryState } = {}
+): Promise<CaptureRecord> {
   return repository.enqueue({
     capture: { document: { doc: { type: "doc", content: [] } } },
     context: {},
@@ -23,6 +41,11 @@ async function enqueue(repository, overrides = {}) {
     status: DELIVERY_STATES.pending,
     ...overrides
   });
+}
+
+function must<T>(value: T | null | undefined, label: string): T {
+  assert.ok(value, label);
+  return value;
 }
 
 test("queue honors Retry-After and serializes concurrent drains", async () => {
@@ -40,7 +63,7 @@ test("queue honors Retry-After and serializes concurrent drains", async () => {
     }
   });
   await Promise.all([queue.drain(), queue.drain()]);
-  const stored = (await repository.load()).captures[record.id];
+  const stored = must((await repository.load()).captures[record.id], "queued capture");
   assert.equal(deliveries, 1);
   assert.equal(stored.status, DELIVERY_STATES.pending);
   assert.equal(stored.nextAttemptAt, timestamp + 7_000);
@@ -50,8 +73,8 @@ test("independent drainers atomically claim one due capture only once", async ()
   const repository = repositoryFixture(() => 1_500);
   const record = await enqueue(repository);
   let deliveries = 0;
-  let releaseDelivery;
-  const deliveryGate = new Promise((resolve) => { releaseDelivery = resolve; });
+  let releaseDelivery: () => void = () => undefined;
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
   const configuration = {
     repository,
     now: () => 1_500,
@@ -71,7 +94,7 @@ test("independent drainers atomically claim one due capture only once", async ()
   releaseDelivery();
   await drains;
 
-  const stored = await repository.getCapture(record.id);
+  const stored = must(await repository.getCapture(record.id), "delivered capture");
   assert.equal(stored.status, DELIVERY_STATES.delivered);
   assert.equal(stored.attemptCount, 1);
 });
@@ -86,11 +109,11 @@ test("malformed remote delivery results stay queued instead of becoming delivere
     deliver: async () => ({})
   });
 
-  const result = await queue.attempt(record.id);
+  const result = must(await queue.attempt(record.id), "delivery result");
 
   assert.equal(result.status, DELIVERY_STATES.pending);
   assert.equal(result.remote, null);
-  assert.equal(result.lastError.kind, "ambiguous_managed");
+  assert.equal(must(result.lastError, "delivery error").kind, "ambiguous_managed");
   assert.ok(result.nextAttemptAt > 1_750);
 });
 
@@ -106,7 +129,7 @@ test("managed ambiguous delivery verifies before retry while manual delivery req
     findExisting: async () => ({ id: "notion-page", url: "https://notion.so/page" })
   });
   await managedQueue.attempt(managed.id);
-  assert.equal((await managedRepository.load()).captures[managed.id].status, DELIVERY_STATES.delivered);
+  assert.equal(must((await managedRepository.load()).captures[managed.id], "managed capture").status, DELIVERY_STATES.delivered);
 
   const manualRepository = repositoryFixture(() => timestamp);
   const manual = await enqueue(manualRepository, { destination: { managedDestination: false } });
@@ -117,7 +140,7 @@ test("managed ambiguous delivery verifies before retry while manual delivery req
     deliver: async () => { throw Object.assign(new Error("Network lost"), { code: "network_error" }); }
   });
   await manualQueue.attempt(manual.id);
-  assert.equal((await manualRepository.load()).captures[manual.id].status, DELIVERY_STATES.uncertain);
+  assert.equal(must((await manualRepository.load()).captures[manual.id], "manual capture").status, DELIVERY_STATES.uncertain);
 });
 
 test("malformed verification results cannot strand a claimed capture in sending", async () => {
@@ -132,17 +155,17 @@ test("malformed verification results cannot strand a claimed capture in sending"
   });
 
   await queue.attempt(record.id).catch(() => null);
-  const stored = await repository.getCapture(record.id);
+  const stored = must(await repository.getCapture(record.id), "verified capture");
 
   assert.equal(stored.status, DELIVERY_STATES.pending);
   assert.notEqual(stored.status, DELIVERY_STATES.sending);
   assert.notEqual(stored.status, DELIVERY_STATES.delivered);
-  assert.equal(stored.lastError.kind, "ambiguous_managed");
+  assert.equal(must(stored.lastError, "verification error").kind, "ambiguous_managed");
 });
 
 test("retarget without setup clears the old binding so completed setup can adopt it", async () => {
   let timestamp = 3_000;
-  let connection = { configured: false };
+  let connection: TestConnection = { configured: false };
   const repository = repositoryFixture(() => timestamp);
   const record = await enqueue(repository, { status: DELIVERY_STATES.blockedDestination });
   const queue = createDeliveryQueue({
@@ -152,13 +175,13 @@ test("retarget without setup clears the old binding so completed setup can adopt
     deliver: async () => ({ id: "remote" })
   });
   await queue.retry(record.id, { retarget: true });
-  let stored = (await repository.load()).captures[record.id];
+  let stored = must((await repository.load()).captures[record.id], "retargeted capture");
   assert.equal(stored.connectionId, "");
   assert.equal(stored.status, DELIVERY_STATES.blockedSetup);
 
   connection = { configured: true, connectionId: "connection-2", destination: { managedDestination: true } };
   await queue.bindUnconfiguredCaptures();
-  stored = (await repository.load()).captures[record.id];
+  stored = must((await repository.load()).captures[record.id], "bound capture");
   assert.equal(stored.connectionId, "connection-2");
   assert.equal(stored.status, DELIVERY_STATES.pending);
 });
@@ -175,8 +198,8 @@ test("restored authorization resumes captures from the same connection only", as
   });
   await queue.bindUnconfiguredCaptures();
   const state = await repository.load();
-  assert.equal(state.captures[matching.id].status, DELIVERY_STATES.pending);
-  assert.equal(state.captures[different.id].status, DELIVERY_STATES.blockedAuth);
+  assert.equal(must(state.captures[matching.id], "matching capture").status, DELIVERY_STATES.pending);
+  assert.equal(must(state.captures[different.id], "different capture").status, DELIVERY_STATES.blockedAuth);
 });
 
 test("seven-day attention window starts with delivery and a forced retry bypasses it once", async () => {
@@ -202,7 +225,7 @@ test("seven-day attention window starts with delivery and a forced retry bypasse
   });
   await queue.retry(stale.id, { force: true });
   await queue.drain();
-  assert.equal((await repository.load()).captures[stale.id].status, DELIVERY_STATES.delivered);
+  assert.equal(must((await repository.load()).captures[stale.id], "forced retry capture").status, DELIVERY_STATES.delivered);
   assert.equal(deliveries, 2);
 });
 

@@ -1,20 +1,9 @@
 import { MANAGED_DATABASE_SCHEMA_VERSION } from "./constants.js";
-import type { Destination, Settings } from "./contracts.js";
+import type { DatabaseProvisioning, Destination, Settings } from "./contracts.js";
 
-interface SerializedProvisioningError {
-  message: string;
-  status: number;
-  code: string;
-}
+type SerializedProvisioningError = NonNullable<DatabaseProvisioning["lastError"]>;
 
-export interface ProvisioningState {
-  connectionId: string;
-  marker: string;
-  status: "recovering" | "creating" | "uncertain" | "failed";
-  startedAt: number;
-  lastAttemptAt: number;
-  lastError?: SerializedProvisioningError | null;
-}
+export type ProvisioningState = DatabaseProvisioning;
 
 export type ProvisioningSettings = Omit<Partial<Settings>, "databaseProvisioning"> & {
   databaseProvisioning?: ProvisioningState | null;

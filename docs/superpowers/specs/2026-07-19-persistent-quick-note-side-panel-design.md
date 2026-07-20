@@ -20,9 +20,9 @@ Make the toolbar action open a single Quick Note composer that remains visible w
 
 ### Window-scoped panel
 
-The background service worker will open the default side panel by `windowId`, rather than configuring a panel path for an individual `tabId`. This uses Chrome's native per-window persistence and avoids reinjecting a composer into every page.
+The background service worker opens the default side panel by `windowId`, rather than configuring a panel path for an individual `tabId`. This uses Chrome's native per-window persistence and keeps the composer entirely inside the extension surface.
 
-The existing extension-tab fallback remains available when Chrome cannot open the side panel. The in-page overlay is no longer the primary toolbar surface.
+The existing extension-tab fallback remains available when Chrome cannot open the side panel. The obsolete in-page injection loader is removed.
 
 ### Active-tab tracking
 

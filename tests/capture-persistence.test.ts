@@ -1,30 +1,36 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import test from "node:test";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { createIncognitoCapturePersistence, createRegularCapturePersistence } from "../src/capture-persistence.js";
 import { DELIVERY_STATES } from "../src/capture-store.js";
+import type { EditorNode, KeyValueStoragePort } from "../src/contracts.js";
 
 globalThis.IDBKeyRange = IDBKeyRange;
 
-function chromeStorage(initial = {}) {
-  const values = structuredClone(initial);
-  const writes = [];
+interface TestStorage extends KeyValueStoragePort {
+  values: Record<string, unknown>;
+  writes: string[][];
+  readonly QUOTA_BYTES: number;
+}
+
+function chromeStorage(initial: Record<string, unknown> = {}): TestStorage {
+  const values: Record<string, unknown> = structuredClone(initial);
+  const writes: string[][] = [];
   return {
     values,
     writes,
     QUOTA_BYTES: 10 * 1024 * 1024,
-    async get(keys) {
+    async get(keys?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>> {
       if (keys === null || keys === undefined) return structuredClone(values);
       if (typeof keys === "string") return { [keys]: structuredClone(values[keys]) };
       if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, structuredClone(values[key])]));
       return Object.fromEntries(Object.entries(keys).map(([key, fallback]) => [key, structuredClone(values[key] ?? fallback)]));
     },
-    async set(next) {
+    async set(next: Record<string, unknown>): Promise<void> {
       writes.push(Object.keys(next));
       Object.assign(values, structuredClone(next));
     },
-    async remove(keys) {
+    async remove(keys: string | string[]): Promise<void> {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
     },
     async getKeys() { return Object.keys(values); },
@@ -32,8 +38,18 @@ function chromeStorage(initial = {}) {
   };
 }
 
-function document(text) {
+function document(text: string): EditorNode {
   return { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text }] }] };
+}
+
+function must<T>(value: T | null | undefined, label: string): T {
+  assert.ok(value, label);
+  return value;
+}
+
+function mustRecord(value: unknown, label: string): Record<string, unknown> {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value), label);
+  return value as Record<string, unknown>;
 }
 
 test("regular persistence migrates the legacy graph once and makes IndexedDB canonical", async () => {
@@ -53,11 +69,11 @@ test("regular persistence migrates the legacy graph once and makes IndexedDB can
   await repository.ready();
 
   assert.equal(repository.backendName, "indexeddb");
-  assert.equal((await repository.getActiveDraft()).title, "Migrated");
-  assert.equal((await repository.getCapture("capture-1")).status, DELIVERY_STATES.blockedSetup);
+  assert.equal(must(await repository.getActiveDraft(), "migrated active draft").title, "Migrated");
+  assert.equal(must(await repository.getCapture("capture-1"), "migrated capture").status, DELIVERY_STATES.blockedSetup);
   assert.equal(storage.values.captureStateV1, undefined);
-  assert.equal(storage.values.captureIndexV3.activeDraftId, "draft-1");
-  assert.equal(storage.values.captureIndexV3.unresolvedCount, 1);
+  assert.equal(mustRecord(storage.values.captureIndexV3, "capture index").activeDraftId, "draft-1");
+  assert.equal(mustRecord(storage.values.captureIndexV3, "capture index").unresolvedCount, 1);
 });
 
 test("regular autosave updates one IndexedDB record without rewriting the local index", async () => {
@@ -68,8 +84,8 @@ test("regular autosave updates one IndexedDB record without rewriting the local 
   const structuralWrites = storage.writes.length;
   const saved = await repository.upsertDraft({ ...transient, doc: document("Updated") }, transient.revision);
 
-  assert.equal((await repository.getDraft("draft")).doc.content[0].content[0].text, "Updated");
-  assert.equal(saved.revision, transient.revision + 1);
+  assert.equal(must(must(must(await repository.getDraft("draft"), "saved draft").doc.content?.[0], "document block").content?.[0], "text node").text, "Updated");
+  assert.equal(must(saved, "saved revision").revision, transient.revision + 1);
   assert.equal(storage.writes.length, structuralWrites);
 });
 
@@ -118,10 +134,10 @@ test("startup recovery is not skipped by the daily retention throttle", async ()
   timestamp += 1;
   await repository.maintain({ recoverInterrupted: true });
 
-  const recovered = await repository.getCapture(record.id);
+  const recovered = must(await repository.getCapture(record.id), "recovered capture");
   assert.equal(recovered.status, DELIVERY_STATES.pending);
   assert.equal(recovered.nextAttemptAt, timestamp);
-  assert.equal(recovered.lastError.kind, "interrupted");
+  assert.equal(must(recovered.lastError, "interruption metadata").kind, "interrupted");
 });
 
 test("Incognito persistence stores one session key per record and removes its legacy graph", async () => {
@@ -130,7 +146,7 @@ test("Incognito persistence stores one session key per record and removes its le
   await repository.ready();
   const draft = await repository.getOrCreateDraft({ context: { selection: "Private" } });
   assert.ok(storage.values[`incognitoDraftV3:${draft.id}`]);
-  assert.deepEqual(storage.values.incognitoCaptureIndexV3.draftIds, [draft.id]);
+  assert.deepEqual(mustRecord(storage.values.incognitoCaptureIndexV3, "incognito index").draftIds, [draft.id]);
   assert.equal(storage.values.incognitoCaptureStateV1, undefined);
 
   const record = await repository.enqueue({
@@ -144,7 +160,7 @@ test("Incognito persistence stores one session key per record and removes its le
   });
   assert.equal(storage.values[`incognitoDraftV3:${draft.id}`], undefined);
   assert.ok(storage.values[`incognitoCaptureV3:${record.id}`]);
-  assert.deepEqual(storage.values.incognitoCaptureIndexV3.captureIds, [record.id]);
+  assert.deepEqual(mustRecord(storage.values.incognitoCaptureIndexV3, "incognito index").captureIds, [record.id]);
 });
 
 test("failed IndexedDB initialization preserves and continues using legacy capture storage", async () => {
@@ -156,13 +172,15 @@ test("failed IndexedDB initialization preserves and continues using legacy captu
       captures: {}
     }
   });
+  const failingIndexedDB = new IDBFactory();
+  Object.defineProperty(failingIndexedDB, "open", { value() { throw new Error("IndexedDB unavailable"); } });
   const repository = createRegularCapturePersistence({
     storage,
-    indexedDB: { open() { throw new Error("IndexedDB unavailable"); } }
+    indexedDB: failingIndexedDB
   });
   await repository.ready();
   assert.equal(repository.backendName, "legacy");
-  assert.equal((await repository.getDraft("draft")).id, "draft");
+  assert.equal(must(await repository.getDraft("draft"), "legacy draft").id, "draft");
   assert.ok(storage.values.captureStateV1);
   assert.match(repository.migrationError, /unavailable/);
 });
@@ -188,13 +206,13 @@ test("a failed local-index checkpoint uses legacy for the run and retries the im
   await firstRun.ready();
   assert.equal(firstRun.backendName, "legacy");
   assert.ok(storage.values.captureStateV1);
-  await firstRun.upsertDraft({ ...(await firstRun.getDraft("draft")), doc: document("Changed in fallback") }, 1);
+  await firstRun.upsertDraft({ ...must(await firstRun.getDraft("draft"), "fallback draft"), doc: document("Changed in fallback") }, 1);
 
   failMirror = false;
   const restarted = createRegularCapturePersistence({ storage, indexedDB, now: () => 200 });
   await restarted.ready();
   assert.equal(restarted.backendName, "indexeddb");
-  assert.equal((await restarted.getDraft("draft")).doc.content[0].content[0].text, "Changed in fallback");
+  assert.equal(must(must(must(await restarted.getDraft("draft"), "restarted draft").doc.content?.[0], "document block").content?.[0], "text node").text, "Changed in fallback");
   assert.equal(storage.values.captureStateV1, undefined);
-  assert.equal(storage.values.captureIndexV3.migrationStatus, "complete");
+  assert.equal(mustRecord(storage.values.captureIndexV3, "capture index").migrationStatus, "complete");
 });

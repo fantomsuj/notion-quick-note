@@ -23,11 +23,12 @@ Apple's Quick Note establishes the interaction model: invoke it from a keyboard 
 ```mermaid
 flowchart TD
   subgraph Page["Current webpage — untrusted"]
-    Trigger["Toolbar · shortcut · selection"]
-    Card["Quick Note card\nShadow DOM"]
+    Context["Active page metadata\ntitle + URL"]
   end
 
   subgraph Extension["Chrome extension — trusted"]
+    Trigger["Toolbar · shortcut · selection"]
+    Panel["Persistent side panel\nmounted Tiptap composer"]
     Worker["Service worker\ncoordination + secrets"]
     Store["Chrome storage\nsettings + small index"]
     CaptureDB["IndexedDB\nper-record drafts + captures"]
@@ -40,8 +41,10 @@ flowchart TD
     Broker["Optional OAuth broker"]
   end
 
-  Trigger --> Card
-  Card -->|"validated messages"| Worker
+  Trigger --> Worker
+  Worker -->|"typed navigation + context"| Panel
+  Panel -->|"validated messages"| Worker
+  Context -. "tabs metadata only" .-> Worker
   Worker <--> Store
   Worker <--> CaptureDB
   Settings <--> Store
@@ -51,7 +54,7 @@ flowchart TD
 
 ### The most important boundary
 
-The webpage gets the composer, but it never gets the Notion token. The card sends plain capture data to the service worker; the service worker reads credentials and talks to Notion. Shadow DOM protects the visual surface from most host-page CSS, while Chrome's isolated content-script environment separates JavaScript state from the page. See [Chrome's content-script model](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts).
+The webpage never gets the composer or the Notion token. Chrome hosts one mounted composer in the window-scoped side panel; the panel sends plain capture data to the service worker, where credentials and Notion transport remain isolated. While the panel is connected, the worker forwards only supported active-tab title and URL metadata. Selected text enters a draft only through the explicit selection command.
 
 ## 3. The capture lifecycle
 
@@ -59,14 +62,15 @@ The webpage gets the composer, but it never gets the Notion token. The card send
 sequenceDiagram
   actor U as User
   participant C as Chrome
-  participant Q as Quick Note card
+  participant Q as Quick Note side panel
   participant W as Service worker
   participant N as Notion API
 
   U->>C: Toolbar, shortcut, or context menu
-  C->>C: Read active title, URL, selection
-  C->>Q: Inject and open card
-  Q->>Q: Restore the global active draft and attach this page
+  C->>Q: Open the window-scoped panel
+  C->>C: Read active title and URL
+  C->>Q: Forward typed draft and page context
+  Q->>Q: Resume the mounted draft and attach this page
   U->>Q: Write note and save
   Q->>W: SAVE_CAPTURE message
   W->>N: Append block or create page
@@ -104,7 +108,7 @@ flowchart TD
 
 | Primitive | Current implementation | Useful future extensions |
 |---|---|---|
-| Trigger | Toolbar, shortcut, selection menu | Hot-corner companion, omnibox command, side panel |
+| Trigger | Toolbar, browser shortcut, selection menu | Hot-corner companion, omnibox command |
 | Context | URL, page title, selected text | Author, publish date, canonical URL, screenshot |
 | Draft | Versioned Tiptap document with session persistence, Markdown rules, and slash commands | Templates, voice |
 | Destination | Running page or database/data source | Multiple workspaces, routing rules, other providers |
@@ -175,7 +179,7 @@ This is a qualitative product comparison, not a claim that one tool is universal
 
 | Option | Best at | Interaction center | Complexity | Ownership |
 |---|---|---|---|---|
-| **Notion Quick Note** | Capturing the thought caused by the current page | Quiet floating composer | Low today | Fully user-owned and editable |
+| **Notion Quick Note** | Capturing the thought caused by the current page | Persistent side-panel composer | Low today | Fully user-owned and editable |
 | **Notion Web Clipper** | Saving a webpage into a chosen Notion destination | One-click page clipper | Low | Official closed product |
 | **Flylighter** | Multi-highlight research and configurable capture flows | Power-user editor/sidebar | High capability | Third-party product |
 | **Save to Notion** | Rich web clipping, database fields, screenshots, and images | Configurable clip form | Medium–high | Third-party product |
@@ -265,7 +269,7 @@ Users will tolerate an API error; they will not tolerate losing the thought. Loc
 
 ### 6. The browser is both the advantage and the constraint
 
-`activeTab` keeps permissions narrow and user-controlled, but Chrome internal pages, browser PDF surfaces, and some special pages cannot accept injected scripts. A side-panel fallback can cover more cases later; Chrome explicitly supports persistent extension experiences through its [Side Panel API](https://developer.chrome.com/docs/extensions/reference/api/sidePanel).
+The `tabs` permission lets the connected panel follow active HTTP(S) page titles and URLs without injecting code into those pages. Chrome internal pages, browser PDF surfaces, and other unsupported schemes are ignored as context, while the mounted composer remains usable. If Chrome cannot open the side panel, Quick Note falls back to its existing extension tab.
 
 ## 12. The five takeaways to remember
 

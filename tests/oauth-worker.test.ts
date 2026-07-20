@@ -201,6 +201,41 @@ test("refresh verifies proof, rotates custody, rejects replay, and renews the in
   assert.equal(calls.length, 2);
 });
 
+test("refresh allows omitted identity fields, preserves extra fields, and rejects malformed optional metadata", async () => {
+  const keys = await makeSigningKeys();
+  const compatibleEnv = makeEnv(async (_url, options) => {
+    const body = requestBody(options);
+    return body.grant_type === "authorization_code"
+      ? notionResponse(tokenPayload("access-one", "refresh-one"))
+      : notionResponse({ access_token: "access-two", refresh_token: "refresh-two", owner: { type: "workspace" } });
+  });
+  const compatibleHandle = await connect(compatibleEnv, keys.publicJwk);
+  const compatible = await worker.fetch(
+    request("/refresh", await makeProof(keys.privateKey, "/refresh", compatibleHandle)),
+    compatibleEnv
+  );
+  assert.equal(compatible.status, 200);
+  assert.deepEqual(await compatible.json(), {
+    access_token: "access-two",
+    owner: { type: "workspace" }
+  });
+
+  for (const field of ["bot_id", "workspace_id", "workspace_name", "workspace_icon"]) {
+    const malformedEnv = makeEnv(async (_url, options) => {
+      const body = requestBody(options);
+      return body.grant_type === "authorization_code"
+        ? notionResponse(tokenPayload("access-one", "refresh-one"))
+        : notionResponse({ access_token: "access-two", refresh_token: "refresh-two", [field]: 42 });
+    });
+    const malformedHandle = await connect(malformedEnv, keys.publicJwk);
+    const malformed = await worker.fetch(
+      request("/refresh", await makeProof(keys.privateKey, "/refresh", malformedHandle)),
+      malformedEnv
+    );
+    assert.equal(malformed.status, 502);
+  }
+});
+
 test("concurrent refreshes allow exactly one rotation and deny the other while it is in progress", async () => {
   let releaseRefresh: (() => void) | undefined;
   const refreshStarted = new Promise<void>((resolve) => { releaseRefresh = resolve; });
@@ -391,6 +426,10 @@ test("allows preflight only for the configured extension origin and rejects malf
   });
   assert.equal((await worker.fetch(malformed, env)).status, 400);
   assert.equal((await worker.fetch(request("/refresh", { signature: "x".repeat(17 * 1024) }), env)).status, 413);
+
+  const incompleteExchange = await worker.fetch(request("/exchange", { code: "code", state: "state" }), env);
+  assert.equal(incompleteExchange.status, 400);
+  assert.deepEqual(await incompleteExchange.json(), { error: "redirect_uri is required" });
 });
 
 class MemoryStorage implements OAuthStorage {

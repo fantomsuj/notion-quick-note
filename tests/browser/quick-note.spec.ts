@@ -1,7 +1,16 @@
-// @ts-nocheck
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import type { CaptureDraft } from "../../src/contracts.js";
+
+interface LanguageModelCreateOptions {
+  monitor?: (monitor: { addEventListener(type: string, listener: EventListener): void }) => void;
+}
+
+interface LanguageModelPromptOptions {
+  signal: AbortSignal;
+  [key: string]: unknown;
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtureUrl = new URL("../fixtures/media-page.html", import.meta.url).href;
@@ -12,16 +21,144 @@ test.beforeEach(async ({ page }) => {
   await page.addScriptTag({ path: contentScript });
 });
 
-async function openQuickNote(page, overrides) {
+async function openQuickNote(page: Page, overrides: Parameters<Window["openQuickNote"]>[0] = {}) {
   await page.evaluate((pageOverrides) => window.openQuickNote(pageOverrides), overrides);
   await expect(page.locator("#notion-quick-note-root[open] .ProseMirror")).toBeFocused();
 }
 
-async function mediaEvents(page) {
+async function rememberEditorNode(page: Page) {
+  await page.locator("#notion-quick-note-root .ProseMirror").evaluate((node) => {
+    window.rememberedQuickNoteEditor = node;
+  });
+}
+
+async function expectRememberedEditorNode(page: Page) {
+  await expect.poll(() => page.locator("#notion-quick-note-root .ProseMirror").evaluate((node) => (
+    node === window.rememberedQuickNoteEditor
+  ))).toBe(true);
+}
+
+async function corruptRequiredTemplateElement(page: Page, selector: string): Promise<void> {
+  await page.evaluate((requiredSelector) => {
+    const descriptor = Object.getOwnPropertyDescriptor(ShadowRoot.prototype, "innerHTML");
+    if (!descriptor?.get || !descriptor.set) throw new Error("ShadowRoot.innerHTML is unavailable.");
+    Object.defineProperty(ShadowRoot.prototype, "innerHTML", {
+      configurable: true,
+      get(this: ShadowRoot) { return descriptor.get?.call(this) as string; },
+      set(this: ShadowRoot, value: string) {
+        descriptor.set?.call(this, value);
+        const original = this.querySelector(requiredSelector);
+        if (!original) throw new Error(`Test could not find ${requiredSelector}.`);
+        const invalid = document.createElement("div");
+        for (const attribute of original.attributes) invalid.setAttribute(attribute.name, attribute.value);
+        invalid.innerHTML = original.innerHTML;
+        original.replaceWith(invalid);
+      }
+    });
+  }, selector);
+}
+
+function draftFixture(id: string, body: string): CaptureDraft {
+  return {
+    version: 2,
+    id,
+    tabId: 1,
+    context: {
+      version: 1,
+      title: `${id} source`,
+      url: `https://${id}.example/article`,
+      selection: "",
+      capturedAt: 1
+    },
+    mode: "new",
+    targetRecordId: "",
+    sources: [{ title: `${id} source`, url: `https://${id}.example/article`, selection: "", capturedAt: 1 }],
+    dismissedSourceUrls: [],
+    revision: 1,
+    sessionId: `session-${id}`,
+    returnDraftId: "",
+    title: "",
+    includeSource: true,
+    doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: body }] }] },
+    remote: null,
+    baseFingerprint: "",
+    createdAt: 1,
+    updatedAt: 1
+  };
+}
+
+async function mediaEvents(page: Page): Promise<Array<{ type: string; key: string }>> {
   return page.evaluate(() => window.mediaEvents);
 }
 
-async function installLanguageModel(page, options = {}) {
+test("composer template validation rejects a required singleton with the wrong concrete class", async ({ page }) => {
+  await corruptRequiredTemplateElement(page, ".page-title");
+
+  const failure = await page.evaluate(async () => {
+    try {
+      await window.openQuickNote();
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  });
+
+  expect(failure).toContain(".page-title");
+  await expect(page.locator("#notion-quick-note-root")).toHaveCount(0);
+});
+
+test("composer template validation rejects a required list member with the wrong concrete class", async ({ page }) => {
+  await corruptRequiredTemplateElement(page, ".format-menu [data-block]");
+
+  const failure = await page.evaluate(async () => {
+    try {
+      await window.openQuickNote();
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  });
+
+  expect(failure).toContain(".format-menu [data-block]");
+  await expect(page.locator("#notion-quick-note-root")).toHaveCount(0);
+});
+
+test("composer template validation eagerly checks every mapped singleton", async ({ page }) => {
+  await corruptRequiredTemplateElement(page, ".recent-search");
+
+  const failure = await page.evaluate(async () => {
+    try {
+      await window.openQuickNote();
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  });
+
+  expect(failure).toContain(".recent-search");
+  await expect(page.locator("#notion-quick-note-root")).toHaveCount(0);
+});
+
+test("composer template validation eagerly checks every mapped list", async ({ page }) => {
+  await corruptRequiredTemplateElement(page, ".color-swatch");
+
+  const failure = await page.evaluate(async () => {
+    try {
+      await window.openQuickNote();
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  });
+
+  expect(failure).toContain(".color-swatch");
+  await expect(page.locator("#notion-quick-note-root")).toHaveCount(0);
+});
+
+async function installLanguageModel(
+  page: Page,
+  options: { availability?: string; mode?: "success" | "error" | "empty-tasks" | "pending" } = {}
+): Promise<void> {
   await page.evaluate(({ availability, mode }) => {
     window.aiPrompts = [];
     window.aiDestroyed = 0;
@@ -29,10 +166,10 @@ async function installLanguageModel(page, options = {}) {
       configurable: true,
       value: {
         async availability() { return availability; },
-        async create(options) {
+        async create(options: LanguageModelCreateOptions) {
           options.monitor?.({ addEventListener() {} });
           return {
-            async prompt(prompt, promptOptions) {
+            async prompt(prompt: string, promptOptions: LanguageModelPromptOptions) {
               window.aiPrompts.push({ prompt, promptOptions });
               if (mode === "error") throw new Error("Model stopped unexpectedly");
               if (mode === "empty-tasks") return JSON.stringify({ tasks: [] });
@@ -109,7 +246,7 @@ test("mounted composer tracks active page context and keeps dismissed pages supp
   await expect(root.locator(".source-row")).toHaveCount(1);
 
   await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
-    page: { title: "Second page", url: "https://second.example/path", selection: "" },
+    page: { version: 1, title: "Second page", url: "https://second.example/path", selection: "", capturedAt: 1 },
     tabId: 2,
     explicit: false
   }));
@@ -120,7 +257,7 @@ test("mounted composer tracks active page context and keeps dismissed pages supp
   await expect(root.locator(".source-list")).not.toContainText("First page");
 
   await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
-    page: { title: "First page revisited", url: "https://first.example/article#section", selection: "" },
+    page: { version: 1, title: "First page revisited", url: "https://first.example/article#section", selection: "", capturedAt: 1 },
     tabId: 1,
     explicit: false
   }));
@@ -131,29 +268,298 @@ test("mounted composer tracks active page context and keeps dismissed pages supp
   await expect(root.locator(".source-list")).toContainText("First page revisited");
 });
 
-test("automatic tab context does not alter a draft that is editing an existing note", async ({ page }) => {
-  await page.evaluate(() => {
-    window.currentDraft = {
-      version: 2,
-      id: "edit-draft",
-      tabId: 1,
-      sessionId: "session-test",
-      revision: 1,
-      mode: "edit",
-      targetRecordId: "capture-existing",
-      title: "Existing note",
-      sources: [{ title: "Original source", url: "https://original.example/page" }],
-      dismissedSourceUrls: [],
-      doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Existing body" }] }] }
-    };
+test("same draft command preserves the mounted composer node and unsaved text", async ({ page }) => {
+  await openQuickNote(page);
+  const stalePanelDraft = await page.evaluate(() => {
+    if (!window.currentDraft) throw new Error("Expected the current draft to be hydrated.");
+    return structuredClone(window.currentDraft);
   });
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+  await editor.fill("Unsaved local thought");
+  await editor.press("ArrowLeft");
+  await rememberEditorNode(page);
+  await expect.poll(() => page.evaluate(() => window.currentDraft?.revision || 0)).toBeGreaterThan(stalePanelDraft.revision);
+
+  await page.evaluate((draftJson: string) => {
+    const draft = JSON.parse(draftJson) as CaptureDraft;
+    return window.__notionQuickNoteOpen?.({
+      draft,
+      page: draft.context,
+      draftId: draft.id,
+      tabId: draft.tabId,
+      sessionId: draft.sessionId,
+      revision: draft.revision
+    });
+  }, JSON.stringify(stalePanelDraft));
+
+  await expectRememberedEditorNode(page);
+  await expect(editor).toHaveText("Unsaved local thought");
+  await expect(editor).toBeFocused();
+  await editor.fill("Still editable after repeated reveal");
+  await expect.poll(() => page.evaluate(() => JSON.stringify(window.currentDraft?.doc || {}))).toContain("Still editable after repeated reveal");
+});
+
+test("different draft command updates content in the mounted composer node", async ({ page }) => {
+  await openQuickNote(page);
+  await page.locator("#notion-quick-note-root .ProseMirror").fill("First draft edits");
+  await rememberEditorNode(page);
+
+  await page.evaluate((draftJson: string) => {
+    const draft = JSON.parse(draftJson) as CaptureDraft;
+    return window.__notionQuickNoteOpen?.({
+      draft,
+      page: draft.context,
+      draftId: draft.id,
+      tabId: draft.tabId,
+      sessionId: draft.sessionId,
+      revision: draft.revision
+    });
+  }, JSON.stringify(draftFixture("second-draft", "Second draft body")));
+
+  await expectRememberedEditorNode(page);
+  await expect(page.locator("#notion-quick-note-root .ProseMirror")).toHaveText("Second draft body");
+});
+
+test("activated different draft adopts its new revision and remains writable", async ({ page }) => {
+  await openQuickNote(page);
+  const loadedDraft = draftFixture("activated-draft", "Loaded before activation");
+  await page.evaluate((draftJson: string) => {
+    const draft = JSON.parse(draftJson) as CaptureDraft;
+    return window.__notionQuickNoteOpen?.({ draft });
+  }, JSON.stringify(loadedDraft));
+
+  const activatedDraft = { ...loadedDraft, revision: loadedDraft.revision + 1, sessionId: "activated-session" };
+  await page.evaluate((draftJson: string) => {
+    const draft = JSON.parse(draftJson) as CaptureDraft;
+    window.currentDraft = structuredClone(draft);
+    return window.__notionQuickNoteOpen?.({ draft, replaceWithoutPersist: true });
+  }, JSON.stringify(activatedDraft));
+
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+  await editor.fill("Writable after activation");
+  await expect.poll(() => page.evaluate(() => JSON.stringify(window.currentDraft?.doc || {}))).toContain("Writable after activation");
+  await expect(page.locator("#notion-quick-note-root .stale-banner")).toBeHidden();
+});
+
+test("Activity suspension and resume preserve the mounted composer node and content", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("Keep this while viewing Activity");
+  await rememberEditorNode(page);
+  await root.evaluate((host) => { window.rememberedQuickNoteHost = host; });
+
+  await page.evaluate(() => window.__notionQuickNoteSuspend?.());
+  await expect.poll(() => root.evaluate((dialog: HTMLDialogElement) => dialog.open)).toBe(false);
+  await expect.poll(() => root.evaluate((element: HTMLElement) => element.hidden)).toBe(true);
+  await page.locator("#player-focus").click();
+  await expect(page.locator("#player-focus")).toBeFocused();
+  await page.evaluate(() => window.__notionQuickNoteResume?.());
+
+  await expect.poll(() => root.evaluate((dialog: HTMLDialogElement) => dialog.open)).toBe(true);
+  await expect.poll(() => root.evaluate((element: HTMLElement) => element.hidden)).toBe(false);
+  await expect.poll(() => root.evaluate((host) => host === window.rememberedQuickNoteHost)).toBe(true);
+  await expectRememberedEditorNode(page);
+  await expect(editor).toHaveText("Keep this while viewing Activity");
+});
+
+test("discarding the suspended current draft cancels autosave and disposes its mounted editor", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".ProseMirror").fill("Discard this suspended draft");
+  await page.evaluate(() => window.__notionQuickNoteSuspend?.());
+
+  const result = await page.evaluate(async () => {
+    const draftId = window.currentDraft?.id;
+    if (!draftId) throw new Error("Expected a current draft before discard.");
+    const messageIndex = window.runtimeMessages.length;
+    const prepared = await window.__notionQuickNotePrepareDiscard?.(draftId);
+    const response = await window.chrome.runtime.sendMessage({ type: "DISCARD_DRAFT", id: draftId });
+    window.__notionQuickNoteFinishDiscard?.(draftId, Boolean(response?.ok && response.discarded));
+    return { draftId, messageIndex, prepared, response };
+  });
+
+  expect(result.prepared).toBe(true);
+  expect(result.response).toMatchObject({ ok: true, discarded: true });
+  await expect(root).toHaveCount(0);
+  await page.waitForTimeout(300);
+  const messagesAfterDiscard = await page.evaluate((messageIndex) => window.runtimeMessages.slice(messageIndex), result.messageIndex);
+  expect(messagesAfterDiscard.filter((message) => message.type === "UPSERT_DRAFT" && message.draft?.id === result.draftId)).toEqual([]);
+  expect(await page.evaluate(() => window.currentDraft)).toBeNull();
+});
+
+test("failed discard restores the mounted composer and autosave without losing the draft", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.evaluate(() => { window.discardResponse = { ok: true, discarded: false }; });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("Keep this local draft");
+  await expect.poll(() => page.evaluate(() => window.currentDraft?.doc?.content?.[0]?.content?.[0]?.text)).toBe("Keep this local draft");
+
+  await root.locator(".more").click();
+  await root.locator(".discard-draft").click();
+
+  await expect(root).toHaveCount(1);
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+  await expect(root.locator(".toast")).toHaveText("Couldn’t discard this draft.");
+  await editor.fill("Autosave resumed");
+  await expect.poll(() => page.evaluate(() => window.currentDraft?.doc?.content?.[0]?.content?.[0]?.text)).toBe("Autosave resumed");
+  expect(pageErrors).toEqual([]);
+});
+
+test("discard runtime rejection reconciles a retained draft and restores autosave", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("Retain after rejected discard");
+  await expect.poll(() => page.evaluate(() => window.currentDraft?.doc?.content?.[0]?.content?.[0]?.text)).toBe("Retain after rejected discard");
+  await page.evaluate(() => { window.discardError = new Error("Discard response channel failed"); });
+
+  await root.locator(".more").click();
+  await root.locator(".discard-draft").click();
+
+  await expect(root).toHaveCount(1);
+  await expect(root.locator(".toast")).toHaveText("Discard response channel failed");
+  await editor.fill("Autosave resumed after rejection");
+  await expect.poll(() => page.evaluate(() => window.currentDraft?.doc?.content?.[0]?.content?.[0]?.text)).toBe("Autosave resumed after rejection");
+  expect(pageErrors).toEqual([]);
+});
+
+test("discard runtime rejection disposes the composer when reconciliation confirms deletion", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".ProseMirror").fill("Delete before the response is lost");
+  await expect.poll(() => page.evaluate(() => Boolean(window.currentDraft))).toBe(true);
+  await page.evaluate(() => {
+    window.discardError = new Error("Discard response channel failed after deletion");
+    window.discardDeletesBeforeError = true;
+  });
+
+  await root.locator(".more").click();
+  await root.locator(".discard-draft").click();
+
+  await expect(root).toHaveCount(0);
+  expect(await page.evaluate(() => window.currentDraft)).toBeNull();
+  expect(pageErrors).toEqual([]);
+});
+
+test("event-launched runtime rejection is surfaced without an unhandled rejection", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await openQuickNote(page);
+  await page.evaluate(() => { window.runtimeError = new Error("Settings route unavailable"); });
+
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".more").click();
+  await root.locator(".open-settings").click();
+
+  await expect(root.locator(".toast")).toHaveText("Settings route unavailable");
+  expect(pageErrors).toEqual([]);
+});
+
+test("mounted composer context updates sources without replacing the editor node", async ({ page }) => {
+  await openQuickNote(page, { title: "First source", url: "https://first.example/article" });
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("Context-safe content");
+  await rememberEditorNode(page);
+
+  await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
+    page: { version: 1, title: "Second source", url: "https://second.example/article", selection: "", capturedAt: 2 },
+    tabId: 2,
+    explicit: false
+  }));
+  await root.locator(".more").click();
+  await root.locator(".manage-sources").click();
+
+  await expect(root.locator(".source-list")).toContainText("Second source");
+  await expectRememberedEditorNode(page);
+  await expect(editor).toHaveText("Context-safe content");
+});
+
+test("explicit selection context appends a quote without remounting the composer", async ({ page }) => {
+  await openQuickNote(page, { title: "First source", url: "https://first.example/article" });
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("Existing thought");
+  await rememberEditorNode(page);
+
+  await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
+    page: {
+      version: 1,
+      title: "Quoted source",
+      url: "https://quoted.example/article",
+      selection: "A selected passage",
+      capturedAt: 3
+    },
+    tabId: 3,
+    explicit: true
+  }));
+
+  await expectRememberedEditorNode(page);
+  await expect(editor).toContainText("Existing thought");
+  await expect(root.locator(".ProseMirror blockquote")).toContainText("A selected passage");
+});
+
+test("failed different draft switch preserves the mounted draft and restarts autosave", async ({ page }) => {
+  await openQuickNote(page);
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+  await page.evaluate(() => { window.runtimeError = new Error("storage unavailable"); });
+  await editor.fill("Unsaved draft that must survive");
+  await rememberEditorNode(page);
+
+  const error = await page.evaluate(async (draftJson: string) => {
+    const draft = JSON.parse(draftJson) as CaptureDraft;
+    try {
+      await window.__notionQuickNoteOpen?.({
+        draft,
+        page: draft.context,
+        draftId: draft.id,
+        tabId: draft.tabId,
+        sessionId: draft.sessionId,
+        revision: draft.revision
+      });
+      return "";
+    } catch (caught) {
+      return caught instanceof Error ? caught.message : String(caught);
+    }
+  }, JSON.stringify(draftFixture("switch-target", "Replacement content")));
+
+  expect(error).toContain("storage unavailable");
+  await expectRememberedEditorNode(page);
+  await expect(editor).toHaveText("Unsaved draft that must survive");
+
+  await page.evaluate(() => { window.runtimeError = null; });
+  await expect.poll(() => page.evaluate(() => window.runtimeMessages.some((message) => (
+    message.type === "UPSERT_DRAFT"
+    && JSON.stringify(message.draft?.doc).includes("Unsaved draft that must survive")
+  )))).toBe(true);
+});
+
+test("automatic tab context does not alter a draft that is editing an existing note", async ({ page }) => {
+  const editDraft: CaptureDraft = {
+    ...draftFixture("edit-draft", "Existing body"),
+    mode: "edit",
+    targetRecordId: "capture-existing",
+    title: "Existing note",
+    sources: [{ title: "Original source", url: "https://original.example/page", selection: "", capturedAt: 1 }]
+  };
+  await page.evaluate((draftJson: string) => {
+    window.currentDraft = JSON.parse(draftJson) as CaptureDraft;
+  }, JSON.stringify(editDraft));
   await openQuickNote(page);
   const root = page.locator("#notion-quick-note-root");
   await root.locator(".more").click();
   await root.locator(".manage-sources").click();
 
   await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
-    page: { title: "Unrelated tab", url: "https://unrelated.example/path", selection: "" },
+    page: { version: 1, title: "Unrelated tab", url: "https://unrelated.example/path", selection: "", capturedAt: 1 },
     tabId: 2,
     explicit: false
   }));
@@ -282,11 +688,14 @@ test("AI to-dos cannot exceed the note limit or mutate a stale draft", async ({ 
   await expect(root.locator('.ProseMirror ul[data-type="taskList"] > li')).toHaveCount(0);
 
   await root.locator(".ai-review-back").click();
-  await page.evaluate(() => { window.currentDraft.revision += 10; });
+  await page.evaluate(() => {
+    if (!window.currentDraft) throw new Error("Expected an AI draft.");
+    window.currentDraft.revision += 10;
+  });
   await editor.pressSequentially(" stale");
   await expect(root.locator(".stale-banner")).toBeVisible();
   await expect(root.locator(".ai")).toBeDisabled();
-  await root.locator('[data-ai-action="title"]').evaluate((button) => button.click());
+  await root.locator('[data-ai-action="title"]').evaluate((button: HTMLElement) => button.click());
   expect(await page.evaluate(() => window.aiPrompts.length)).toBe(1);
 });
 
@@ -366,7 +775,18 @@ test("closing a title-only composer does not retain a local draft", async ({ pag
 });
 
 test("Recent stashes the current draft, loads a saved note, and exposes attached sources", async ({ page }) => {
-  await page.evaluate(() => {
+  const remoteDraft: CaptureDraft = {
+    ...draftFixture("edit-draft", "Live Notion content"),
+    mode: "edit",
+    targetRecordId: "capture-recent",
+    returnDraftId: "draft-test",
+    title: "Recently saved",
+    sources: [
+      { title: "First source", url: "https://first.example/article", selection: "", capturedAt: 1 },
+      { title: "Second source", url: "https://second.example/video", selection: "", capturedAt: 1 }
+    ]
+  };
+  await page.evaluate((draftJson: string) => {
     window.recentNotes = [{
       id: "capture-recent",
       source: "note",
@@ -375,25 +795,11 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
       destinationName: "Test Inbox",
       status: "delivered",
       updatedAt: Date.now(),
-      remoteUrl: "https://notion.so/recent"
+      remoteUrl: "https://notion.so/recent",
+      editable: true
     }];
-    window.remoteDraft = {
-      version: 2,
-      id: "edit-draft",
-      tabId: 1,
-      sessionId: "session-test",
-      revision: 1,
-      mode: "edit",
-      targetRecordId: "capture-recent",
-      returnDraftId: "draft-test",
-      title: "Recently saved",
-      sources: [
-        { title: "First source", url: "https://first.example/article" },
-        { title: "Second source", url: "https://second.example/video" }
-      ],
-      doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Live Notion content" }] }] }
-    };
-  });
+    window.remoteDraft = JSON.parse(draftJson) as CaptureDraft;
+  }, JSON.stringify(remoteDraft));
   await openQuickNote(page);
   const root = page.locator("#notion-quick-note-root");
   await root.locator(".ProseMirror").fill("Unsaved local thought");
@@ -415,12 +821,20 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   await expect(root.locator(".source-row")).toHaveCount(1);
 
   const messages = await page.evaluate(() => window.runtimeMessages);
-  expect(messages.some((message) => message.type === "UPSERT_DRAFT" && message.draft.doc.content[0]?.content?.[0]?.text === "Unsaved local thought")).toBe(true);
+  expect(messages.some((message) => message.type === "UPSERT_DRAFT" && message.draft?.doc.content?.[0]?.content?.[0]?.text === "Unsaved local thought")).toBe(true);
   expect(messages.some((message) => message.type === "LOAD_RECENT_NOTE" && message.id === "capture-recent")).toBe(true);
 });
 
 test("Recent buckets drafts above Notion pages and can pull a Notion doc into the composer", async ({ page }) => {
-  await page.evaluate(() => {
+  const stashedDraft = { ...draftFixture("draft-stashed", "Keep this thought nearby"), revision: 2, title: "Stashed draft" };
+  const notionDraft: CaptureDraft = {
+    ...draftFixture("edit-notion", "Pulled from Notion"),
+    mode: "edit",
+    targetRecordId: "imported-notion",
+    returnDraftId: "draft-test",
+    title: "Workspace spec"
+  };
+  await page.evaluate(({ stashedJson, notionJson }: { stashedJson: string; notionJson: string }) => {
     window.recentDrafts = [{
       id: "draft-stashed",
       source: "draft",
@@ -456,32 +870,10 @@ test("Recent buckets drafts above Notion pages and can pull a Notion doc into th
       editable: true
     }];
     window.recentDraftBodies = {
-      "draft-stashed": {
-        version: 2,
-        id: "draft-stashed",
-        tabId: 1,
-        sessionId: "session-test",
-        revision: 2,
-        mode: "new",
-        title: "Stashed draft",
-        sources: [],
-        doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Keep this thought nearby" }] }] }
-      }
+      "draft-stashed": JSON.parse(stashedJson) as CaptureDraft
     };
-    window.notionPageDraft = {
-      version: 2,
-      id: "edit-notion",
-      tabId: 1,
-      sessionId: "session-test",
-      revision: 1,
-      mode: "edit",
-      targetRecordId: "imported-notion",
-      returnDraftId: "draft-test",
-      title: "Workspace spec",
-      sources: [],
-      doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Pulled from Notion" }] }] }
-    };
-  });
+    window.notionPageDraft = JSON.parse(notionJson) as CaptureDraft;
+  }, { stashedJson: JSON.stringify(stashedDraft), notionJson: JSON.stringify(notionDraft) });
   await openQuickNote(page);
   const root = page.locator("#notion-quick-note-root");
   await root.locator(".recent").click();
@@ -523,7 +915,8 @@ test("Quick Note remains topmost when opened before or after fullscreen", async 
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
   await openQuickNote(page);
   await expect.poll(() => page.evaluate(() => {
-    const dialog = document.querySelector("#notion-quick-note-root");
+    const dialog = document.querySelector<HTMLDialogElement>("#notion-quick-note-root");
+    if (!dialog) return false;
     const rect = dialog.getBoundingClientRect();
     return dialog.open && document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === dialog;
   })).toBe(true);
@@ -556,7 +949,7 @@ test("rapid close and reopen cannot remove the newest popup", async ({ page }) =
 });
 
 test("reinjection disposes the stale runtime and restores the last autosaved draft", async ({ page }) => {
-  const pageErrors = [];
+  const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await openQuickNote(page);
   const editor = page.locator("#notion-quick-note-root .ProseMirror");
@@ -616,9 +1009,14 @@ test("rapid edits are coalesced through one revision-ordered autosave writer", a
 
   await page.evaluate(() => window.releaseNextDraftSave());
   await expect.poll(() => page.evaluate(() => window.draftWrites.length)).toBe(2);
-  const followUp = await page.evaluate(() => window.draftWrites[1]);
+  const followUp = await page.evaluate(() => {
+    const message = window.draftWrites[1];
+    const text = message?.draft.doc.content?.[0]?.content?.[0]?.text;
+    if (!message || typeof text !== "string") throw new Error("Expected the coalesced draft write.");
+    return { expectedRevision: message.expectedRevision, text };
+  });
   expect(followUp.expectedRevision).toBe(2);
-  expect(followUp.draft.doc.content[0].content[0].text).toBe("Latest revision");
+  expect(followUp.text).toBe("Latest revision");
   expect(await page.evaluate(() => window.maxConcurrentDraftWrites)).toBe(1);
 
   await page.evaluate(() => window.releaseNextDraftSave());
@@ -642,13 +1040,37 @@ test("Save waits for the single-flight autosave drain and sends its latest snaps
 
   await page.evaluate(() => window.releaseNextDraftSave());
   await expect.poll(() => page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(true);
-  const capture = await page.evaluate(() => window.runtimeMessages.find((message) => message.type === "ENQUEUE_CAPTURE"));
-  expect(capture.capture.document.doc.content[0].content[0].text).toBe("Final save payload");
+  const capturedText = await page.evaluate(() => {
+    const capture = window.runtimeMessages.find((message) => message.type === "ENQUEUE_CAPTURE");
+    const text = capture?.capture?.document.doc.content?.[0]?.content?.[0]?.text;
+    if (typeof text !== "string") throw new Error("Expected the enqueue capture payload.");
+    return text;
+  });
+  expect(capturedText).toBe("Final save payload");
   expect(await page.evaluate(() => window.maxConcurrentDraftWrites)).toBe(1);
 });
 
+test("successful save publishes a terminal draft event for the panel cache", async ({ page }) => {
+  await page.evaluate(() => {
+    window.terminalDraftEvents = [];
+    window.__notionQuickNoteOnTerminal = (event) => window.terminalDraftEvents.push(event);
+  });
+  await openQuickNote(page);
+  const draftId = await page.evaluate(() => {
+    if (!window.currentDraft) throw new Error("Expected a current draft before save.");
+    return window.currentDraft.id;
+  });
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+  await editor.fill("Save and clear the cached composer draft");
+  await editor.press("Control+Shift+Enter");
+
+  await expect.poll(() => page.evaluate(() => window.terminalDraftEvents)).toEqual([
+    { draftId, reason: "saved" }
+  ]);
+});
+
 test("invalidated runtime stops autosaving without an unhandled rejection", async ({ page }) => {
-  const pageErrors = [];
+  const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await openQuickNote(page);
   const editor = page.locator("#notion-quick-note-root .ProseMirror");
@@ -664,7 +1086,7 @@ test("invalidated runtime stops autosaving without an unhandled rejection", asyn
 });
 
 test("storage-context failures use the same copy-only recovery state", async ({ page }) => {
-  const pageErrors = [];
+  const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await openQuickNote(page);
   await page.evaluate(() => {
@@ -678,7 +1100,7 @@ test("storage-context failures use the same copy-only recovery state", async ({ 
 });
 
 test("ProseMirror receives the required white-space style before stylesheet loading", async ({ page }) => {
-  const warnings = [];
+  const warnings: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "warning") warnings.push(message.text());
   });
@@ -833,6 +1255,172 @@ test("Markdown rules, slash commands, and the selection toolbar create native ed
   await expect(editor.locator("strong")).toHaveText("Section");
 });
 
+test("selection toolbar uses the Balanced hierarchy, SVG affordances, and fits a 320px viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 520 });
+  await openQuickNote(page);
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+  await editor.fill("Balanced toolbar");
+  await editor.selectText();
+
+  const bubble = page.locator("#notion-quick-note-root .bubble");
+  await expect(bubble).toBeVisible();
+  expect(await bubble.locator(":scope > button").evaluateAll((buttons) => buttons.map((button) => (
+    button.getAttribute("aria-label") || button.textContent.trim()
+  )))).toEqual(["Text", "Add link", "Bold", "Italic", "Underline", "More formatting"]);
+  await expect(bubble.locator(":scope > [data-command=strike], :scope > [data-command=code]")).toHaveCount(0);
+  for (const label of ["Add link", "More formatting"]) {
+    await expect(bubble.getByRole("button", { name: label }).locator("svg")).toHaveCount(1);
+  }
+
+  const bounds = await bubble.evaluate((toolbar) => {
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const sheetRect = toolbar.closest(".sheet")!.getBoundingClientRect();
+    return { toolbarLeft: toolbarRect.left, toolbarRight: toolbarRect.right, sheetLeft: sheetRect.left, sheetRight: sheetRect.right };
+  });
+  expect(bounds.toolbarLeft).toBeGreaterThanOrEqual(bounds.sheetLeft);
+  expect(bounds.toolbarRight).toBeLessThanOrEqual(bounds.sheetRight);
+
+  const overflowButton = bubble.getByRole("button", { name: "More formatting" });
+  await overflowButton.click();
+  await expect(overflowButton).toHaveAttribute("aria-expanded", "true");
+  const overflow = page.locator("#notion-quick-note-root .format-overflow");
+  await expect(overflow).toBeVisible();
+  await expect(overflow.getByRole("menuitem")).toHaveText(["Strikethrough", "Inline code", "Text color", "Highlight"]);
+  for (const label of ["Inline code", "Text color", "Highlight"]) {
+    await expect(overflow.getByRole("menuitem", { name: label }).locator("svg")).toHaveCount(1);
+  }
+  const menuBounds = await overflow.evaluate((menu) => {
+    const menuRect = menu.getBoundingClientRect();
+    const sheetRect = menu.closest(".sheet")!.getBoundingClientRect();
+    return { menuLeft: menuRect.left, menuRight: menuRect.right, sheetLeft: sheetRect.left, sheetRight: sheetRect.right };
+  });
+  expect(menuBounds.menuLeft).toBeGreaterThanOrEqual(menuBounds.sheetLeft);
+  expect(menuBounds.menuRight).toBeLessThanOrEqual(menuBounds.sheetRight);
+});
+
+test("toolbar toggles expose active states and link changes preserve the chosen range", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("chosen range");
+
+  for (const [label, tag] of [["Bold", "strong"], ["Italic", "em"], ["Underline", "u"]] as const) {
+    await editor.selectText();
+    const button = root.locator(".bubble").getByRole("button", { name: label });
+    await button.click();
+    await expect(button).toHaveAttribute("aria-pressed", "true");
+    await expect(editor.locator(tag)).toHaveText("chosen range");
+    await button.click();
+  }
+
+  for (const [label, tag] of [["Strikethrough", "s"], ["Inline code", "code"]] as const) {
+    await editor.selectText();
+    await root.locator(".bubble").getByRole("button", { name: "More formatting" }).click();
+    const item = root.locator(`.format-overflow [data-command="${label === "Strikethrough" ? "strike" : "code"}"]`);
+    await item.click();
+    await expect(item).toHaveAttribute("aria-pressed", "true");
+    await expect(editor.locator(tag)).toHaveText("chosen range");
+    await root.locator(".bubble").getByRole("button", { name: "More formatting" }).click();
+    await item.click();
+  }
+
+  await editor.selectText();
+  await root.locator(".bubble").getByRole("button", { name: "Add link" }).click();
+  await root.locator(".link-input").fill("example.com/chosen");
+  await root.locator(".apply-link").click();
+  await expect(editor.locator("a")).toHaveAttribute("href", "https://example.com/chosen");
+  await expect(editor.locator("a")).toHaveText("chosen range");
+
+  await editor.locator("a").selectText();
+  await root.locator(".bubble").getByRole("button", { name: "Edit link" }).click();
+  await root.locator(".link-input").fill("");
+  await root.locator(".apply-link").click();
+  await expect(editor.locator("a")).toHaveCount(0);
+  await expect(editor).toHaveText("chosen range");
+});
+
+test("text and highlight palettes store every exact Notion color and replace each other", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  const colors = ["default", "gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"];
+  await editor.fill("palette");
+
+  const chooseColor = async (menuLabel: "Text color" | "Highlight", color: string) => {
+    await editor.selectText();
+    await root.locator(".bubble").getByRole("button", { name: "More formatting" }).click();
+    await root.locator(".format-overflow").getByRole("menuitem", { name: menuLabel }).click();
+    const palette = root.locator(`.color-palette[data-palette="${menuLabel === "Text color" ? "text" : "highlight"}"]`);
+    await expect(palette).toBeVisible();
+    await palette.getByRole("menuitemradio", { name: color === "default" ? "Default" : new RegExp(`^${color}$`, "i") }).click();
+  };
+
+  for (const color of colors.slice(1)) {
+    await chooseColor("Text color", color);
+    await expect(editor.locator("span[data-notion-color]")).toHaveAttribute("data-notion-color", color);
+  }
+  await chooseColor("Text color", "default");
+  await expect(editor.locator("span[data-notion-color]")).toHaveCount(0);
+
+  for (const color of colors.slice(1)) {
+    await chooseColor("Highlight", color);
+    await expect(editor.locator("span[data-notion-color]")).toHaveAttribute("data-notion-color", `${color}_background`);
+  }
+  await chooseColor("Text color", "blue");
+  await expect(editor.locator("span[data-notion-color]")).toHaveAttribute("data-notion-color", "blue");
+  await chooseColor("Highlight", "yellow");
+  await expect(editor.locator("span[data-notion-color]")).toHaveAttribute("data-notion-color", "yellow_background");
+  await chooseColor("Highlight", "default");
+  await expect(editor.locator("span[data-notion-color]")).toHaveCount(0);
+});
+
+test("toolbar menus preserve selection, close topmost with Escape, dismiss outside, and keep focus treatment scoped", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("keyboard palette");
+  await editor.selectText();
+  const overflowButton = root.locator(".bubble").getByRole("button", { name: "More formatting" });
+  await overflowButton.focus();
+  await overflowButton.press("Enter");
+  const textColor = root.locator(".format-overflow").getByRole("menuitem", { name: "Text color" });
+  await textColor.focus();
+  await textColor.press("Enter");
+  const palette = root.locator('.color-palette[data-palette="text"]');
+  await expect(palette).toBeVisible();
+  await expect(textColor).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(palette).toBeHidden();
+  await expect(textColor).toBeFocused();
+  await expect(root.locator(".format-overflow")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(root.locator(".format-overflow")).toBeHidden();
+  await expect(overflowButton).toBeFocused();
+
+  await overflowButton.press("Enter");
+  await root.locator(".topbar").click({ position: { x: 2, y: 2 } });
+  await expect(root.locator(".format-overflow")).toBeHidden();
+
+  await editor.selectText();
+  await overflowButton.click();
+  await root.locator(".format-overflow").getByRole("menuitem", { name: "Highlight" }).click();
+  const backgrounds = await root.locator('.color-palette[data-palette="highlight"] .color-swatch:not([data-color="default"])').evaluateAll((swatches) => (
+    swatches.map((swatch) => getComputedStyle(swatch).getPropertyValue("--swatch-color").trim())
+  ));
+  expect(new Set(backgrounds).size).toBe(9);
+
+  const title = root.locator(".page-title");
+  await title.focus();
+  const titleStyle = await title.evaluate((element) => getComputedStyle(element));
+  expect(titleStyle.outlineColor).not.toBe("rgb(35, 131, 226)");
+  await root.locator(".save").focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(root.locator(".save")).toBeFocused();
+  expect(await root.locator(".save").evaluate((element) => getComputedStyle(element).outlineColor)).toBe("rgb(35, 131, 226)");
+});
+
 test("slash command filtering resets selection and removes unfiltered groups", async ({ page }) => {
   await openQuickNote(page);
   const editor = page.locator("#notion-quick-note-root .ProseMirror");
@@ -862,7 +1450,9 @@ test("slash commands stay inside the composer near its left and bottom edges", a
 
   const bounds = await slash.evaluate((menu) => {
     const menuRect = menu.getBoundingClientRect();
-    const sheetRect = menu.closest(".sheet").getBoundingClientRect();
+    const sheet = menu.closest(".sheet");
+    if (!sheet) throw new Error("Expected the slash menu sheet.");
+    const sheetRect = sheet.getBoundingClientRect();
     return {
       menu: { left: menuRect.left, top: menuRect.top, right: menuRect.right, bottom: menuRect.bottom },
       sheet: { left: sheetRect.left, top: sheetRect.top, right: sheetRect.right, bottom: sheetRect.bottom }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   beginAuthorization,
   exchangeAuthorizationCode,
@@ -11,21 +10,108 @@ import {
   connectionTransitionForAuthorization,
   DEFAULT_SETTINGS,
   hasBundledOAuthConfig,
-  migrateLegacyOAuthCredentials
+  migrateLegacyOAuthCredentials,
+  normalizeSettings
 } from "../src/settings.js";
+import {
+  createShortcutSettingsController,
+  type ShortcutSettingsState
+} from "../src/shortcut-settings.js";
+import type { Destination, FailureResponse, RuntimeRequest, RuntimeResponse, Settings } from "../src/contracts.js";
+import { sendRuntimeRequest } from "../src/runtime-message.js";
 
-const $ = (selector) => document.querySelector(selector);
-let settings = { ...DEFAULT_SETTINGS };
-let searchTimer;
+interface OptionsElements {
+  "#token": HTMLInputElement;
+  "#oauth-client-id": HTMLInputElement;
+  "#oauth-broker-url": HTMLInputElement;
+  "#include-source": HTMLInputElement;
+  "#ai-enabled": HTMLInputElement;
+  "#ai-suggest-title": HTMLInputElement;
+  "#ai-extract-todos": HTMLInputElement;
+  "#manual-destination-id": HTMLInputElement;
+  "#manual-destination-name": HTMLInputElement;
+  "#manual-title-property": HTMLInputElement;
+  "#destination-search": HTMLInputElement;
+  "#advanced-setup": HTMLDetailsElement;
+  "#oauth-connect": HTMLButtonElement;
+  "#save-developer-config": HTMLButtonElement;
+  "#use-token": HTMLButtonElement;
+  "#reveal-token": HTMLButtonElement;
+  "#create-database": HTMLButtonElement;
+  "#refresh-destinations": HTMLButtonElement;
+  "#empty-refresh": HTMLButtonElement;
+  "#use-manual-destination": HTMLButtonElement;
+  "#change-destination": HTMLButtonElement;
+  "#change-connection": HTMLButtonElement;
+  "#disconnect": HTMLButtonElement;
+  "#finish": HTMLButtonElement;
+  "#open-destination": HTMLButtonElement;
+  "#refresh-permissions": HTMLButtonElement;
+  "#change-shortcut": HTMLButtonElement;
+}
+
+function $<S extends keyof OptionsElements>(selector: S): OptionsElements[S];
+function $(selector: string): HTMLElement;
+function $(selector: string): HTMLElement {
+  const found = document.querySelector<HTMLElement>(selector);
+  if (!found) throw new Error(`Quick Note options are missing required element: ${selector}`);
+  return found;
+}
+
+let settings: Settings = { ...DEFAULT_SETTINGS };
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let searchSequence = 0;
-let lastProvisioningOutcome = "existing";
+type ProvisioningOutcome = "created" | "reused" | "migrated" | "existing";
+let lastProvisioningOutcome: ProvisioningOutcome = "existing";
+let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
+setupShortcutSettings();
 init();
 
-async function init() {
+function setupShortcutSettings(): void {
+  const status = $("#shortcut-assignment-status");
+  const keycaps = $("#shortcut-keycaps");
+  const warning = $("#shortcut-warning");
+  const manualInstructions = $("#shortcut-manual-instructions");
+  const changeButton = $("#change-shortcut");
+  const controller = createShortcutSettingsController({
+    commands: chrome.commands,
+    tabs: chrome.tabs,
+    focusSource: window,
+    visibilitySource: document,
+    view: {
+      render(state: ShortcutSettingsState) {
+        status.textContent = state.statusLabel;
+        status.dataset.state = state.status;
+        keycaps.setAttribute("aria-label", state.shortcut || state.statusLabel);
+        if (state.keycaps.length) {
+          keycaps.replaceChildren(...state.keycaps.map((label) => {
+            const keycap = document.createElement("kbd");
+            keycap.textContent = label;
+            return keycap;
+          }));
+        } else {
+          const empty = document.createElement("span");
+          empty.className = "shortcut-unassigned";
+          empty.textContent = state.status === "error" ? "Check assignment" : "No shortcut";
+          keycaps.replaceChildren(empty);
+        }
+        warning.textContent = state.warning || "";
+        warning.hidden = !state.warning;
+      },
+      showManualInstructions() {
+        manualInstructions.hidden = false;
+      }
+    }
+  });
+  changeButton.addEventListener("click", () => controller.openEditor());
+  void controller.start();
+}
+
+async function init(): Promise<void> {
   $("#extension-version").textContent = chrome.runtime.getManifest().version;
   const migration = await migrateLegacyOAuthCredentials(chrome.storage.local);
-  settings = { ...DEFAULT_SETTINGS, ...(await chrome.storage.local.get(DEFAULT_SETTINGS)) };
+  settings = normalizeSettings(await chrome.storage.local.get(DEFAULT_SETTINGS));
   const reconnectRequired = migration.requiresReconnect
     || Boolean((await chrome.storage.local.get("oauthReconnectRequired")).oauthReconnectRequired);
   $("#advanced-setup").hidden = hasBundledOAuthConfig(PRODUCT_CONFIG);
@@ -50,7 +136,7 @@ async function init() {
   await provisionDefaultDatabase();
 }
 
-function hydrateForm() {
+function hydrateForm(): void {
   $("#token").value = "";
   $("#oauth-client-id").value = PRODUCT_CONFIG.notionClientId || settings.oauthClientId;
   $("#oauth-broker-url").value = PRODUCT_CONFIG.oauthBrokerUrl || settings.oauthBrokerUrl;
@@ -66,7 +152,7 @@ function hydrateForm() {
   $("#manual-title-property").value = settings.titleProperty;
 }
 
-function bindEvents() {
+function bindEvents(): void {
   $("#oauth-connect").addEventListener("click", () => connectOAuth($("#oauth-connect")));
   $("#save-developer-config").addEventListener("click", saveDeveloperConfig);
   $("#use-token").addEventListener("click", connectWithToken);
@@ -95,7 +181,7 @@ function bindEvents() {
       flash("Could not save the AI preference. Try again.", true);
     }
   });
-  for (const [selector, key] of [["#ai-suggest-title", "aiSuggestTitle"], ["#ai-extract-todos", "aiExtractTodos"]]) {
+  for (const [selector, key] of [["#ai-suggest-title", "aiSuggestTitle"], ["#ai-extract-todos", "aiExtractTodos"]] as const) {
     $(selector).addEventListener("change", async () => {
       const previous = settings[key];
       settings[key] = $(selector).checked;
@@ -108,7 +194,7 @@ function bindEvents() {
       }
     });
   }
-  document.querySelectorAll("input[name=manual-destination-type]").forEach((radio) => {
+  document.querySelectorAll<HTMLInputElement>("input[name=manual-destination-type]").forEach((radio) => {
     radio.addEventListener("change", updateManualDestinationType);
   });
   $("#use-manual-destination").addEventListener("click", useManualDestination);
@@ -120,7 +206,7 @@ function bindEvents() {
   $("#refresh-permissions").addEventListener("click", () => connectOAuth($("#refresh-permissions")));
 }
 
-function updateAiControls() {
+function updateAiControls(): void {
   const enabled = $("#ai-enabled").checked;
   $("#ai-feature-controls").dataset.disabled = String(!enabled);
   $("#ai-suggest-title").disabled = !enabled;
@@ -158,7 +244,7 @@ async function connectWithToken() {
   await provisionDefaultDatabase();
 }
 
-async function connectOAuth(button) {
+async function connectOAuth(button: HTMLButtonElement): Promise<void> {
   const clientId = PRODUCT_CONFIG.notionClientId || $("#oauth-client-id").value.trim();
   const brokerUrl = PRODUCT_CONFIG.oauthBrokerUrl || normalizeBrokerUrl($("#oauth-broker-url").value);
   if (!clientId || !brokerUrl) {
@@ -208,7 +294,7 @@ async function connectOAuth(button) {
       ["connection_handle", "connection handle"],
       ["bot_id", "bot ID"],
       ["workspace_id", "workspace ID"]
-    ]) {
+    ] as const) {
       if (!String(payload?.[field] || "").trim()) throw new Error(`Notion did not return a valid ${label}.`);
     }
     const { preservedDestination } = await storeConnection({
@@ -225,15 +311,18 @@ async function connectOAuth(button) {
     await retireReplacedConnection(previousConnection, payload, brokerUrl);
     if (preservedDestination) await showReady("existing");
     else await provisionDefaultDatabase();
-  } catch (error) {
-    flash(error.message, true);
+  } catch (error: unknown) {
+    flash(errorMessage(error), true);
   } finally {
     await chrome.storage.session.remove("oauthState");
     setBusy(button, false, idleLabel);
   }
 }
 
-async function retireReplacedConnection(previous, next, fallbackBrokerUrl) {
+type OAuthExchange = Awaited<ReturnType<typeof exchangeAuthorizationCode>>;
+type PreviousConnection = { token: string; connectionHandle: string; botId: string; brokerUrl: string } | null;
+
+async function retireReplacedConnection(previous: PreviousConnection, next: OAuthExchange, fallbackBrokerUrl: string): Promise<void> {
   if (!previous?.connectionHandle || previous.connectionHandle === next.connection_handle) return;
   const previousBrokerUrl = previous.brokerUrl || fallbackBrokerUrl;
   try {
@@ -254,7 +343,19 @@ async function retireReplacedConnection(previous, next, fallbackBrokerUrl) {
   }
 }
 
-async function storeConnection(connection) {
+interface AuthorizationConnection {
+  authType: "oauth" | "token";
+  token: string;
+  connectionHandle: string;
+  workspaceId: string;
+  workspaceName: string;
+  workspaceIcon: string;
+  botId: string;
+  oauthClientId?: string;
+  oauthBrokerUrl?: string;
+}
+
+async function storeConnection(connection: AuthorizationConnection): Promise<{ connectionId: string; preservedDestination: boolean }> {
   const { connectionId, preservedDestination } = connectionTransitionForAuthorization(settings, connection);
   const nextConnection = {
     ...connection,
@@ -274,7 +375,7 @@ async function storeConnection(connection) {
     connectionId,
     destinationId: "",
     destinationDatabaseId: "",
-    destinationType: "database",
+    destinationType: "database" as const,
     destinationName: "Quick Notes",
     destinationUrl: "",
     titleProperty: "Name",
@@ -303,11 +404,11 @@ async function provisionDefaultDatabase() {
     : "Creating and organizing your private Quick Notes database…");
   setBusy($("#create-database"), true, "Creating Quick Notes…");
   flash("Creating your Quick Notes database in Notion…", false, true);
-  let response;
+  let response: RuntimeResponse<Extract<RuntimeRequest, { type: "ENSURE_DEFAULT_DATABASE" }>>;
   try {
-    response = await chrome.runtime.sendMessage({ type: "ENSURE_DEFAULT_DATABASE" });
-  } catch (error) {
-    response = { ok: false, error: error.message };
+    response = await send({ type: "ENSURE_DEFAULT_DATABASE" });
+  } catch (error: unknown) {
+    response = { ok: false, error: errorMessage(error) };
   }
 
   if (!response?.ok) {
@@ -318,8 +419,8 @@ async function provisionDefaultDatabase() {
     return;
   }
 
-  settings = { ...settings, ...(await chrome.storage.local.get(DEFAULT_SETTINGS)) };
-  lastProvisioningOutcome = response.outcome || "existing";
+  settings = normalizeSettings(await chrome.storage.local.get(DEFAULT_SETTINGS));
+  lastProvisioningOutcome = isProvisioningOutcome(response.outcome) ? response.outcome : "existing";
   showProvisioningState(false);
   setBusy($("#create-database"), false, "Create Quick Notes database");
   flash(outcomeMessage(lastProvisioningOutcome));
@@ -333,7 +434,7 @@ async function showDestinationPicker() {
   await loadDestinations();
 }
 
-async function loadDestinations(query = $("#destination-search").value) {
+async function loadDestinations(query = $("#destination-search").value): Promise<void> {
   if (!settings.token) return;
   const requestId = ++searchSequence;
   const results = $("#destination-results");
@@ -345,11 +446,11 @@ async function loadDestinations(query = $("#destination-search").value) {
   empty.hidden = true;
   results.setAttribute("aria-busy", "true");
 
-  let response;
+  let response: RuntimeResponse<Extract<RuntimeRequest, { type: "SEARCH_DESTINATIONS" }>>;
   try {
-    response = await chrome.runtime.sendMessage({ type: "SEARCH_DESTINATIONS", query });
-  } catch (error) {
-    response = { ok: false, error: error.message };
+    response = await send({ type: "SEARCH_DESTINATIONS", query });
+  } catch (error: unknown) {
+    response = { ok: false, error: errorMessage(error) };
   }
   if (requestId !== searchSequence) return;
   results.removeAttribute("aria-busy");
@@ -368,7 +469,7 @@ async function loadDestinations(query = $("#destination-search").value) {
 
     const icon = document.createElement("span");
     icon.className = "destination-icon";
-    icon.textContent = destination.icon;
+    icon.textContent = destination.icon || "↳";
     const copy = document.createElement("span");
     const title = document.createElement("b");
     title.textContent = destination.name;
@@ -382,12 +483,12 @@ async function loadDestinations(query = $("#destination-search").value) {
   empty.hidden = response.destinations.length > 0;
 }
 
-async function chooseDestination(destination) {
+async function chooseDestination(destination: Destination): Promise<void> {
   flash("Checking destination access…", false, true);
-  const validation = await chrome.runtime.sendMessage({
+  const validation = await send({
     type: "VALIDATE_DESTINATION",
     destination
-  }).catch((error) => ({ ok: false, error: error.message }));
+  });
   if (!validation?.ready) {
     flash(validation?.error || "Quick Note cannot use this destination. Reshare it with the integration and allow Insert Content.", true, true);
     return;
@@ -414,15 +515,15 @@ async function chooseDestination(destination) {
   await showReady("existing");
 }
 
-function updateManualDestinationType() {
-  const type = $("input[name=manual-destination-type]:checked").value;
+function updateManualDestinationType(): void {
+  const type = requiredRadioValue();
   $("#manual-title-property-wrap").hidden = type !== "database";
 }
 
 async function useManualDestination() {
   const id = $("#manual-destination-id").value.trim();
   if (!id) return flash("Paste a Notion destination URL or ID first.", true);
-  const type = $("input[name=manual-destination-type]:checked").value;
+  const type = requiredRadioValue();
   await chooseDestination({
     id,
     type,
@@ -433,13 +534,13 @@ async function useManualDestination() {
 
 async function disconnect() {
   if (!confirm("Disconnect this Notion workspace? Your saved notes will not be changed.")) return;
-  let response = await chrome.runtime.sendMessage({ type: "DISCONNECT_NOTION" });
-  if (response?.requiresConfirmation) {
-    const count = response.pendingCount;
+  let response = await send({ type: "DISCONNECT_NOTION" });
+  if (!response.ok && "requiresConfirmation" in response && response.requiresConfirmation) {
+    const count = response.pendingCount || 0;
     if (!confirm(`${count} capture${count === 1 ? " is" : "s are"} still waiting locally. Disconnect and keep ${count === 1 ? "it" : "them"} blocked until you reconnect or retarget?`)) return;
-    response = await chrome.runtime.sendMessage({ type: "DISCONNECT_NOTION", confirmed: true });
+    response = await send({ type: "DISCONNECT_NOTION", confirmed: true });
   }
-  if (!response?.ok) return flash(response?.error || "Could not disconnect Notion.", true);
+  if (!response.ok) return flash("error" in response ? response.error : "Could not disconnect Notion.", true);
   settings = {
     ...DEFAULT_SETTINGS,
     oauthClientId: settings.oauthClientId,
@@ -461,9 +562,9 @@ async function finishSetup() {
   }
 }
 
-async function showReady(outcome = lastProvisioningOutcome) {
+async function showReady(outcome: ProvisioningOutcome = lastProvisioningOutcome): Promise<void> {
   flash("Checking your Notion connection and destination…", false, true);
-  const health = await chrome.runtime.sendMessage({ type: "VALIDATE_CONNECTION" }).catch((error) => ({ ok: false, error: error.message }));
+  const health = await send({ type: "VALIDATE_CONNECTION" });
   if (!health?.ready) {
     setStage("destination");
     showProvisioningState(false);
@@ -497,7 +598,7 @@ function hydrateWorkspace() {
   hydrateWorkspaceIcon($("#workspace-icon"), settings.workspaceIcon);
 }
 
-function hydrateWorkspaceIcon(element, icon) {
+function hydrateWorkspaceIcon(element: HTMLElement, icon: string): void {
   if (icon && !/^https?:/i.test(icon)) {
     element.textContent = icon;
     return;
@@ -510,28 +611,31 @@ function hydrateWorkspaceIcon(element, icon) {
   element.replaceChildren(image);
 }
 
-function setStage(stage) {
+type SetupStage = "connect" | "destination" | "ready";
+
+function setStage(stage: SetupStage): void {
   $("#connect-panel").hidden = stage !== "connect";
   $("#destination-panel").hidden = stage !== "destination";
   $("#ready-panel").hidden = stage !== "ready";
-  document.querySelectorAll("[data-progress]").forEach((item) => {
-    const steps = ["connect", "destination", "ready"];
-    const itemIndex = steps.indexOf(item.dataset.progress);
+  document.querySelectorAll<HTMLElement>("[data-progress]").forEach((item) => {
+    const steps: SetupStage[] = ["connect", "destination", "ready"];
+    const progress = item.dataset.progress;
+    const itemIndex = progress === "connect" || progress === "destination" || progress === "ready" ? steps.indexOf(progress) : -1;
     const activeIndex = steps.indexOf(stage);
     item.classList.toggle("active", itemIndex === activeIndex);
     item.classList.toggle("complete", itemIndex < activeIndex);
   });
 }
 
-function showProvisioningState(visible, copy = "") {
+function showProvisioningState(visible: boolean, copy = ""): void {
   $("#provisioning-state").hidden = !visible;
   $("#destination-picker").hidden = visible;
   if (copy) $("#provisioning-copy").textContent = copy;
   if (!visible) $("#create-database").hidden = Boolean(settings.destinationId);
 }
 
-function outcomeMessage(outcome) {
-  const messages = {
+function outcomeMessage(outcome: ProvisioningOutcome): string {
+  const messages: Record<ProvisioningOutcome, string> = {
     created: "Created a new private Quick Notes database with source metadata.",
     reused: "Recovered and reused your existing Quick Notes database.",
     migrated: "Upgraded your Quick Notes database with source metadata.",
@@ -540,7 +644,7 @@ function outcomeMessage(outcome) {
   return messages[outcome] || messages.existing;
 }
 
-function provisioningErrorMessage(response = {}) {
+function provisioningErrorMessage(response: FailureResponse): string {
   const messages = {
     authentication: "Your Notion connection expired. Reconnect Notion to continue.",
     capability: "This connection cannot create databases. Enable Insert Content for the connection, or choose an existing destination below.",
@@ -548,11 +652,11 @@ function provisioningErrorMessage(response = {}) {
     recovering: "Notion may still be creating your database. Wait a moment and retry; Quick Note will recover it instead of creating a duplicate.",
     transient: "Notion could not confirm database creation. Retry in a moment, or choose an existing destination below."
   };
-  return messages[response.kind]
+  return (response.kind ? messages[response.kind as keyof typeof messages] : undefined)
     || `${response.error || "Could not create the database."} You can retry or choose an existing destination.`;
 }
 
-function setConnectionState(connected) {
+function setConnectionState(connected: boolean): void {
   const state = $("#connection-state");
   state.classList.toggle("connected", connected);
   state.textContent = connected
@@ -566,27 +670,49 @@ function toggleToken() {
   $("#reveal-token").textContent = token.type === "password" ? "Show" : "Hide";
 }
 
-function normalizeBrokerUrl(value = "") {
+function normalizeBrokerUrl(value = ""): string {
   return value.trim().replace(/\/$/, "");
 }
 
-function setBusy(button, busy, label) {
+function setBusy(button: HTMLButtonElement, busy: boolean, label: string): void {
   button.disabled = busy;
   button.lastElementChild && button.children.length > 1
     ? button.lastElementChild.textContent = label
     : button.textContent = label;
 }
 
-function flash(message, error = false, persist = false) {
+function flash(message: string, error = false, persist = false): void {
   const element = $("#message");
   element.hidden = !message;
   element.textContent = message;
   element.classList.toggle("error", error);
-  clearTimeout(flash.timeout);
+  clearTimeout(flashTimer);
   if (!persist && message) {
-    flash.timeout = setTimeout(() => {
+    flashTimer = setTimeout(() => {
       element.hidden = true;
       element.textContent = "";
     }, 4500);
   }
+}
+
+async function send<T extends RuntimeRequest>(message: T): Promise<RuntimeResponse<T>> {
+  try {
+    return await sendRuntimeRequest(message);
+  } catch (error: unknown) {
+    return { ok: false, error: errorMessage(error) };
+  }
+}
+
+function requiredRadioValue(): "page" | "database" {
+  const radio = document.querySelector<HTMLInputElement>("input[name=manual-destination-type]:checked");
+  if (!radio || (radio.value !== "page" && radio.value !== "database")) throw new Error("Choose a destination type.");
+  return radio.value;
+}
+
+function isProvisioningOutcome(value: string): value is ProvisioningOutcome {
+  return value === "created" || value === "reused" || value === "migrated" || value === "existing";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

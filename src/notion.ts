@@ -3,7 +3,7 @@ import {
   MAX_CAPTURE_CHARACTERS,
   MAX_CAPTURE_TITLE_CHARACTERS
 } from "./constants.js";
-import type { CaptureDestination, CaptureSource, EditorMark, EditorNode, Settings } from "./contracts.js";
+import type { CaptureDestination, CaptureSource, EditorMark, EditorNode, RemoteTarget, Settings } from "./contracts.js";
 
 type NotionFetchPort = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -567,6 +567,7 @@ export async function findManagedQuickNotesDatabase({ token, marker = "", allowA
     }, fetchImpl);
 
     const results = requiredEntityArray(payload, "results", "Notion returned an incomplete search response.");
+    const pagination = paginationEnvelope(payload, "Notion returned a malformed search pagination response.");
     validateSearchResults(results);
     const candidates = results
       .filter((item) => !item.in_trash && item.object === "data_source" && plainText(item.title) === MANAGED_DATABASE_NAME)
@@ -586,7 +587,7 @@ export async function findManagedQuickNotesDatabase({ token, marker = "", allowA
       if (!properties || !hasManagedSchema(properties)) continue;
       return managedDestination(database, dataSource, recoveredMarker);
     }
-    startCursor = payload.has_more ? payload.next_cursor : undefined;
+    startCursor = pagination.hasMore ? pagination.nextCursor || undefined : undefined;
   } while (startCursor);
   return null;
 }
@@ -657,11 +658,12 @@ export async function validateDestinationHealth({ token, settings, fetchImpl = f
       ? settings.destinationId
       : await resolveDataSourceId(token, settings.destinationId, fetchImpl);
     const dataSource = await retrieveDataSource({ token, dataSourceId, fetchImpl });
+    validateDestinationAvailability(dataSource, ["in_trash"], "Notion returned an incomplete data source response.");
     if (dataSource.in_trash) throw new NotionApiError("The selected database is in the trash.", { status: 403, code: "destination_trashed" });
     return { ok: true, id: dataSource.id };
   }
   const block = await notionRequest(token, `/v1/blocks/${normalizeNotionId(settings.destinationId)}`, { method: "GET" }, fetchImpl);
-  if (!block.id) throw invalidSuccessResponse("Notion returned an incomplete page response.");
+  validateDestinationAvailability(block, ["in_trash", "archived"], "Notion returned an incomplete page response.");
   if (block.in_trash || block.archived) throw new NotionApiError("The selected page is unavailable.", { status: 403, code: "destination_unavailable" });
   return { ok: true, id: block.id };
 }
@@ -678,7 +680,45 @@ export async function sendCapture({ token, settings, capture, fetchImpl = fetch 
       }
     : settings;
   const request = buildCaptureRequest({ ...resolvedSettings, destinationId: resolvedSettings.destinationId || settings.destinationId }, capture);
-  return notionRequest(token, request.path, request, fetchImpl);
+  const result = await notionRequest(token, request.path, request, fetchImpl);
+  return captureRemoteTarget(result, resolvedSettings);
+}
+
+function captureRemoteTarget(result: NotionEntity, settings: NotionSettingsInput): RemoteTarget {
+  if (settings.destinationType === "database") {
+    const id = Reflect.get(result, "id");
+    const url = Reflect.get(result, "url");
+    const lastEditedTime = Reflect.get(result, "last_edited_time");
+    if (!isNonEmptyString(id) || !isNonEmptyString(url) || !isNonEmptyString(lastEditedTime)) {
+      throw invalidSuccessResponse("Notion returned incomplete created page details.");
+    }
+    return {
+      kind: "page",
+      id,
+      pageId: id,
+      url,
+      blockIds: [],
+      fingerprint: lastEditedTime
+    };
+  }
+
+  const blocks = requiredEntityArray(result, "results", "Notion returned incomplete inserted block details.");
+  const blockIds = requiredEntityIds(blocks, "Notion returned incomplete inserted block details.");
+  for (const block of blocks) {
+    const lastEditedTime = Reflect.get(block, "last_edited_time");
+    if (lastEditedTime !== undefined && typeof lastEditedTime !== "string") {
+      throw invalidSuccessResponse("Notion returned malformed inserted block details.");
+    }
+  }
+  const pageId = settings.destinationId || "";
+  return {
+    kind: "section",
+    id: pageId,
+    pageId,
+    url: settings.destinationUrl || "",
+    blockIds,
+    fingerprint: blocks.map((block) => `${block.id}:${block.last_edited_time || ""}:0`).join("|")
+  };
 }
 
 export class NotionConflictError extends NotionApiError {
@@ -904,6 +944,7 @@ async function retrieveBlockTree({ token, blockId, fetchImpl }: NotionRequestOpt
     if (cursor) query.set("start_cursor", cursor);
     const page = await notionRequest(token, `/v1/blocks/${normalizeNotionId(blockId)}/children?${query}`, {}, fetchImpl);
     const blocks = requiredEntityArray(page, "results", "Notion returned an incomplete block list.");
+    const pagination = paginationEnvelope(page, "Notion returned a malformed block pagination response.");
     for (const block of blocks) {
       if (!isValidBlock(block)) {
         throw invalidSuccessResponse("Notion returned an incomplete block response.");
@@ -915,7 +956,7 @@ async function retrieveBlockTree({ token, blockId, fetchImpl }: NotionRequestOpt
       }
       results.push(block);
     }
-    cursor = page.has_more ? page.next_cursor || "" : "";
+    cursor = pagination.hasMore ? pagination.nextCursor || "" : "";
   } while (cursor);
   return results;
 }
@@ -1384,6 +1425,24 @@ function requiredEntityIds(entities: NotionEntity[], message: string): string[] 
     ids.push(id);
   }
   return ids;
+}
+
+function paginationEnvelope(entity: NotionEntity, message: string): { hasMore: boolean; nextCursor: string | null | undefined } {
+  const hasMore = Reflect.get(entity, "has_more");
+  const nextCursor = Reflect.get(entity, "next_cursor");
+  if ((hasMore !== undefined && typeof hasMore !== "boolean")
+    || (nextCursor !== undefined && nextCursor !== null && typeof nextCursor !== "string")) {
+    throw invalidSuccessResponse(message);
+  }
+  return { hasMore: hasMore === true, nextCursor };
+}
+
+function validateDestinationAvailability(entity: NotionEntity, fields: Array<"archived" | "in_trash">, message: string): void {
+  if (!isNonEmptyString(Reflect.get(entity, "id"))) throw invalidSuccessResponse(message);
+  for (const key of fields) {
+    const value = Reflect.get(entity, key);
+    if (value !== undefined && typeof value !== "boolean") throw invalidSuccessResponse(message);
+  }
 }
 
 function notionPropertyMap(entity: NotionEntity): Record<string, NotionProperty> | null {

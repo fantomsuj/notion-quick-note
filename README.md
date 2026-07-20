@@ -2,7 +2,7 @@
 
 A Notion-styled Chrome extension for saving a thought without leaving the webpage you're viewing, using the fast invocation model popularized by Apple Quick Note. See [`DESIGN.md`](DESIGN.md) for the visual system.
 
-Open it once from the toolbar, press `Option + Z` while the browser is active, use `Command + Shift + 0` on macOS (`Ctrl + Shift + 0` elsewhere) to bring it forward from another app, or right-click selected text. The Notion-style side panel remains open while you switch tabs, keeps one structured local draft, and sends native blocks to either a running Notion page or a database.
+Open it once from the toolbar, press the browser-scoped `Command+Shift+Space` shortcut on macOS (`Ctrl+Shift+Space` elsewhere), or right-click selected text. The Notion-style side panel remains open while you switch tabs, keeps one structured local draft, and sends native blocks to either a running Notion page or a database. The shortcut works while the browser is active and can be customized in Settings or at `chrome://extensions/shortcuts`.
 
 ## What works
 
@@ -36,9 +36,9 @@ Open it once from the toolbar, press `Option + Z` while the browser is active, u
 5. Open the extension's **Details → Extension options**.
 6. Open **Advanced setup**, create a personal access token in Notion's [developer portal](https://www.notion.so/profile/integrations/internal), and paste it into settings.
 7. Quick Note will create a private **Quick Notes** database automatically. If Notion cannot complete setup, retry recovery or choose a shared page or database from the destination picker.
-8. On a normal webpage, click the extension icon or press `Option + Z` on macOS (`Ctrl + Shift + Space` elsewhere). Quick Note stays open as you browse, so no further toolbar clicks are needed. To bring it forward while another app is active, press `Command + Shift + 0` on macOS (`Ctrl + Shift + 0` elsewhere).
+8. On a normal webpage, click the extension icon or press `Command+Shift+Space` on macOS (`Ctrl+Shift+Space` elsewhere). Quick Note stays open as you browse, so no further toolbar clicks are needed. To customize the browser-only shortcut, use **Change shortcut** in extension Settings or enter `chrome://extensions/shortcuts` in the address bar.
 
-After rebuilding an already loaded unpacked extension, click **Reload** for Notion Quick Note on `chrome://extensions` before testing. Chrome otherwise keeps the previous service worker alive, which can continue referencing an older content-script path.
+After rebuilding an already loaded unpacked extension, click **Reload** for Notion Quick Note on `chrome://extensions` before testing. Chrome otherwise keeps the previous service worker and side-panel bundle alive.
 
 Inside the editor, type `/` for block commands. Markdown shortcuts such as `# `, `- `, `[] `, `> `, and triple backticks convert as you type. Press `Ctrl/⌘ + Enter` to check a to-do or open/close a toggle, `Ctrl/⌘ + Shift + Enter` to save, and `Escape` to close.
 

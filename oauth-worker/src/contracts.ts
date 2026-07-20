@@ -62,11 +62,20 @@ export interface RevokeRequest extends DeviceProof {
 
 export interface RetireRequest extends DeviceProof {}
 
-export interface NotionTokenResponse {
+export interface NotionTokenResponse extends Record<string, unknown> {
   access_token: string;
   refresh_token: string;
   bot_id: string;
   workspace_id: string;
+  workspace_name?: string;
+  workspace_icon?: string;
+}
+
+export interface NotionRefreshTokenResponse extends Record<string, unknown> {
+  access_token: string;
+  refresh_token: string;
+  bot_id?: string;
+  workspace_id?: string;
   workspace_name?: string;
   workspace_icon?: string;
 }
@@ -157,4 +166,18 @@ export function isNotionTokenResponse(value: unknown): value is NotionTokenRespo
     && hasString(value, "workspace_id")
     && (!Object.prototype.hasOwnProperty.call(value, "workspace_name") || typeof value.workspace_name === "string")
     && (!Object.prototype.hasOwnProperty.call(value, "workspace_icon") || typeof value.workspace_icon === "string");
+}
+
+export function isNotionRefreshTokenResponse(value: unknown): value is NotionRefreshTokenResponse {
+  return isObject(value)
+    && hasString(value, "access_token")
+    && hasString(value, "refresh_token")
+    && optionalString(value, "bot_id")
+    && optionalString(value, "workspace_id")
+    && optionalString(value, "workspace_name")
+    && optionalString(value, "workspace_icon");
+}
+
+function optionalString(value: Record<string, unknown>, key: string): boolean {
+  return !Object.prototype.hasOwnProperty.call(value, key) || typeof value[key] === "string";
 }

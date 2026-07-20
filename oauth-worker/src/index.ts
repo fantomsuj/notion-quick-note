@@ -1,6 +1,7 @@
 import {
   OAuthHttpError,
   isDeviceProof,
+  isNotionRefreshTokenResponse,
   isNotionTokenResponse,
   isObject
 } from "./contracts.js";
@@ -9,6 +10,7 @@ import type {
   DeviceProof,
   EncryptedToken,
   ExchangeRequest,
+  NotionRefreshTokenResponse,
   NotionTokenResponse,
   OAuthConnectionRecord,
   OAuthResult,
@@ -183,7 +185,7 @@ export class OAuthSession {
         await this.releaseLock(operationId);
         return notion;
       }
-      const tokenPayload = requireTokenFields(notion.payload, ["access_token", "refresh_token"]);
+      const tokenPayload = requireRefreshTokenResponse(notion.payload);
       const encrypted = await encryptRefreshToken(tokenPayload.refresh_token, handle, this.env.TOKEN_ENCRYPTION_KEY);
       const now = Date.now();
       await this.state.storage.transaction(async (storage) => {
@@ -311,7 +313,7 @@ async function exchangeCode(body: Record<string, unknown>, env: ConfiguredOAuthW
   if (!isExchangeRequest(body)) {
     if (typeof body.code !== "string" || !body.code) throw httpError("code is required", 400);
     if (typeof body.state !== "string" || !body.state) throw httpError("state is required", 400);
-    throw httpError("redirect_uri and public_key are required", 400);
+    throw httpError("redirect_uri is required", 400);
   }
   const redirectUri = requireAllowedRedirect(body.redirect_uri, env);
   const consumed = await callSession(env, `transaction:${body.state}`, "/transaction/consume", {
@@ -327,7 +329,7 @@ async function exchangeCode(body: Record<string, unknown>, env: ConfiguredOAuthW
     redirect_uri: redirectUri
   }, env);
   if (!notion.ok) return notion;
-  const tokenPayload = requireTokenFields(notion.payload, ["access_token", "refresh_token", "bot_id", "workspace_id"]);
+  const tokenPayload = requireExchangeTokenResponse(notion.payload);
 
   const connectionHandle = randomBase64Url(32);
   const encrypted = await encryptRefreshToken(tokenPayload.refresh_token, connectionHandle, env.TOKEN_ENCRYPTION_KEY);
@@ -463,14 +465,23 @@ async function notionRequest(
   };
 }
 
-function requireTokenFields(payload: Record<string, unknown>, fields: readonly string[]): NotionTokenResponse {
-  const missing = fields.filter((field) => typeof payload[field] !== "string" || !payload[field]);
+function requireExchangeTokenResponse(payload: Record<string, unknown>): NotionTokenResponse {
+  const missing = ["access_token", "refresh_token", "bot_id", "workspace_id"]
+    .filter((field) => typeof payload[field] !== "string" || !payload[field]);
   if (missing.length) throw httpError(`Notion token response is missing ${missing.join(", ")}`, 502);
   if (!isNotionTokenResponse(payload)) throw httpError("Notion token response is invalid", 502);
   return payload;
 }
 
-function withoutRefreshToken(payload: NotionTokenResponse): Omit<NotionTokenResponse, "refresh_token"> {
+function requireRefreshTokenResponse(payload: Record<string, unknown>): NotionRefreshTokenResponse {
+  const missing = ["access_token", "refresh_token"]
+    .filter((field) => typeof payload[field] !== "string" || !payload[field]);
+  if (missing.length) throw httpError(`Notion token response is missing ${missing.join(", ")}`, 502);
+  if (!isNotionRefreshTokenResponse(payload)) throw httpError("Notion token response is invalid", 502);
+  return payload;
+}
+
+function withoutRefreshToken<T extends { refresh_token: string }>(payload: T): Omit<T, "refresh_token"> {
   const { refresh_token: _refreshToken, ...safePayload } = payload;
   return safePayload;
 }

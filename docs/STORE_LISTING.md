@@ -10,7 +10,7 @@
 
 **Detailed description:**
 
-> Open a compact Quick Note side panel from the toolbar, an in-browser keyboard shortcut, a system-wide keyboard shortcut, or the selected-text context menu. It remains open as you switch tabs, automatically attaching each active page's title and URL. Remove an unwanted source with one click and it stays dismissed for that draft.
+> Open a compact Quick Note side panel from the toolbar, a customizable browser-scoped keyboard shortcut, or the selected-text context menu. The fresh-install shortcut is `Command+Shift+Space` on macOS and `Ctrl+Shift+Space` elsewhere; Settings displays the live browser assignment and links to `chrome://extensions/shortcuts`. The panel remains open as you switch tabs, automatically attaching each active page's title and URL. Remove an unwanted source with one click and it stays dismissed for that draft.
 >
 > On supported Chrome desktop devices, optional AI actions can suggest a title or extract editable to-dos using Chrome's on-device language model. These actions run only when you choose them, have no cloud AI fallback, and never change or save a note until you review and apply the preview. A master setting and separate feature toggles let you turn them off.
 >
@@ -65,5 +65,5 @@ Reviewer notes should include:
 
 - A test Notion account or clear steps for completing OAuth.
 - The exact user gesture needed to see active-page capture.
-- How to test the toolbar, browser-scoped and global shortcuts, selection context menu, persistent side panel, automatic source removal/dismissal, extension-tab fallback, disconnect/revocation, and Incognito.
+- How to test the toolbar, customizable browser-scoped shortcut (including an unassigned conflict), selection context menu, persistent side panel, automatic source removal/dismissal, extension-tab fallback, disconnect/revocation, and Incognito.
 - A statement that the OAuth broker contains the client secret, holds rotating refresh credentials encrypted for at most 180 days of inactivity, and returns only an opaque handle; the submitted ZIP contains no remote executable code.

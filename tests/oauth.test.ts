@@ -60,7 +60,10 @@ test("uses the device-bound broker routes for the OAuth lifecycle", async () => 
     calls.push({ url, body });
     if (url.endsWith("/start")) return response(200, { state: "oauth-state" });
     if (url.endsWith("/exchange")) {
-      return response(200, validExchangePayload({ refresh_token: "must-not-escape" }));
+      return response(200, validExchangePayload({
+        refresh_token: "must-not-escape",
+        owner: { type: "workspace" }
+      }));
     }
     if (url.endsWith("/refresh")) return response(200, { access_token: "access-2" });
     return response(200, {});
@@ -120,6 +123,7 @@ test("uses the device-bound broker routes for the OAuth lifecycle", async () => 
     state: "oauth-state"
   });
   assert.equal(exchanged.refresh_token, undefined);
+  assert.deepEqual(exchanged.owner, { type: "workspace" });
   assert.deepEqual(
     pick(refreshCall.body, ["connection_handle", "timestamp", "nonce"]),
     { connection_handle: "connection-handle", timestamp: "1721234567890", nonce: "refresh-nonce" }
@@ -181,7 +185,7 @@ test("validates start and exchange responses before returning credentials", asyn
     /invalid state/
   );
 
-  for (const missing of ["access_token", "connection_handle", "bot_id", "workspace_id"] as const) {
+  for (const missing of ["access_token", "connection_handle", "bot_id", "workspace_id"]) {
     const payload = validExchangePayload();
     delete payload[missing];
     await assert.rejects(
@@ -288,6 +292,35 @@ test("rejects a successful refresh response without an access token", async () =
     keyStore: await newMemoryKeyStore()
   });
   await assert.rejects(refresh({ token: "expired" }), /invalid token response/);
+});
+
+test("refresh preserves broker fields, allows omitted identity fields, and rejects malformed optional metadata", async () => {
+  const keyStore = await newMemoryKeyStore();
+  const preserved = await refreshAccessToken({
+    brokerUrl: "https://auth.example",
+    connectionHandle: "handle",
+    keyStore,
+    fetchImpl: async () => response(200, {
+      access_token: "access",
+      owner: { type: "workspace" }
+    })
+  });
+  assert.equal(preserved.access_token, "access");
+  assert.deepEqual(preserved.owner, { type: "workspace" });
+  assert.equal(preserved.bot_id, undefined);
+  assert.equal(preserved.workspace_id, undefined);
+
+  for (const field of ["bot_id", "workspace_id", "workspace_name", "workspace_icon"]) {
+    await assert.rejects(
+      refreshAccessToken({
+        brokerUrl: "https://auth.example",
+        connectionHandle: "handle",
+        keyStore,
+        fetchImpl: async () => response(200, { access_token: "access", [field]: 42 })
+      }),
+      /invalid token response/
+    );
+  }
 });
 
 test("does not restore a stale access token after the connection changes during refresh", async () => {

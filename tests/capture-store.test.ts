@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -17,6 +16,13 @@ import {
   pruneCaptureState,
   recoverInterruptedRecords
 } from "../src/capture-store.js";
+import { routeShowComposer } from "../src/panel-lifecycle.js";
+import type { CaptureDraft, CaptureRecord, KeyValueStoragePort } from "../src/contracts.js";
+
+function must<T>(value: T | null | undefined, label: string): T {
+  assert.ok(value, label);
+  return value;
+}
 
 test("corrupted and unsupported persisted state versions fail closed", () => {
   assert.deepEqual(normalizeCaptureState(null), emptyCaptureState());
@@ -83,12 +89,18 @@ test("missing-version and known v1 persisted items still migrate to v2", () => {
   assert.equal(state.activeDraftId, "unversioned");
 });
 
-function memoryStorage() {
-  const values = {};
+function memoryStorage(): KeyValueStoragePort & { values: Record<string, unknown> } {
+  const values: Record<string, unknown> = {};
   return {
     values,
-    async get(key) { return { [key]: values[key] }; },
-    async set(next) { Object.assign(values, structuredClone(next)); }
+    async get(key?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>> {
+      if (typeof key === "string") return { [key]: values[key] };
+      return structuredClone(values);
+    },
+    async set(next: Record<string, unknown>): Promise<void> { Object.assign(values, structuredClone(next)); },
+    async remove(keys: string | string[]): Promise<void> {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
+    }
   };
 }
 
@@ -115,7 +127,7 @@ test("one active draft follows explicit invocations across tabs and enqueue atom
   const state = await repository.load();
   assert.equal(state.drafts[first.id], undefined);
   assert.equal(state.activeDraftId, "");
-  assert.equal(state.captures[record.id].capture.captureId, record.id);
+  assert.equal(must(state.captures[record.id], "enqueued capture").capture.captureId, record.id);
 
   const repeated = await repository.enqueue({
     draftId: first.id,
@@ -127,6 +139,69 @@ test("one active draft follows explicit invocations across tabs and enqueue atom
   });
   assert.equal(repeated.id, record.id);
   assert.equal(Object.keys((await repository.load()).captures).length, 1);
+});
+
+test("an explicit panel target activates only after its mounted editor switch succeeds", async () => {
+  const repository = createCaptureRepository({ storage: memoryStorage(), now: () => 100 });
+  const active = await repository.getOrCreateDraft({
+    context: { selection: "Keep the old active draft" },
+    draftId: "old-active"
+  });
+  const target = must(await repository.upsertDraft({
+    ...active,
+    id: "target",
+    sessionId: "target-session",
+    revision: 0,
+    doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Target body" }] }] }
+  }, 0), "target draft");
+  assert.equal((await repository.load()).activeDraftId, active.id);
+  let mountedDraftId = active.id;
+
+  await assert.rejects(routeShowComposer({
+    activeDraft: active,
+    message: { type: "SHOW_COMPOSER", draftId: target.id },
+    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
+    async openDraft() { throw new Error("mounted editor refused the switch"); },
+    activateDraft: async (draft) => must(await repository.activateDraft(draft.id), "activated draft")
+  }), /mounted editor refused the switch/);
+  assert.equal((await repository.load()).activeDraftId, active.id);
+  assert.equal(mountedDraftId, active.id);
+
+  await assert.rejects(routeShowComposer({
+    activeDraft: active,
+    message: { type: "SHOW_COMPOSER", draftId: target.id },
+    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
+    async openDraft(draft) { mountedDraftId = draft.id; },
+    async activateDraft() { throw new Error("activation failed"); },
+    async restoreDraft(draft) { mountedDraftId = draft.id; }
+  }), /activation failed/);
+  assert.equal((await repository.load()).activeDraftId, active.id);
+  assert.equal(mountedDraftId, active.id);
+
+  await assert.rejects(routeShowComposer({
+    activeDraft: must(await repository.getDraft(active.id), "active draft"),
+    message: { type: "SHOW_COMPOSER", draftId: target.id },
+    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
+    async openDraft(draft) { mountedDraftId = draft.id; },
+    activateDraft: async (draft) => must(await repository.activateDraft(draft.id), "activated draft"),
+    async syncDraft() { throw new Error("identity sync failed"); },
+    async restoreDraft(draft) { mountedDraftId = draft.id; }
+  }), /identity sync failed/);
+  assert.equal((await repository.load()).activeDraftId, active.id);
+  assert.equal(mountedDraftId, active.id);
+
+  const opened = await routeShowComposer({
+    activeDraft: must(await repository.getDraft(active.id), "active draft"),
+    message: { type: "SHOW_COMPOSER", draftId: target.id },
+    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
+    async openDraft(draft) { mountedDraftId = draft.id; },
+    activateDraft: async (draft) => must(await repository.activateDraft(draft.id), "activated draft"),
+    async syncDraft(draft) { mountedDraftId = draft.id; },
+    async restoreDraft(draft) { mountedDraftId = draft.id; }
+  });
+  assert.equal(opened.id, target.id);
+  assert.equal((await repository.load()).activeDraftId, target.id);
+  assert.equal(mountedDraftId, target.id);
 });
 
 test("blank and title-only composers stay transient until their body contains text", async () => {
@@ -143,11 +218,11 @@ test("blank and title-only composers stay transient until their body contains te
   assert.equal(titleOnly, null);
   assert.deepEqual((await repository.load()).drafts, {});
 
-  const stored = await repository.upsertDraft({
+  const stored = must(await repository.upsertDraft({
     ...transient,
     title: "A real draft",
     doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Body text" }] }] }
-  }, 0);
+  }, 0), "stored draft");
   assert.equal(stored.id, "candidate");
   assert.equal((await repository.load()).activeDraftId, "candidate");
 
@@ -163,14 +238,14 @@ test("blank and title-only composers stay transient until their body contains te
 test("captured selections are durable immediately", async () => {
   const repository = createCaptureRepository({ storage: memoryStorage(), uuid: () => "selection" });
   const draft = await repository.getOrCreateDraft({ context: { selection: "Selected body" } });
-  assert.equal((await repository.load()).drafts[draft.id].id, "selection");
+  assert.equal(must((await repository.load()).drafts[draft.id], "durable selection").id, "selection");
 });
 
 test("serialized state recovery cannot overwrite a capture enqueued concurrently", async () => {
   const repository = createCaptureRepository({ storage: memoryStorage(), uuid: () => "capture" });
-  let releaseRecovery;
+  let releaseRecovery: () => void = () => undefined;
   const recovery = repository.updateState(async () => {
-    await new Promise((resolve) => { releaseRecovery = resolve; });
+    await new Promise<void>((resolve) => { releaseRecovery = resolve; });
   });
   const enqueue = repository.enqueue({
     capture: { document: { doc: { type: "doc", content: [] } } },
@@ -187,14 +262,14 @@ test("serialized state recovery cannot overwrite a capture enqueued concurrently
 
 test("retention never purges unresolved captures and recovers interrupted sends safely", () => {
   const state = emptyCaptureState();
-  state.captures.pending = { id: "pending", status: DELIVERY_STATES.pending, updatedAt: 0 };
-  state.captures.old = { id: "old", status: DELIVERY_STATES.delivered, updatedAt: 0 };
-  state.captures.managed = { id: "managed", status: DELIVERY_STATES.sending, destination: { managedDestination: true }, updatedAt: 0 };
-  state.captures.manual = { id: "manual", status: DELIVERY_STATES.sending, destination: { managedDestination: false }, updatedAt: 0 };
+  state.captures.pending = must(normalizeRecord({ id: "pending", status: DELIVERY_STATES.pending, updatedAt: 0 }), "pending fixture");
+  state.captures.old = must(normalizeRecord({ id: "old", status: DELIVERY_STATES.delivered, updatedAt: 0 }), "delivered fixture");
+  state.captures.managed = must(normalizeRecord({ id: "managed", status: DELIVERY_STATES.sending, destination: { managedDestination: true }, updatedAt: 0 }), "managed fixture");
+  state.captures.manual = must(normalizeRecord({ id: "manual", status: DELIVERY_STATES.sending, destination: { managedDestination: false }, updatedAt: 0 }), "manual fixture");
 
   recoverInterruptedRecords(state, true, 500);
-  assert.equal(state.captures.managed.status, DELIVERY_STATES.pending);
-  assert.equal(state.captures.manual.status, DELIVERY_STATES.uncertain);
+  assert.equal(must(state.captures.managed, "managed capture").status, DELIVERY_STATES.pending);
+  assert.equal(must(state.captures.manual, "manual capture").status, DELIVERY_STATES.uncertain);
   pruneCaptureState(state, 31 * 24 * 60 * 60 * 1000);
   assert.equal(state.captures.old, undefined);
   assert.ok(state.captures.pending);
@@ -203,7 +278,7 @@ test("retention never purges unresolved captures and recovers interrupted sends 
 
 test("a new browser session preserves the global active draft", () => {
   const state = emptyCaptureState();
-  state.drafts.draft = { id: "draft", updatedAt: 1 };
+  state.drafts.draft = must(normalizeDraft({ id: "draft", updatedAt: 1 }), "draft fixture");
   state.activeDraftId = "draft";
   detachActiveDrafts(state);
   assert.equal(state.activeDraftId, "draft");
@@ -223,7 +298,7 @@ test("v1 migration chooses the newest non-empty active draft and keeps every oth
   });
   assert.equal(state.activeDraftId, "newer");
   assert.deepEqual(Object.keys(state.drafts).sort(), ["newer", "older"]);
-  assert.equal(state.drafts.newer.sources[0].url, "https://two.example/");
+  assert.equal(must(must(state.drafts.newer, "newer draft").sources[0], "newer source").url, "https://two.example/");
 });
 
 test("stale revisions cannot overwrite a newer cross-tab autosave", async () => {
@@ -235,8 +310,8 @@ test("stale revisions cannot overwrite a newer cross-tab autosave", async () => 
     repository.upsertDraft({ ...draft, title: "Stale" }, draft.revision),
     (error) => error instanceof CaptureStorageError && error.code === "stale_draft"
   );
-  assert.equal((await repository.load()).drafts.draft.title, "Newer");
-  assert.equal(saved.revision, handedOff.revision + 1);
+  assert.equal(must((await repository.load()).drafts.draft, "saved draft").title, "Newer");
+  assert.equal(must(saved, "newer saved draft").revision, handedOff.revision + 1);
 });
 
 test("a stale blank autosave cannot delete newer body content", async () => {
@@ -250,21 +325,24 @@ test("a stale blank autosave cannot delete newer body content", async () => {
     repository.upsertDraft({ ...initial, doc: { type: "doc", content: [{ type: "paragraph" }] } }, initial.revision),
     (error) => error instanceof CaptureStorageError && error.code === "stale_draft"
   );
-  assert.equal((await repository.load()).drafts.draft.doc.content[0].content[0].text, "Newer body");
-  assert.ok(newer.revision > initial.revision);
+  const persisted = must((await repository.load()).drafts.draft, "persisted newer draft");
+  assert.equal(must(must(persisted.doc.content?.[0], "paragraph").content?.[0], "text").text, "Newer body");
+  assert.ok(must(newer, "newer draft").revision > initial.revision);
 });
 
 test("clearing an active edit reactivates its stashed draft", async () => {
   const repository = createCaptureRepository({ storage: memoryStorage(), uuid: () => "stashed", now: () => 100 });
   const stashed = await repository.getOrCreateDraft({ context: { selection: "Stashed body" } });
-  const edit = await repository.upsertDraft({
+  const edit = must(await repository.upsertDraft({
+    ...stashed,
     id: "edit",
     mode: "edit",
     targetRecordId: "capture",
     returnDraftId: stashed.id,
+    revision: 0,
     doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Edited body" }] }] }
-  }, 0);
-  const activeEdit = await repository.activateDraft(edit.id);
+  }, 0), "edit draft");
+  const activeEdit = must(await repository.activateDraft(edit.id), "active edit");
   await repository.upsertDraft({ ...activeEdit, doc: { type: "doc", content: [{ type: "paragraph" }] } }, activeEdit.revision);
   const state = await repository.load();
   assert.equal(state.drafts.edit, undefined);
@@ -278,7 +356,7 @@ test("a new composer session advances the revision even when the source URL is u
   assert.ok(handedOff.revision > first.revision);
   await assert.rejects(
     repository.upsertDraft({ ...first, title: "Old surface" }, first.revision),
-    (error) => error.code === "stale_draft"
+    (error) => error instanceof CaptureStorageError && error.code === "stale_draft"
   );
 });
 
@@ -288,8 +366,8 @@ test("sources normalize, deduplicate fragments, preserve the primary, and cap at
     url: index === 1 ? "https://example.com/#other" : index === 0 ? "https://example.com/#first" : `https://example.com/${index}`
   })));
   assert.equal(sources.length, 20);
-  assert.equal(sources[0].title, "Source 0");
-  assert.equal(sources[0].url, "https://example.com/");
+  assert.equal(must(sources[0], "primary source").title, "Source 0");
+  assert.equal(must(sources[0], "primary source").url, "https://example.com/");
 });
 
 test("automatic context respects draft-scoped source dismissals until explicit restore", () => {
@@ -338,10 +416,10 @@ test("editing a recent note reuses its capture record and reactivates the stashe
     status: DELIVERY_STATES.delivered,
     syncedCapture: record.pendingCapture,
     pendingCapture: null,
-    remote: { kind: "page", id: "page", pageId: "page", fingerprint: "fingerprint" }
+    remote: { kind: "page", id: "page", url: "https://notion.so/page", pageId: "page", blockIds: [], fingerprint: "fingerprint" }
   });
   const stashed = await repository.getOrCreateDraft({ context: { url: "https://stashed.example", selection: "Work in progress" }, sessionId: "stashed" });
-  const edit = await repository.createEditDraft({
+  const edit = must(await repository.createEditDraft({
     recordId: record.id,
     title: "Saved",
     doc: originalDraft.doc,
@@ -350,7 +428,7 @@ test("editing a recent note reuses its capture record and reactivates the stashe
     baseFingerprint: "fingerprint",
     returnDraftId: stashed.id,
     sessionId: "edit"
-  });
+  }), "recent-note edit draft");
   const updated = await repository.enqueueUpdate({
     draftId: edit.id,
     recordId: record.id,
@@ -361,7 +439,7 @@ test("editing a recent note reuses its capture record and reactivates the stashe
   const state = await repository.load();
   assert.equal(updated.id, record.id);
   assert.equal(Object.keys(state.captures).length, 1);
-  assert.equal(state.captures[record.id].pendingCapture.captureId, record.id);
+  assert.equal(must(must(state.captures[record.id], "updated capture").pendingCapture, "pending update").captureId, record.id);
   assert.equal(state.activeDraftId, stashed.id);
 });
 
@@ -369,24 +447,24 @@ test("imported Notion pages reuse a delivered capture keyed by remote page id", 
   const storage = memoryStorage();
   let id = 0;
   const repository = createCaptureRepository({ storage, uuid: () => `id-${++id}`, now: () => 100 });
-  const first = await repository.ensureImportedRemoteCapture({
+  const first = must(await repository.ensureImportedRemoteCapture({
     pageId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     title: "Spec",
     url: "https://www.notion.so/Spec",
     connectionId: "connection",
     destination: { destinationType: "page", destinationName: "Spec" }
-  });
-  const again = await repository.ensureImportedRemoteCapture({
+  }), "first imported capture");
+  const again = must(await repository.ensureImportedRemoteCapture({
     pageId: "aaaaaaaabbbbccccddddeeeeeeeeeeee",
     title: "Spec updated",
     url: "https://www.notion.so/Spec-updated"
-  });
-  const found = await repository.findCaptureByRemotePageId("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+  }), "reused imported capture");
+  const found = must(await repository.findCaptureByRemotePageId("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"), "found imported capture");
   assert.equal(first.id, again.id);
   assert.equal(found.id, first.id);
   assert.equal(again.status, DELIVERY_STATES.delivered);
-  assert.equal(again.remote.kind, "page");
-  assert.equal(again.remote.url, "https://www.notion.so/Spec-updated");
+  assert.equal(must(again.remote, "imported remote").kind, "page");
+  assert.equal(must(again.remote, "imported remote").url, "https://www.notion.so/Spec-updated");
   assert.equal(again.importedFromNotion, true);
 });
 

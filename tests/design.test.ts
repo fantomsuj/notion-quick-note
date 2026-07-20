@@ -1,9 +1,8 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
+const read = (path: string): Promise<string> => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 test("shared tokens define approved light and dark roles", async () => {
   const css = await read("styles/tokens.css");
@@ -13,6 +12,31 @@ test("shared tokens define approved light and dark roles", async () => {
   assert.match(css, /--nqn-text-secondary:\s*#5f5e59/i);
   assert.match(css, /--nqn-action:\s*#0077d4/i);
   assert.match(css, /--nqn-focus:\s*#2383e2/i);
+});
+
+test("composer defines distinct light and dark Notion text and background colors", async () => {
+  const tokens = await read("styles/tokens.css");
+  const composer = await read("styles/composer.css");
+  const colorNames = ["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"];
+  for (const name of colorNames) {
+    assert.match(tokens, new RegExp(`--nqn-notion-${name}:\\s*#[0-9a-f]{6}`, "i"));
+    assert.match(tokens, new RegExp(`--nqn-notion-${name}-background:\\s*#[0-9a-f]{6}`, "i"));
+    assert.match(composer, new RegExp(`\\.notion-color-${name}(?:\\s|,|\\{)`));
+    assert.match(composer, new RegExp(`\\.notion-color-${name}_background(?:\\s|,|\\{)`));
+  }
+  const darkTokens = tokens.match(/@media \(prefers-color-scheme: dark\)[\s\S]+/)?.[0] || "";
+  for (const name of colorNames) {
+    assert.match(darkTokens, new RegExp(`--nqn-notion-${name}:\\s*#[0-9a-f]{6}`, "i"));
+    assert.match(darkTokens, new RegExp(`--nqn-notion-${name}-background:\\s*#[0-9a-f]{6}`, "i"));
+  }
+});
+
+test("title overrides the global blue focus ring with a neutral focus treatment", async () => {
+  const composer = await read("styles/composer.css");
+  const globalFocus = composer.indexOf(":focus-visible");
+  const titleFocus = composer.indexOf(".page-title:focus-visible");
+  assert.ok(globalFocus >= 0 && titleFocus > globalFocus, "title focus override must follow the global focus rule");
+  assert.match(composer.slice(titleFocus), /\.page-title:focus-visible\s*\{[^}]*outline:\s*(?:0|none)[^}]*box-shadow:\s*[^;}]*var\(--nqn-border-strong\)/);
 });
 
 test("all NotionInter weights are bundled and declared locally", async () => {
@@ -44,31 +68,42 @@ test("manifest exposes only packaged design resources", async () => {
   }]);
 });
 
-test("Quick Note keeps Option+Z in-browser and provides a Chrome-compatible global shortcut", async () => {
+test("Quick Note uses one browser-scoped action shortcut with cross-platform defaults", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   const options = await read("options/options.html");
-
-  assert.equal(manifest.commands["toggle-quick-note"].suggested_key.mac, "Option+Z");
-  assert.notEqual(manifest.commands["toggle-quick-note"].global, true);
-  assert.deepEqual(manifest.commands["open-quick-note-global"], {
-    suggested_key: {
-      default: "Ctrl+Shift+0",
-      mac: "Command+Shift+0"
-    },
-    description: "Open Quick Note from any app",
-    global: true
-  });
-  assert.match(options, /<kbd[^>]*>⌥ Z<\/kbd>/);
-  assert.match(options, /<kbd[^>]*>⌘ ⇧ 0<\/kbd>/);
-});
-
-test("the command listener targets the invoking tab and focuses the browser for global capture", async () => {
   const background = await read("src/background.ts");
 
-  assert.match(background, /QUICK_NOTE_COMMANDS\.has\(command\)/);
-  assert.match(background, /onCommand\.addListener\(async \(command, commandTab\)/);
-  assert.match(background, /active:\s*true,\s*lastFocusedWindow:\s*true/);
-  assert.match(background, /windows\.update\(tab\.windowId,\s*\{\s*focused:\s*true\s*\}\)/);
+  assert.deepEqual(Object.keys(manifest.commands), ["_execute_action"]);
+  assert.deepEqual(manifest.commands._execute_action, {
+    suggested_key: {
+      default: "Ctrl+Shift+Space",
+      mac: "Command+Shift+Space"
+    }
+  });
+  assert.equal(manifest.commands._execute_action.global, undefined);
+  assert.match(background, /chrome\.action\.onClicked\.addListener\(\(tab\) => openQuickNote\(tab\)\)/);
+  assert.doesNotMatch(background, /chrome\.commands\.onCommand|QUICK_NOTE_COMMANDS|windows\.update/);
+  assert.match(options, /id="keyboard-shortcut-heading"/);
+  assert.match(options, /id="shortcut-assignment-status"/);
+  assert.match(options, /id="shortcut-keycaps"/);
+  assert.match(options, /id="change-shortcut"/);
+  assert.match(options, /id="shortcut-warning"[^>]+hidden/);
+  assert.match(options, /id="shortcut-manual-instructions"[^>]+hidden/);
+  assert.doesNotMatch(options, /⌥ Z|⌘ ⇧ 0|Browser active · From any app/);
+});
+
+test("shortcut documentation describes browser-only customization through the native editor", async () => {
+  const readme = await read("README.md");
+  const product = await read("docs/PRODUCT.md");
+  const listing = await read("docs/STORE_LISTING.md");
+  const copy = `${readme}\n${product}\n${listing}`;
+
+  assert.match(copy, /Command\+Shift\+Space/);
+  assert.match(copy, /Ctrl\+Shift\+Space/);
+  assert.match(copy, /chrome:\/\/extensions\/shortcuts/);
+  assert.match(copy, /browser(?:-| )scoped/i);
+  assert.match(copy, /customiz/i);
+  assert.doesNotMatch(copy, /Option\+Z|system-wide keyboard shortcut|global shortcuts?/i);
 });
 
 test("persistent side panel opens by window and tracks active tabs only while connected", async () => {
@@ -83,6 +118,31 @@ test("persistent side panel opens by window and tracks active tabs only while co
   assert.match(background, /chrome\.tabs\.onUpdated\.addListener/);
   assert.match(sidepanel, /chrome\.runtime\.connect\(\{ name: "notion-quick-note-panel" \}\)/);
   assert.match(sidepanel, /await openComposer\(\)/);
+});
+
+test("window-scoped panel routing uses the typed coordinator without injection or tab-specific opening", async () => {
+  const manifest = JSON.parse(await read("manifest.json"));
+  const background = await read("src/background.ts");
+  const sidepanel = await read("sidepanel/sidepanel.ts");
+  const bundleCheck = await read("scripts/check-bundle-size.ts");
+
+  assert.deepEqual(manifest.permissions, ["alarms", "contextMenus", "identity", "sidePanel", "storage", "tabs"]);
+  assert.match(background, /createPanelCoordinator/);
+  assert.match(background, /isPanelRegistrationMessage/);
+  assert.match(background, /panelCoordinator\.register/);
+  assert.match(background, /panelCoordinator\.unregister/);
+  assert.match(background, /panelCoordinator\.navigate/);
+  assert.match(background, /panelCoordinator\.publishContext/);
+  assert.doesNotMatch(background, /panelPorts|sidePanel\.setOptions|sidePanel\.open\(\{\s*tabId|scripting\.executeScript/);
+  for (const command of ["SHOW_COMPOSER", "SHOW_ACTIVITY", "ACTIVE_PAGE_CONTEXT"]) {
+    assert.match(`${background}\n${sidepanel}`, new RegExp(command));
+  }
+  assert.match(sidepanel, /WorkerToPanelMessage/);
+  assert.doesNotMatch(sidepanel, /OPEN_DRAFT/);
+  assert.doesNotMatch(bundleCheck, /content-loader/);
+  assert.match(bundleCheck, /background,[\s\S]*executeScript/);
+  await assert.rejects(read("src/content-loader.ts"), { code: "ENOENT" });
+  await assert.rejects(read("tests/content-loader.test.ts"), { code: "ENOENT" });
 });
 
 test("both surfaces consume shared tokens and keep the compact Notion page geometry", async () => {
