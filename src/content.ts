@@ -1086,44 +1086,135 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       list.innerHTML = `<div class="popover-state error">${escapeHtml(response?.error || "Recent notes are unavailable.")}</div>`;
       return;
     }
-    renderRecents(root, instance, response.notes || []);
+    renderRecents(root, instance, {
+      drafts: response.drafts || [],
+      notes: response.notes || [],
+      notionPages: response.notionPages || [],
+      notionError: response.notionError || ""
+    });
   }
 
-  function renderRecents(root, instance, records) {
+  function renderRecents(root, instance, groups) {
     const list = root.querySelector(".recent-list");
-    if (!records.length) {
-      list.innerHTML = '<div class="popover-state">No matching notes in the last 30 days.</div>';
+    const drafts = (groups.drafts || []).filter((draft) => draft.id !== instance.draftId);
+    const notes = groups.notes || [];
+    const notionPages = groups.notionPages || [];
+    const nodes = [];
+    if (drafts.length) {
+      nodes.push(recentSectionHeading("Drafts", "Local work still in Quick Note"));
+      nodes.push(...drafts.map((record) => recentRow(root, instance, record)));
+    }
+    if (notes.length) {
+      nodes.push(recentSectionHeading("Saved notes", "Recently delivered from this extension"));
+      nodes.push(...notes.map((record) => recentRow(root, instance, record)));
+    }
+    if (notionPages.length) {
+      nodes.push(recentSectionHeading("From Notion", "Recently edited pages you can pull in"));
+      nodes.push(...notionPages.map((record) => recentRow(root, instance, record)));
+    } else if (groups.notionError) {
+      nodes.push(recentSectionHeading("From Notion", groups.notionError));
+    }
+    if (!nodes.length) {
+      list.innerHTML = '<div class="popover-state">No matching drafts or notes yet.</div>';
       return;
     }
-    list.replaceChildren(...records.map((record) => {
-      const row = document.createElement("div");
-      row.className = "recent-row";
-      const edit = document.createElement("button");
-      edit.type = "button";
-      edit.className = "recent-edit";
-      const title = document.createElement("b");
-      title.textContent = record.title || "Untitled";
-      const preview = document.createElement("span");
-      preview.className = "recent-preview";
-      preview.textContent = truncatePreview(record.preview, 90);
-      preview.hidden = !preview.textContent;
-      const metadata = document.createElement("small");
-      metadata.textContent = record.editable === false ? `${recentSubtitle(record)} · Open in Notion only` : recentSubtitle(record);
-      edit.append(title, preview, metadata);
-      edit.addEventListener("click", () => {
-        if (record.editable === false) return void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id }, instance);
-        return void openRecentNote(root, instance, record.id);
-      });
-      const openRemote = document.createElement("button");
-      openRemote.type = "button";
-      openRemote.className = "recent-open";
-      openRemote.innerHTML = icon("open");
-      openRemote.setAttribute("aria-label", `Open ${record.title || "note"} in Notion`);
-      openRemote.hidden = !record.remoteUrl || record.editable === false;
-      openRemote.addEventListener("click", () => void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id }, instance));
-      row.append(edit, openRemote);
-      return row;
-    }));
+    list.replaceChildren(...nodes);
+  }
+
+  function recentSectionHeading(title, subtitle) {
+    const heading = document.createElement("div");
+    heading.className = "recent-section";
+    const label = document.createElement("b");
+    label.textContent = title;
+    const hint = document.createElement("small");
+    hint.textContent = subtitle;
+    heading.append(label, hint);
+    return heading;
+  }
+
+  function recentRow(root, instance, record) {
+    const row = document.createElement("div");
+    row.className = "recent-row";
+    row.dataset.source = record.source || "note";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "recent-edit";
+    const title = document.createElement("b");
+    title.textContent = record.title || "Untitled";
+    const preview = document.createElement("span");
+    preview.className = "recent-preview";
+    preview.textContent = truncatePreview(record.preview, 90);
+    preview.hidden = !preview.textContent;
+    const metadata = document.createElement("small");
+    metadata.textContent = record.editable === false ? `${recentSubtitle(record)} · Open in Notion only` : recentSubtitle(record);
+    edit.append(title, preview, metadata);
+    edit.addEventListener("click", () => void openRecentItem(root, instance, record));
+    const openRemote = document.createElement("button");
+    openRemote.type = "button";
+    openRemote.className = "recent-open";
+    openRemote.innerHTML = icon("open");
+    openRemote.setAttribute("aria-label", `Open ${record.title || "note"} in Notion`);
+    openRemote.hidden = !record.remoteUrl || record.source === "draft";
+    openRemote.addEventListener("click", () => void sendRuntimeMessage({
+      type: "OPEN_CAPTURE_RESULT",
+      id: record.source === "notion" ? "" : record.id,
+      url: record.remoteUrl || ""
+    }, instance));
+    row.append(edit, openRemote);
+    return row;
+  }
+
+  async function openRecentItem(root, instance, record) {
+    if (record.source === "draft") return void openRecentDraft(root, instance, record.id);
+    if (record.source === "notion") return void openNotionPage(root, instance, record);
+    if (record.editable === false) {
+      return void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id, url: record.remoteUrl || "" }, instance);
+    }
+    return void openRecentNote(root, instance, record.id);
+  }
+
+  async function openRecentDraft(root, instance, draftId) {
+    if (!draftId || draftId === instance.draftId) {
+      closeTransientUi(root);
+      return;
+    }
+    try {
+      clearTimeout(instance.draftTimer);
+      instance.draftTimer = null;
+      await persistDraft(instance);
+      setStatus(root, "Opening draft…");
+      const response = await sendRuntimeMessage({ type: "ACTIVATE_DRAFT", id: draftId, sessionId: instance.sessionId }, instance);
+      if (!response?.ok || !response.draft) throw new Error(response?.error || "Couldn’t open this draft.");
+      applyDraftToInstance(root, instance, response.draft);
+      closeTransientUi(root);
+      setStatus(root, "Editing draft");
+    } catch (error) {
+      setStatus(root, "Draft preserved");
+      showToast(root, error?.message || "Couldn’t open this draft.", "error", instance);
+    }
+  }
+
+  async function openNotionPage(root, instance, record) {
+    try {
+      clearTimeout(instance.draftTimer);
+      instance.draftTimer = null;
+      await persistDraft(instance);
+      setStatus(root, "Loading from Notion…");
+      const response = await sendRuntimeMessage({
+        type: "LOAD_NOTION_PAGE",
+        pageId: record.pageId || record.id,
+        title: record.title || "",
+        url: record.remoteUrl || "",
+        sessionId: instance.sessionId
+      }, instance);
+      if (!response?.ok || !response.draft) throw new Error(response?.error || "Couldn’t load this Notion page.");
+      applyDraftToInstance(root, instance, { ...response.draft, conflict: response.conflict });
+      closeTransientUi(root);
+      setStatus(root, "Editing Notion page");
+    } catch (error) {
+      setStatus(root, "Draft preserved");
+      showToast(root, error?.message || "Couldn’t load this Notion page.", "error", instance);
+    }
   }
 
   async function openRecentNote(root, instance, recordId) {
@@ -1144,6 +1235,13 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
   }
 
   function recentSubtitle(record) {
+    if (record.source === "draft") {
+      const kind = record.mode === "edit" ? "Edit draft" : "Draft";
+      return `${kind} · ${relativeTime(record.updatedAt)}`;
+    }
+    if (record.source === "notion") {
+      return `Notion · ${relativeTime(record.updatedAt)}`;
+    }
     const destination = record.destinationName ? `${record.destinationName} · ` : "";
     const status = record.status === "blocked_conflict" ? "Conflict · local edit preserved" : relativeTime(record.updatedAt);
     return `${destination}${status}`;
@@ -1933,8 +2031,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
           <div class="menu-shortcut"><span>Save note</span><kbd>⌘ ⇧ ↵</kbd></div>
         </div>
         <section class="recent-panel popover-panel" role="dialog" aria-label="Recent notes" hidden>
-          <div class="popover-heading"><div><b>Recent notes</b><small>Edit your latest saved notes</small></div></div>
-          <label class="recent-search-wrap">${icon("search")}<input class="recent-search" type="search" autocomplete="off" placeholder="Search the last 30 days" aria-label="Search recent notes"></label>
+          <div class="popover-heading"><div><b>Recent</b><small>Drafts, saved notes, and Notion pages</small></div></div>
+          <label class="recent-search-wrap">${icon("search")}<input class="recent-search" type="search" autocomplete="off" placeholder="Search drafts and Notion" aria-label="Search recent notes"></label>
           <div class="recent-list"></div>
         </section>
         <section class="source-panel popover-panel" role="dialog" aria-label="Attached sources" hidden>

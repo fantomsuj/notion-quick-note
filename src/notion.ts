@@ -882,6 +882,37 @@ export async function searchDestinations({ token, query = "", fetchImpl = fetch 
     .filter((item) => item.name);
 }
 
+export async function searchRecentPages({ token, query = "", limit = 8, fetchImpl = fetch }) {
+  if (!token) throw new Error("Connect Notion first.");
+  const pageSize = Math.max(1, Math.min(Number(limit) || 8, 25));
+  const payload = await notionRequest(token, "/v1/search", {
+    method: "POST",
+    body: {
+      ...(query.trim() ? { query: query.trim() } : {}),
+      filter: { value: "page", property: "object" },
+      sort: { direction: "descending", timestamp: "last_edited_time" },
+      page_size: Math.min(100, Math.max(pageSize * 2, 20))
+    }
+  }, fetchImpl);
+
+  return (payload.results || [])
+    .filter((item) => item.object === "page" && !item.in_trash && !item.archived)
+    .map((item) => {
+      const titleProperty = Object.values(item.properties || {}).find((property) => property.type === "title");
+      const lastEditedTime = item.last_edited_time || "";
+      return {
+        pageId: normalizeNotionId(item.id),
+        title: plainText(titleProperty?.title) || "Untitled page",
+        url: item.url || "",
+        icon: notionIcon(item.icon, "↳"),
+        lastEditedTime,
+        updatedAt: lastEditedTime ? Date.parse(lastEditedTime) || 0 : 0
+      };
+    })
+    .filter((item) => item.pageId)
+    .slice(0, pageSize);
+}
+
 function destinationFromNotion(item) {
   if (item.object === "data_source") {
     const titleProperty = Object.values(item.properties || {}).find((property) => property.type === "title");

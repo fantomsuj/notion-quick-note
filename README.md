@@ -126,6 +126,8 @@ Notion supports [appending blocks to a page](https://developers.notion.com/refer
 - Multiple providers behind one destination adapter
 - Safari/WebExtension packaging and mobile share-sheet companion
 
+Recent already surfaces local drafts first, then extension-delivered notes, then recently edited Notion pages shared with the integration so users can pull those docs into Quick Note without leaving the composer.
+
 ## Development
 
 ```sh

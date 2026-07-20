@@ -28,6 +28,10 @@ export function emptyCaptureMeta() {
   };
 }
 
+function compactRemoteId(value = "") {
+  return String(value || "").replaceAll("-", "").toLowerCase();
+}
+
 export function createRecordCaptureRepository({ backend, now = () => Date.now(), uuid = () => crypto.randomUUID() }) {
   let changeHandler = async () => undefined;
 
@@ -423,6 +427,88 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       });
       if (removed) await changed("capture", { structural: true, id });
       return removed;
+    },
+    async findCaptureByRemotePageId(pageId) {
+      const needle = compactRemoteId(pageId);
+      if (!needle) return null;
+      const records = await this.listCaptures();
+      return records.find((record) => {
+        const remote = record.remote || {};
+        return compactRemoteId(remote.pageId) === needle || compactRemoteId(remote.id) === needle;
+      }) || null;
+    },
+    async ensureImportedRemoteCapture({ pageId, title = "", url = "", connectionId = "", destination = null, remote = null, document = null }) {
+      const needle = compactRemoteId(pageId);
+      if (!needle) throw new CaptureStorageError("A Notion page ID is required.", "invalid_remote_page");
+      let created = false;
+      const result = await transaction(["captures"], "readwrite", async (tx) => {
+        const records = await tx.getAllCaptures();
+        const existing = records.find((record) => {
+          const value = record.remote || {};
+          return compactRemoteId(value.pageId) === needle || compactRemoteId(value.id) === needle;
+        });
+        const timestamp = now();
+        const captureDocument = {
+          version: 1,
+          title: String(title || "").trim(),
+          doc: document?.type === "doc" ? document : { type: "doc", content: [{ type: "paragraph" }] }
+        };
+        const nextRemote = normalizeRecord({
+          remote: {
+            kind: "page",
+            id: compactRemoteId(remote?.id) || needle,
+            pageId: compactRemoteId(remote?.pageId) || needle,
+            url: remote?.url || url || "",
+            blockIds: Array.isArray(remote?.blockIds) ? remote.blockIds : [],
+            fingerprint: remote?.fingerprint || ""
+          }
+        }).remote;
+        if (existing) {
+          if (existing.status === DELIVERY_STATES.delivered || existing.status === DELIVERY_STATES.blockedConflict) {
+            existing.remote = { ...existing.remote, ...nextRemote };
+            if (url) existing.remote.url = url || existing.remote.url;
+            if (destination && !existing.destination) existing.destination = destination;
+            if (connectionId && !existing.connectionId) existing.connectionId = connectionId;
+            existing.updatedAt = timestamp;
+            const normalized = normalizeRecord(existing);
+            await tx.putCapture(normalized);
+            return normalized;
+          }
+          return normalizeRecord(existing);
+        }
+        const id = uuid();
+        const capture = { document: captureDocument, captureId: id, sources: [], includeSource: false };
+        const record = normalizeRecord({
+          version: CAPTURE_RECORD_VERSION,
+          id,
+          draftId: "",
+          scope: "regular",
+          status: DELIVERY_STATES.delivered,
+          capture,
+          syncedCapture: capture,
+          pendingCapture: null,
+          operation: "",
+          syncJournal: null,
+          context: {},
+          destination,
+          connectionId: connectionId || "",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          attemptCount: 0,
+          firstAttemptAt: 0,
+          lastAttemptAt: 0,
+          nextAttemptAt: 0,
+          lastError: null,
+          remote: nextRemote,
+          forceRetry: false,
+          importedFromNotion: true
+        });
+        await tx.putCapture(record);
+        created = true;
+        return record;
+      });
+      if (result) await changed("capture", { structural: created, created, id: result.id, record: result });
+      return result;
     },
     async maintain({ recoverInterrupted = true, force = false } = {}) {
       const timestamp = now();

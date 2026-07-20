@@ -68,9 +68,60 @@
   --nqn-radius-control: 6px;
   --nqn-radius-panel: 8px;
   --nqn-radius-popover: 10px;
+  --nqn-duration-quick: 120ms;
   --nqn-duration-fast: 160ms;
+  --nqn-duration-panel: 200ms;
+  --nqn-duration-slow: 240ms;
   --nqn-ease-out: cubic-bezier(.25, 1, .5, 1);
+  --nqn-ease-in: cubic-bezier(.4, 0, 1, 1);
+  --nqn-ease-spring: cubic-bezier(.22, 1.15, .4, 1);
 }
+
+/* Shared motion primitives. Every entrance resolves to the element's natural
+   resting state so animations-disabled snapshots stay stable, and all of this
+   is neutralized under prefers-reduced-motion by each surface stylesheet. */
+@keyframes nqn-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes nqn-pop-in {
+  from { opacity: 0; transform: translateY(4px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes nqn-pop-in-tr {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes nqn-slide-down-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes nqn-slide-up-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes nqn-rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes nqn-check-pop {
+  0% { transform: rotate(45deg) scale(0); }
+  60% { transform: rotate(45deg) scale(1.15); }
+  100% { transform: rotate(45deg) scale(1); }
+}
+
+@keyframes nqn-mark-pop {
+  0% { opacity: 0; transform: scale(.6); }
+  60% { opacity: 1; transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
 
 @media (prefers-color-scheme: dark) {
   :root,

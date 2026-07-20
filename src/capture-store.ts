@@ -382,8 +382,96 @@ export function createCaptureRepository({
     },
     async removeCapture(id) {
       return mutate((state) => Boolean(state.captures[id] && delete state.captures[id]));
+    },
+    async findCaptureByRemotePageId(pageId) {
+      const needle = compactRemoteId(pageId);
+      if (!needle) return null;
+      return Object.values((await load()).captures).find((record) => {
+        const remote = record.remote || {};
+        return compactRemoteId(remote.pageId) === needle || compactRemoteId(remote.id) === needle;
+      }) || null;
+    },
+    async ensureImportedRemoteCapture({ pageId, title = "", url = "", connectionId = "", destination = null, remote = null, document = null }) {
+      const needle = compactRemoteId(pageId);
+      if (!needle) throw new CaptureStorageError("A Notion page ID is required.", "invalid_remote_page");
+      return mutate((state) => {
+        const existing = Object.values(state.captures).find((record) => {
+          const value = record.remote || {};
+          return compactRemoteId(value.pageId) === needle || compactRemoteId(value.id) === needle;
+        });
+        const timestamp = now();
+        const captureDocument = {
+          version: 1,
+          title: String(title || "").trim(),
+          doc: document?.type === "doc" ? document : { type: "doc", content: [{ type: "paragraph" }] }
+        };
+        const nextRemote = normalizeRecord({
+          remote: {
+            kind: "page",
+            id: compactRemoteId(remote?.id) || needle,
+            pageId: compactRemoteId(remote?.pageId) || needle,
+            url: remote?.url || url || "",
+            blockIds: Array.isArray(remote?.blockIds) ? remote.blockIds : [],
+            fingerprint: remote?.fingerprint || ""
+          }
+        }).remote;
+        if (existing) {
+          if (existing.status === DELIVERY_STATES.delivered || existing.status === DELIVERY_STATES.blockedConflict) {
+            existing.remote = { ...existing.remote, ...nextRemote };
+            if (url) existing.remote.url = url || existing.remote.url;
+            if (title && !existing.syncedCapture?.document?.title) {
+              existing.syncedCapture = {
+                ...(existing.syncedCapture || existing.capture || {}),
+                document: {
+                  ...(existing.syncedCapture?.document || existing.capture?.document || {}),
+                  title: String(title || "").trim()
+                }
+              };
+            }
+            if (destination && !existing.destination) existing.destination = destination;
+            if (connectionId && !existing.connectionId) existing.connectionId = connectionId;
+            existing.updatedAt = timestamp;
+            state.captures[existing.id] = normalizeRecord(existing);
+            return state.captures[existing.id];
+          }
+          return normalizeRecord(existing);
+        }
+        const id = uuid();
+        const capture = { document: captureDocument, captureId: id, sources: [], includeSource: false };
+        const record = normalizeRecord({
+          version: CAPTURE_RECORD_VERSION,
+          id,
+          draftId: "",
+          scope: "regular",
+          status: DELIVERY_STATES.delivered,
+          capture,
+          syncedCapture: capture,
+          pendingCapture: null,
+          operation: "",
+          syncJournal: null,
+          context: {},
+          destination,
+          connectionId: connectionId || "",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          attemptCount: 0,
+          firstAttemptAt: 0,
+          lastAttemptAt: 0,
+          nextAttemptAt: 0,
+          lastError: null,
+          remote: nextRemote,
+          forceRetry: false,
+          importedFromNotion: true
+        });
+        state.captures[id] = record;
+        return record;
+      });
     }
   };
+}
+
+function compactRemoteId(value = "") {
+  return String(value || "").replaceAll("-", "").toLowerCase();
 }
 
 export function pruneCaptureState(state, timestamp = Date.now()) {

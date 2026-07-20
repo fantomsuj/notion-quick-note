@@ -141,7 +141,8 @@ function delegatePersistence(configuration) {
     "load", "save", "updateState", "importState", "getMeta", "getDraft", "getActiveDraft", "getCapture",
     "findCaptureByDraftId", "listDrafts", "listCaptures", "listDueCaptures", "countByStatus", "getOrCreateDraft",
     "upsertDraft", "activateDraft", "createEditDraft", "convertEditDraftToNew", "discardDraft", "enqueue",
-    "enqueueUpdate", "updateCapture", "claimCapture", "removeCapture", "maintain", "logicalBytes"
+    "enqueueUpdate", "updateCapture", "claimCapture", "removeCapture", "findCaptureByRemotePageId",
+    "ensureImportedRemoteCapture", "maintain", "logicalBytes"
   ]) {
     wrapper[method] = async (...args) => {
       await configuration.initialize();

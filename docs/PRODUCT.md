@@ -16,7 +16,7 @@ Make capturing a thought into Notion take one gesture, focus immediately, requir
 | Public auth | Notion OAuth through a broker | Keeps the mandatory client secret out of extension code |
 | Permissions | `activeTab` plus Notion API | Avoids always-on access to browsing data |
 | Draft ownership | One active regular-profile draft | A thought follows explicit invocations across tabs instead of appearing lost |
-| Recent editing | Five latest notes plus 30-day local search | Makes returning to prior work immediate without browsing history or workspace-wide Notion search |
+| Recent editing | Local drafts first, then five latest saved notes, plus recent Notion pages the integration can see | Makes returning to prior work immediate while still letting users pull in Notion-originating docs |
 | Capture persistence | One IndexedDB row per regular draft/capture; one session key per Incognito record | Keeps autosaves proportional to the note being edited and preserves atomic draft-to-queue transitions |
 | Recovery | Notes diagnostics plus JSON and Markdown export | Makes local storage health visible and gives users a credential-free escape hatch |
 | AI assist | Explicit on-device title and to-do actions with editable previews | Adds focused help without putting generation in the capture or Save path |
