@@ -44,7 +44,7 @@ Flylighter's differentiation is not just clipping. Its flows, formatted highligh
 ## Release gates
 
 - Verify refresh-token rotation and revocation against the deployed production broker
-- Configure Cloudflare rate limits for the OAuth broker and verify its origin gate in production
+- Deploy the repository-configured OAuth rate-limit binding and verify throttling, origin rejection, upstream timeouts, and secret-free request tracing in production
 - Test destination search indexing and automatic database creation across workspace roles
 - Verify the full Chrome Web Store privacy disclosure
 - Pin a stable production extension ID

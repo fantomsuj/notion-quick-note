@@ -64,16 +64,16 @@ Provisioning state is written before the database request. If Chrome closes or a
 
 ## Production OAuth
 
-Notion's public connection flow exchanges and refreshes tokens using a client ID and client secret. The secret must not ship in a browser extension, so `oauth-worker/` contains a small allowlisted broker for exchange, refresh, and revocation.
+Notion's public connection flow exchanges and refreshes tokens using a client ID and client secret. The secret must not ship in a browser extension, so `oauth-worker/` contains a small allowlisted broker for exchange, refresh, and revocation. The broker fails closed when its production bindings are incomplete, rate-limits each client and route at the edge, bounds Notion calls, and emits secret-free request telemetry with correlation IDs.
 
 1. Create a public Notion connection and copy its client ID and secret.
 2. Load the unpacked extension once and copy its extension ID from `chrome://extensions`.
 3. In the settings page console, run `chrome.identity.getRedirectURL('notion')` and add the result to the connection's redirect URIs.
-4. Copy `oauth-worker/wrangler.toml.example` to `oauth-worker/wrangler.toml` and fill in the extension ID/origin allowlists.
+4. Copy `oauth-worker/wrangler.toml.example` to `oauth-worker/wrangler.toml`, fill in the extension ID/origin allowlists, and assign an unused Cloudflare rate-limit namespace ID.
 5. Add the worker secrets with `wrangler secret put NOTION_CLIENT_ID` and `wrangler secret put NOTION_CLIENT_SECRET`, then deploy it.
 6. For local testing, set the public client ID and deployed broker URL in `src/product-config.js`, reload the extension, then choose **Connect Notion**.
 
-For a Web Store build, keep production values out of the development source and follow the deterministic packaging workflow in [`docs/RELEASE.md`](docs/RELEASE.md). Reserve the production extension ID, register its exact `chromiumapp.org` redirect in Notion, and exercise exchange/refresh/revocation against the deployed broker before packaging.
+For a Web Store build, keep production values out of the development source and follow the deterministic packaging workflow in [`docs/RELEASE.md`](docs/RELEASE.md). Reserve the production extension ID, register its exact `chromiumapp.org` redirect in Notion, and exercise exchange/refresh/revocation, throttling, health checks, and request tracing against the deployed broker before packaging.
 
 ## Architecture
 

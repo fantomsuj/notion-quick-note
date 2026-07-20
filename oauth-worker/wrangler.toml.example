@@ -6,6 +6,16 @@ compatibility_date = "2026-07-01"
 ALLOWED_EXTENSION_IDS = "your_chrome_extension_id"
 ALLOWED_ORIGINS = "chrome-extension://your_chrome_extension_id"
 
+# Replace the example namespace if 1001 is already used by another rate-limit
+# binding in this Cloudflare account. Namespace IDs must be positive integers.
+[[ratelimits]]
+name = "OAUTH_RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
 # Set secrets separately:
 # npx wrangler secret put NOTION_CLIENT_ID
 # npx wrangler secret put NOTION_CLIENT_SECRET
