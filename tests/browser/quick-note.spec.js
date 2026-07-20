@@ -20,6 +20,38 @@ async function mediaEvents(page) {
   return page.evaluate(() => window.mediaEvents);
 }
 
+async function installLanguageModel(page, options = {}) {
+  await page.evaluate(({ availability, mode }) => {
+    window.aiPrompts = [];
+    window.aiDestroyed = 0;
+    Object.defineProperty(window, "LanguageModel", {
+      configurable: true,
+      value: {
+        async availability() { return availability; },
+        async create(options) {
+          options.monitor?.({ addEventListener() {} });
+          return {
+            async prompt(prompt, promptOptions) {
+              window.aiPrompts.push({ prompt, promptOptions });
+              if (mode === "error") throw new Error("Model stopped unexpectedly");
+              if (mode === "empty-tasks") return JSON.stringify({ tasks: [] });
+              if (mode === "pending") {
+                return new Promise((_resolve, reject) => promptOptions.signal.addEventListener("abort", () => {
+                  reject(new DOMException("Cancelled", "AbortError"));
+                }, { once: true }));
+              }
+              return prompt.startsWith("Suggest one short")
+                ? JSON.stringify({ title: "Review launch plan" })
+                : JSON.stringify({ tasks: ["Email Sam", "Review the draft Friday"] });
+            },
+            destroy() { window.aiDestroyed += 1; }
+          };
+        }
+      }
+    });
+  }, { availability: options.availability || "available", mode: options.mode || "success" });
+}
+
 test("typing and player hotkeys stay inside Quick Note", async ({ page }) => {
   await openQuickNote(page);
   const editor = page.locator("#notion-quick-note-root .ProseMirror");
@@ -36,6 +68,149 @@ test("typing and player hotkeys stay inside Quick Note", async ({ page }) => {
   await more.focus();
   await more.press("m");
   expect(await mediaEvents(page)).toEqual([]);
+});
+
+test("on-device AI keeps title and to-dos in editable previews until explicitly applied", async ({ page }) => {
+  await installLanguageModel(page);
+  await openQuickNote(page, { title: "Launch source", url: "https://example.com/launch", selection: "" });
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("I should email Sam and review the draft Friday.");
+
+  await root.locator(".ai").evaluate((button) => button.addEventListener("click", (event) => {
+    window.aiClickWasTrusted = event.isTrusted;
+  }, { once: true }));
+  await root.locator(".ai").click();
+  expect(await page.evaluate(() => window.aiClickWasTrusted)).toBe(true);
+  await expect(root.locator(".ai-status")).toHaveText("Ready on this device.");
+  await root.locator('[data-ai-action="title"]').click();
+  await expect(root.locator(".ai-preview-title")).toHaveValue("Review launch plan");
+  await expect(root.locator(".page-title")).toHaveValue("");
+  await root.locator(".ai-preview-title").fill("Launch follow-ups");
+  await root.locator(".ai-apply-title").click();
+  await expect(root.locator(".page-title")).toHaveValue("Launch follow-ups");
+
+  await root.locator(".ai").click();
+  await expect(root.locator(".ai-status")).toHaveText("Ready on this device.");
+  await root.locator('[data-ai-action="todos"]').click();
+  await expect(root.locator(".ai-preview-todos")).toHaveValue("Email Sam\nReview the draft Friday");
+  await expect(root.locator('.ProseMirror ul[data-type="taskList"] > li')).toHaveCount(0);
+  await root.locator(".ai-preview-todos").fill("Email Sam\nReview launch draft next Friday");
+  await root.locator(".ai-insert-todos").click();
+  await expect(root.locator('.ProseMirror ul[data-type="taskList"] > li')).toHaveCount(2);
+  await expect(root.locator('.ProseMirror ul[data-type="taskList"] > li').nth(1)).toContainText("Review launch draft next Friday");
+  await expect(editor).toContainText("I should email Sam and review the draft Friday.");
+  expect(await page.evaluate(() => window.aiPrompts.length)).toBe(2);
+});
+
+test("AI preferences hide individual actions or the complete sparkle menu", async ({ page }) => {
+  await installLanguageModel(page);
+  await page.evaluate(() => {
+    window.settingsResponse.aiSuggestTitle = false;
+    window.settingsResponse.aiExtractTodos = true;
+  });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await expect(root.locator(".ai")).toBeVisible();
+  await root.locator(".ai").click();
+  await expect(root.locator('[data-ai-action="title"]')).toBeHidden();
+  await expect(root.locator('[data-ai-action="todos"]')).toBeVisible();
+
+  await page.evaluate(() => { window.settingsResponse.aiEnabled = false; });
+  await root.locator('[data-ai-action="todos"]').click();
+  await expect(root.locator(".toast")).toHaveText("This AI action is turned off in Settings.");
+  expect(await page.evaluate(() => window.aiPrompts.length)).toBe(0);
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(root).toHaveCount(0);
+  await page.evaluate(() => {
+    window.settingsResponse.aiEnabled = false;
+    window.currentDraft = null;
+  });
+  await openQuickNote(page);
+  await expect(page.locator("#notion-quick-note-root .ai")).toBeHidden();
+});
+
+test("AI actions fail closed when the note is blank or the local model is unavailable", async ({ page }) => {
+  await installLanguageModel(page);
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".ai").click();
+  await expect(root.locator(".ai-status")).toHaveText("Ready on this device.");
+  await root.locator('[data-ai-action="title"]').click();
+  await expect(root.locator(".toast")).toHaveText("Write something before using an AI action.");
+  expect(await page.evaluate(() => window.aiPrompts.length)).toBe(0);
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await installLanguageModel(page, { availability: "unavailable" });
+  await page.evaluate(() => { window.currentDraft = null; });
+  await openQuickNote(page);
+  const reopened = page.locator("#notion-quick-note-root");
+  await reopened.locator(".ProseMirror").fill("A note that remains editable.");
+  await reopened.locator(".ai").click();
+  await expect(reopened.locator(".ai-status")).toContainText("isn’t available");
+  await expect(reopened.locator('[data-ai-action="title"]')).toBeDisabled();
+  await expect(reopened.locator(".ProseMirror")).toContainText("A note that remains editable.");
+});
+
+test("AI action errors and empty extraction results leave the note unchanged", async ({ page }) => {
+  await installLanguageModel(page, { mode: "error" });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("Keep this original note.");
+  await root.locator(".ai").click();
+  await expect(root.locator(".ai-status")).toHaveText("Ready on this device.");
+  await root.locator('[data-ai-action="title"]').click();
+  await expect(root.locator(".ai-status")).toHaveText("Model stopped unexpectedly");
+  await expect(root.locator(".page-title")).toHaveValue("");
+  await expect(editor).toContainText("Keep this original note.");
+
+  await installLanguageModel(page, { mode: "empty-tasks" });
+  await root.locator('[data-ai-action="todos"]').click();
+  await expect(root.locator(".ai-status")).toHaveText("No clear action items found. Nothing changed.");
+  await expect(root.locator('.ProseMirror ul[data-type="taskList"] > li')).toHaveCount(0);
+  await expect(editor).toContainText("Keep this original note.");
+});
+
+test("AI to-dos cannot exceed the note limit or mutate a stale draft", async ({ page }) => {
+  await installLanguageModel(page);
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("x".repeat(7_950));
+  await root.locator(".ai").click();
+  await expect(root.locator(".ai-status")).toHaveText("Ready on this device.");
+  await root.locator('[data-ai-action="todos"]').click();
+  await expect(root.locator(".ai-preview-todos")).toBeVisible();
+  await root.locator(".ai-preview-todos").fill("y".repeat(100));
+  await root.locator(".ai-insert-todos").click();
+  await expect(root.locator(".toast")).toContainText("8,000-character note limit");
+  await expect(root.locator('.ProseMirror ul[data-type="taskList"] > li')).toHaveCount(0);
+
+  await root.locator(".ai-review-back").click();
+  await page.evaluate(() => { window.currentDraft.revision += 10; });
+  await editor.pressSequentially(" stale");
+  await expect(root.locator(".stale-banner")).toBeVisible();
+  await expect(root.locator(".ai")).toBeDisabled();
+  await root.locator('[data-ai-action="title"]').evaluate((button) => button.click());
+  expect(await page.evaluate(() => window.aiPrompts.length)).toBe(1);
+});
+
+test("dismissing the AI panel aborts hidden model work", async ({ page }) => {
+  await installLanguageModel(page, { mode: "pending" });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".ProseMirror").fill("A note with pending model work.");
+  await root.locator(".ai").click();
+  await expect(root.locator(".ai-status")).toHaveText("Ready on this device.");
+  await root.locator('[data-ai-action="title"]').click();
+  await expect(root.locator(".ai-status")).toHaveText("Suggesting a title…");
+  await page.keyboard.press("Escape");
+  await expect(root.locator(".ai-panel")).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.aiDestroyed)).toBe(1);
 });
 
 test("editing, composition, Tab trapping, Escape, and save shortcuts still work", async ({ page }) => {
@@ -103,6 +278,7 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   await page.evaluate(() => {
     window.recentNotes = [{
       id: "capture-recent",
+      source: "note",
       title: "Recently saved",
       preview: "A compact preview of the saved note body",
       destinationName: "Test Inbox",
@@ -131,6 +307,7 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   const root = page.locator("#notion-quick-note-root");
   await root.locator(".ProseMirror").fill("Unsaved local thought");
   await root.locator(".recent").click();
+  await expect(root.locator(".recent-section").first()).toContainText("Saved notes");
   await expect(root.locator(".recent-edit")).toContainText("Recently saved");
   await expect(root.locator(".recent-preview")).toHaveText("A compact preview of the saved note body");
   await root.locator(".recent-edit").click();
@@ -149,6 +326,91 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   const messages = await page.evaluate(() => window.runtimeMessages);
   expect(messages.some((message) => message.type === "UPSERT_DRAFT" && message.draft.doc.content[0]?.content?.[0]?.text === "Unsaved local thought")).toBe(true);
   expect(messages.some((message) => message.type === "LOAD_RECENT_NOTE" && message.id === "capture-recent")).toBe(true);
+});
+
+test("Recent buckets drafts above Notion pages and can pull a Notion doc into the composer", async ({ page }) => {
+  await page.evaluate(() => {
+    window.recentDrafts = [{
+      id: "draft-stashed",
+      source: "draft",
+      title: "Stashed draft",
+      preview: "Keep this thought nearby",
+      destinationName: "Local draft",
+      status: "draft",
+      mode: "new",
+      updatedAt: Date.now(),
+      editable: true
+    }];
+    window.recentNotes = [{
+      id: "capture-recent",
+      source: "note",
+      title: "Extension note",
+      preview: "Delivered from Quick Note",
+      destinationName: "Quick Notes",
+      status: "delivered",
+      updatedAt: Date.now() - 60_000,
+      remoteUrl: "https://www.notion.so/extension-note",
+      editable: true
+    }];
+    window.recentNotionPages = [{
+      id: "notionpageid000000000000000000",
+      source: "notion",
+      pageId: "notionpageid000000000000000000",
+      title: "Workspace spec",
+      preview: "",
+      destinationName: "Notion",
+      status: "notion",
+      updatedAt: Date.now() - 120_000,
+      remoteUrl: "https://www.notion.so/Workspace-spec",
+      editable: true
+    }];
+    window.recentDraftBodies = {
+      "draft-stashed": {
+        version: 2,
+        id: "draft-stashed",
+        tabId: 1,
+        sessionId: "session-test",
+        revision: 2,
+        mode: "new",
+        title: "Stashed draft",
+        sources: [],
+        doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Keep this thought nearby" }] }] }
+      }
+    };
+    window.notionPageDraft = {
+      version: 2,
+      id: "edit-notion",
+      tabId: 1,
+      sessionId: "session-test",
+      revision: 1,
+      mode: "edit",
+      targetRecordId: "imported-notion",
+      returnDraftId: "draft-test",
+      title: "Workspace spec",
+      sources: [],
+      doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Pulled from Notion" }] }] }
+    };
+  });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".recent").click();
+  await expect(root.locator(".recent-section")).toHaveCount(3);
+  await expect(root.locator(".recent-section").nth(0)).toContainText("Drafts");
+  await expect(root.locator(".recent-section").nth(1)).toContainText("Saved notes");
+  await expect(root.locator(".recent-section").nth(2)).toContainText("From Notion");
+  await expect(root.locator('.recent-row[data-source="draft"] .recent-edit')).toContainText("Stashed draft");
+  await expect(root.locator('.recent-row[data-source="note"] .recent-edit')).toContainText("Extension note");
+  await expect(root.locator('.recent-row[data-source="notion"] .recent-edit')).toContainText("Workspace spec");
+
+  await root.locator('.recent-row[data-source="notion"] .recent-edit').click();
+  await expect(root.locator(".page-title")).toHaveValue("Workspace spec");
+  await expect(root.locator(".ProseMirror")).toHaveText("Pulled from Notion");
+  await expect(root.locator(".edit-banner")).toContainText("Editing a recent note");
+
+  const messages = await page.evaluate(() => window.runtimeMessages);
+  expect(messages.some((message) => (
+    message.type === "LOAD_NOTION_PAGE" && message.pageId === "notionpageid000000000000000000"
+  ))).toBe(true);
 });
 
 test("closing restores page focus and media shortcuts immediately", async ({ page }) => {
@@ -464,6 +726,10 @@ test("Markdown rules, slash commands, and the selection toolbar create native ed
   await editor.pressSequentially("/");
   const slash = page.locator("#notion-quick-note-root .slash-menu");
   await expect(slash).toBeVisible();
+  await expect(slash.locator(".slash-group-label")).toHaveText(["Suggested", "Basic blocks", "Advanced blocks"]);
+  await expect(slash.locator(".slash-footer")).toContainText("Type '/' on the page");
+  await expect(slash.locator(".slash-footer")).toContainText("esc");
+  await expect(slash.locator("small")).toHaveCount(0);
   await expect(slash.locator("button").first()).toHaveAttribute("aria-selected", "true");
   await editor.press("ArrowDown");
   await editor.press("Enter");
@@ -474,6 +740,20 @@ test("Markdown rules, slash commands, and the selection toolbar create native ed
   await expect(page.locator("#notion-quick-note-root .bubble")).toBeVisible();
   await page.locator("#notion-quick-note-root .bubble [data-command=bold]").click();
   await expect(editor.locator("strong")).toHaveText("Section");
+});
+
+test("slash command filtering resets selection and removes unfiltered groups", async ({ page }) => {
+  await openQuickNote(page);
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+  await editor.pressSequentially("/");
+  await editor.press("ArrowDown");
+  await editor.pressSequentially("quo");
+
+  const slash = page.locator("#notion-quick-note-root .slash-menu");
+  await expect(slash.locator(".slash-group-label")).toHaveCount(0);
+  await expect(slash.locator("button")).toHaveCount(1);
+  await expect(slash.locator("button")).toHaveText("Quote\"");
+  await expect(slash.locator("button")).toHaveAttribute("aria-selected", "true");
 });
 
 test("slash commands stay inside the composer near its left and bottom edges", async ({ page }) => {

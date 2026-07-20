@@ -154,6 +154,30 @@
         </div>
       </section>
 
+      <section class="preferences" aria-labelledby="ai-preferences-heading">
+        <div class="preferences-heading">
+          <p class="kicker">On-device AI</p>
+          <h2 id="ai-preferences-heading">Prompt features</h2>
+          <p>AI actions run only when you choose one. Note content is processed by Chrome’s on-device model and is not sent to a cloud AI service.</p>
+        </div>
+        <div class="preference-controls">
+          <label class="toggle-row preference-master">
+            <span><b>Enable AI actions</b><small>Show the sparkle menu in the composer.</small></span>
+            <input id="ai-enabled" class="toggle" type="checkbox" checked>
+          </label>
+          <div id="ai-feature-controls" class="ai-feature-controls">
+            <label class="toggle-row">
+              <span><b>Suggest title</b><small>Create a short title from the note and attached source titles.</small></span>
+              <input id="ai-suggest-title" class="toggle" type="checkbox" checked>
+            </label>
+            <label class="toggle-row">
+              <span><b>Extract to-dos</b><small>Find action items and preview them as editable to-do blocks.</small></span>
+              <input id="ai-extract-todos" class="toggle" type="checkbox" checked>
+            </label>
+          </div>
+        </div>
+      </section>
+
       <section class="data-practices" aria-labelledby="data-practices-heading">
         <div class="data-practices-heading">
           <p class="kicker">Your data</p>
@@ -164,6 +188,7 @@
           <li><b>When you choose Save</b><span>Your reviewed capture is sent to the Notion workspace and destination you selected.</span></li>
           <li><b>Until it is safe</b><span>Queued notes stay on this device until delivery succeeds or you delete them. Inactive drafts and delivered history are removed after 30 days.</span></li>
           <li><b>In Incognito</b><span>Drafts and local history last only for that Incognito session. Saving still sends the capture to your selected Notion workspace.</span></li>
+          <li><b>When you use AI</b><span>Your note is processed by Chrome’s on-device model only after you choose an AI action. Generated text is not added until you review and apply it.</span></li>
         </ul>
         <p>Quick Note reads page details only when you open it. It does not continuously monitor browsing, run analytics, or show ads.</p>
       </section>

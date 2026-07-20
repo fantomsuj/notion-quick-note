@@ -10,6 +10,7 @@ import TaskList from "@tiptap/extension-task-list";
 import Underline from "@tiptap/extension-underline";
 import { MAX_CAPTURE_CHARACTERS, MAX_CAPTURE_TITLE_CHARACTERS } from "./constants.js";
 import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime-message.js";
+import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailability, suggestNoteTitle } from "./ai-note-actions.js";
 
 (() => {
   const PROTOCOL = 1;
@@ -17,7 +18,7 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
   const KEYBOARD_EVENTS = ["keydown", "keypress", "keyup"];
   const handledKeyboardEvents = new WeakSet();
   const slashCommands = [
-    { id: "text", label: "Text", hint: "Plain paragraph", keys: "/text", run: (editor) => editor.chain().focus().setParagraph().run() },
+    { id: "text", label: "Text", hint: "Plain paragraph", keys: "", run: (editor) => editor.chain().focus().setParagraph().run() },
     { id: "h1", label: "Heading 1", hint: "Large section heading", keys: "#", run: (editor) => editor.chain().focus().toggleHeading({ level: 1 }).run() },
     { id: "h2", label: "Heading 2", hint: "Medium section heading", keys: "##", run: (editor) => editor.chain().focus().toggleHeading({ level: 2 }).run() },
     { id: "h3", label: "Heading 3", hint: "Small section heading", keys: "###", run: (editor) => editor.chain().focus().toggleHeading({ level: 3 }).run() },
@@ -29,10 +30,12 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     { id: "divider", label: "Divider", hint: "Separate sections", keys: "---", run: (editor) => editor.chain().focus().setHorizontalRule().run() },
     { id: "code", label: "Code", hint: "Write a code block", keys: "```", run: (editor) => editor.chain().focus().toggleCodeBlock().run() }
   ];
+  const suggestedSlashCommandIds = ["text", "h1", "todo", "bullet"];
 
   let popup;
   let editor;
   let slashIndex = 0;
+  let lastSlashQuery = null;
 
   let disposed = false;
   const instances = new Set();
@@ -146,7 +149,10 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
       handoff: false,
       onFullscreenChange: null,
       removalCount: 0,
-      removalObserver: null
+      removalObserver: null,
+      aiController: null,
+      aiAvailability: "checking",
+      aiBusy: false
     };
     instances.add(instance);
     popup = instance;
@@ -300,6 +306,8 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     instance.draftTimer = null;
     instance.draftFeedbackTimer = null;
     instance.toastTimer = null;
+    instance.aiController?.abort();
+    instance.aiController = null;
     for (const timer of instance.timers) clearTimeout(timer);
     instance.timers.clear();
   }
@@ -466,6 +474,7 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     instance.userEdited = false;
     instance.editor.setEditable(true);
     root.querySelector(".page-title").readOnly = false;
+    configureAiFeatures(instance);
     instance.editor.commands.focus("end");
     updateEditorUi(root);
   }
@@ -511,6 +520,7 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
       element.textContent = instance.settings.destinationName || "Notion Inbox";
     });
     instance.root.querySelector(".setup").hidden = instance.settings.configured !== false;
+    configureAiFeatures(instance);
     renderSources(instance.root, instance);
   }
 
@@ -585,6 +595,8 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     const recentPanel = root.querySelector(".recent-panel");
     const recentButton = root.querySelector(".recent");
     const sourcePanel = root.querySelector(".source-panel");
+    const aiPanel = root.querySelector(".ai-panel");
+    const aiButton = root.querySelector(".ai");
 
     root.querySelector(".editor").addEventListener("beforeinput", () => {
       instance.userEdited = true;
@@ -617,6 +629,31 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
       recentButton.setAttribute("aria-expanded", String(willOpen));
       if (willOpen) void loadRecents(root, instance, "");
     });
+    aiButton.addEventListener("click", (event) => {
+      if (!event.isTrusted) return;
+      const willOpen = aiPanel.hidden;
+      closeTransientUi(root);
+      if (willOpen) {
+        void openAiPanel(instance);
+      } else {
+        aiPanel.hidden = true;
+        aiButton.setAttribute("aria-expanded", "false");
+      }
+    });
+    root.querySelector(".ai-panel-close").addEventListener("click", () => {
+      instance.aiController?.abort();
+      aiPanel.hidden = true;
+      aiButton.setAttribute("aria-expanded", "false");
+      aiButton.focus();
+    });
+    root.querySelectorAll("[data-ai-action]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        if (event.isTrusted) void runAiAction(instance, button.dataset.aiAction);
+      });
+    });
+    root.querySelector(".ai-review-back").addEventListener("click", () => showAiActions(root));
+    root.querySelector(".ai-apply-title").addEventListener("click", () => applyAiTitle(instance));
+    root.querySelector(".ai-insert-todos").addEventListener("click", () => insertAiTodos(instance));
     root.querySelector(".recent-search").addEventListener("input", (event) => {
       void loadRecents(root, instance, event.currentTarget.value);
     });
@@ -750,6 +787,236 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     });
   }
 
+  function configureAiFeatures(instance) {
+    const root = instance.root;
+    const enabled = instance.settings?.aiEnabled !== false;
+    const titleEnabled = enabled && instance.settings?.aiSuggestTitle !== false;
+    const todosEnabled = enabled && instance.settings?.aiExtractTodos !== false;
+    const anyEnabled = titleEnabled || todosEnabled;
+    root.querySelector(".ai").hidden = !anyEnabled;
+    root.querySelector(".ai").disabled = !anyEnabled || !aiActionsAllowed(instance);
+    root.querySelector('[data-ai-action="title"]').hidden = !titleEnabled;
+    root.querySelector('[data-ai-action="todos"]').hidden = !todosEnabled;
+    if (!anyEnabled) {
+      root.querySelector(".ai-panel").hidden = true;
+      root.querySelector(".ai").setAttribute("aria-expanded", "false");
+    }
+  }
+
+  function aiActionsAllowed(instance) {
+    return !instance.closed
+      && !instance.contextLost
+      && instance.editor?.isEditable !== false
+      && !instance.root.querySelector(".page-title").readOnly;
+  }
+
+  function aiActionEnabled(instance, action) {
+    if (instance.settings?.aiEnabled === false) return false;
+    if (action === "title") return instance.settings?.aiSuggestTitle !== false;
+    if (action === "todos") return instance.settings?.aiExtractTodos !== false;
+    return false;
+  }
+
+  async function refreshAiSettings(instance) {
+    const latest = await sendRuntimeMessage({ type: "GET_QUICK_SETTINGS" }, instance);
+    if (!latest || instance.closed) return false;
+    instance.settings = { ...instance.settings, ...latest };
+    configureAiFeatures(instance);
+    return true;
+  }
+
+  async function openAiPanel(instance) {
+    if (!aiActionsAllowed(instance) || !await refreshAiSettings(instance)) return;
+    const root = instance.root;
+    if (root.querySelector(".ai").hidden) {
+      showToast(root, "AI actions are turned off in Settings.", "error", instance);
+      return;
+    }
+    root.querySelector(".ai-panel").hidden = false;
+    root.querySelector(".ai").setAttribute("aria-expanded", "true");
+    showAiActions(root);
+    await refreshAiAvailability(instance);
+  }
+
+  async function refreshAiAvailability(instance) {
+    if (instance.closed || instance.aiBusy) return;
+    const root = instance.root;
+    instance.aiAvailability = "checking";
+    setAiActionButtonsDisabled(root, true);
+    setAiStatus(root, "Checking Chrome’s on-device model…");
+    const availability = await languageModelAvailability();
+    if (instance.closed || root.querySelector(".ai-panel").hidden) return;
+    instance.aiAvailability = availability;
+    setAiActionButtonsDisabled(root, availability === "unavailable");
+    if (availability === "unavailable") {
+      setAiStatus(root, "On-device AI isn’t available in this version of Chrome or on this device.", "error");
+    } else if (availability === "downloadable") {
+      setAiStatus(root, "Chrome will download its on-device model when you run an action.");
+    } else if (availability === "downloading") {
+      setAiStatus(root, "Chrome is downloading its on-device model. You can start now and keep this open.");
+    } else {
+      setAiStatus(root, "Ready on this device.");
+    }
+  }
+
+  async function runAiAction(instance, action) {
+    if (instance.aiBusy || !aiActionsAllowed(instance)) return;
+    const root = instance.root;
+    if (!await refreshAiSettings(instance) || !aiActionEnabled(instance, action)) {
+      showToast(root, "This AI action is turned off in Settings.", "error", instance);
+      return;
+    }
+    const note = instance.editor.getText().trim();
+    if (!note) {
+      showToast(root, "Write something before using an AI action.", "error", instance);
+      instance.editor.commands.focus();
+      return;
+    }
+
+    instance.aiBusy = true;
+    instance.aiController?.abort();
+    instance.aiController = new AbortController();
+    setAiActionButtonsDisabled(root, true);
+    root.querySelector(".ai-review").hidden = true;
+    root.querySelector(".ai-action-list").hidden = false;
+    setAiStatus(root, action === "title" ? "Suggesting a title…" : "Finding action items…");
+
+    const context = {
+      note,
+      pageTitle: instance.sources.some((source) => sameUrl(source.url, instance.page?.url)) ? instance.page?.title || "" : "",
+      sourceTitles: instance.sources.map((source) => source.title)
+    };
+    const contextKey = JSON.stringify(context);
+    const controller = instance.aiController;
+    const callbacks = {
+      signal: instance.aiController.signal,
+      availability: instance.aiAvailability,
+      onStateChange(state) {
+        if (state === "downloadable") setAiStatus(root, "Preparing Chrome’s on-device model…");
+        else if (state === "downloading") setAiStatus(root, "Downloading Chrome’s on-device model…");
+        else if (state === "generating") setAiStatus(root, action === "title" ? "Suggesting a title…" : "Finding action items…");
+      },
+      onDownloadProgress(progress) {
+        setAiStatus(root, `Downloading Chrome’s on-device model… ${Math.round(progress * 100)}%`);
+      }
+    };
+
+    try {
+      const result = action === "title"
+        ? await suggestNoteTitle(context, callbacks)
+        : await extractNoteTodos(context, callbacks);
+      const currentContextKey = JSON.stringify({
+        note: instance.editor.getText().trim(),
+        pageTitle: instance.sources.some((source) => sameUrl(source.url, instance.page?.url)) ? instance.page?.title || "" : "",
+        sourceTitles: instance.sources.map((source) => source.title)
+      });
+      if (instance.aiController !== controller || root.querySelector(".ai-panel").hidden || currentContextKey !== contextKey) return;
+      if (!await refreshAiSettings(instance) || !aiActionEnabled(instance, action) || !aiActionsAllowed(instance)) {
+        showToast(root, "This AI action was turned off before its result was applied.", "error", instance);
+        return;
+      }
+      if (action === "title") renderAiTitleReview(root, result);
+      else {
+        const tasks = result;
+        if (!tasks.length) {
+          setAiStatus(root, "No clear action items found. Nothing changed.");
+        } else renderAiTodosReview(root, tasks);
+      }
+      instance.aiAvailability = "available";
+    } catch (error) {
+      if (error?.name !== "AbortError" && !instance.closed) {
+        if (error?.code === "unavailable") instance.aiAvailability = "unavailable";
+        setAiStatus(root, error?.message || "On-device AI couldn’t finish this action.", "error");
+      }
+    } finally {
+      instance.aiBusy = false;
+      instance.aiController = null;
+      if (!instance.closed) setAiActionButtonsDisabled(root, instance.aiAvailability === "unavailable");
+    }
+  }
+
+  function renderAiTitleReview(root, title) {
+    root.querySelector(".ai-action-list").hidden = true;
+    root.querySelector(".ai-review").hidden = false;
+    root.querySelector(".ai-preview-title-wrap").hidden = false;
+    root.querySelector(".ai-preview-todos-wrap").hidden = true;
+    root.querySelector(".ai-preview-title").value = title;
+    root.querySelector(".ai-apply-title").hidden = false;
+    root.querySelector(".ai-insert-todos").hidden = true;
+    setAiStatus(root, "Review the suggestion before applying it.");
+    root.querySelector(".ai-preview-title").focus();
+    root.querySelector(".ai-preview-title").select();
+  }
+
+  function renderAiTodosReview(root, tasks) {
+    root.querySelector(".ai-action-list").hidden = true;
+    root.querySelector(".ai-review").hidden = false;
+    root.querySelector(".ai-preview-title-wrap").hidden = true;
+    root.querySelector(".ai-preview-todos-wrap").hidden = false;
+    root.querySelector(".ai-preview-todos").value = tasks.join("\n");
+    root.querySelector(".ai-apply-title").hidden = true;
+    root.querySelector(".ai-insert-todos").hidden = false;
+    setAiStatus(root, "Review one task per line before inserting.");
+    root.querySelector(".ai-preview-todos").focus();
+  }
+
+  function showAiActions(root) {
+    root.querySelector(".ai-review").hidden = true;
+    root.querySelector(".ai-action-list").hidden = false;
+    setAiStatus(root, "Ready on this device.");
+    root.querySelector("[data-ai-action]:not([hidden])")?.focus();
+  }
+
+  function applyAiTitle(instance) {
+    const root = instance.root;
+    if (!aiActionsAllowed(instance) || !aiActionEnabled(instance, "title")) return;
+    const value = root.querySelector(".ai-preview-title").value.replace(/\s+/g, " ").trim().slice(0, MAX_CAPTURE_TITLE_CHARACTERS);
+    if (!value) return showToast(root, "Add a title before applying it.", "error", instance);
+    root.querySelector(".page-title").value = value;
+    instance.userEdited = true;
+    scheduleDraft(instance);
+    closeTransientUi(root);
+    root.querySelector(".page-title").focus();
+    showToast(root, "Title applied", "success", instance);
+  }
+
+  function insertAiTodos(instance) {
+    const root = instance.root;
+    if (!aiActionsAllowed(instance) || !aiActionEnabled(instance, "todos")) return;
+    const tasks = root.querySelector(".ai-preview-todos").value.split(/\r?\n/)
+      .map(cleanNoteTask)
+      .filter(Boolean)
+      .slice(0, AI_NOTE_LIMITS.tasks);
+    if (!tasks.length) return showToast(root, "Keep at least one task before inserting.", "error", instance);
+    const currentCharacters = Array.from(instance.editor.getText()).length;
+    const insertedCharacters = tasks.reduce((total, task) => total + Array.from(task).length, tasks.length);
+    if (currentCharacters + insertedCharacters > MAX_CAPTURE_CHARACTERS) {
+      return showToast(root, "These to-dos would exceed the 8,000-character note limit. Shorten the note or the task list first.", "error", instance);
+    }
+    const taskList = {
+      type: "taskList",
+      content: tasks.map((task) => ({
+        type: "taskItem",
+        attrs: { checked: false },
+        content: [{ type: "paragraph", content: [{ type: "text", text: task }] }]
+      }))
+    };
+    instance.editor.chain().focus("end").insertContent(taskList).run();
+    closeTransientUi(root);
+    instance.editor.commands.focus("end");
+    showToast(root, `${tasks.length} ${tasks.length === 1 ? "to-do" : "to-dos"} inserted`, "success", instance);
+  }
+
+  function setAiActionButtonsDisabled(root, disabled) {
+    root.querySelectorAll("[data-ai-action]").forEach((button) => { button.disabled = disabled; });
+  }
+
+  function setAiStatus(root, text, tone = "") {
+    const status = root.querySelector(".ai-status");
+    status.textContent = text;
+    status.dataset.tone = tone;
+  }
+
   function renderSources(root, instance) {
     const sources = normalizeSources(instance.sources);
     instance.sources = sources;
@@ -803,44 +1070,135 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
       list.innerHTML = `<div class="popover-state error">${escapeHtml(response?.error || "Recent notes are unavailable.")}</div>`;
       return;
     }
-    renderRecents(root, instance, response.notes || []);
+    renderRecents(root, instance, {
+      drafts: response.drafts || [],
+      notes: response.notes || [],
+      notionPages: response.notionPages || [],
+      notionError: response.notionError || ""
+    });
   }
 
-  function renderRecents(root, instance, records) {
+  function renderRecents(root, instance, groups) {
     const list = root.querySelector(".recent-list");
-    if (!records.length) {
-      list.innerHTML = '<div class="popover-state">No matching notes in the last 30 days.</div>';
+    const drafts = (groups.drafts || []).filter((draft) => draft.id !== instance.draftId);
+    const notes = groups.notes || [];
+    const notionPages = groups.notionPages || [];
+    const nodes = [];
+    if (drafts.length) {
+      nodes.push(recentSectionHeading("Drafts", "Local work still in Quick Note"));
+      nodes.push(...drafts.map((record) => recentRow(root, instance, record)));
+    }
+    if (notes.length) {
+      nodes.push(recentSectionHeading("Saved notes", "Recently delivered from this extension"));
+      nodes.push(...notes.map((record) => recentRow(root, instance, record)));
+    }
+    if (notionPages.length) {
+      nodes.push(recentSectionHeading("From Notion", "Recently edited pages you can pull in"));
+      nodes.push(...notionPages.map((record) => recentRow(root, instance, record)));
+    } else if (groups.notionError) {
+      nodes.push(recentSectionHeading("From Notion", groups.notionError));
+    }
+    if (!nodes.length) {
+      list.innerHTML = '<div class="popover-state">No matching drafts or notes yet.</div>';
       return;
     }
-    list.replaceChildren(...records.map((record) => {
-      const row = document.createElement("div");
-      row.className = "recent-row";
-      const edit = document.createElement("button");
-      edit.type = "button";
-      edit.className = "recent-edit";
-      const title = document.createElement("b");
-      title.textContent = record.title || "Untitled";
-      const preview = document.createElement("span");
-      preview.className = "recent-preview";
-      preview.textContent = truncatePreview(record.preview, 90);
-      preview.hidden = !preview.textContent;
-      const metadata = document.createElement("small");
-      metadata.textContent = record.editable === false ? `${recentSubtitle(record)} · Open in Notion only` : recentSubtitle(record);
-      edit.append(title, preview, metadata);
-      edit.addEventListener("click", () => {
-        if (record.editable === false) return void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id }, instance);
-        return void openRecentNote(root, instance, record.id);
-      });
-      const openRemote = document.createElement("button");
-      openRemote.type = "button";
-      openRemote.className = "recent-open";
-      openRemote.innerHTML = icon("open");
-      openRemote.setAttribute("aria-label", `Open ${record.title || "note"} in Notion`);
-      openRemote.hidden = !record.remoteUrl || record.editable === false;
-      openRemote.addEventListener("click", () => void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id }, instance));
-      row.append(edit, openRemote);
-      return row;
-    }));
+    list.replaceChildren(...nodes);
+  }
+
+  function recentSectionHeading(title, subtitle) {
+    const heading = document.createElement("div");
+    heading.className = "recent-section";
+    const label = document.createElement("b");
+    label.textContent = title;
+    const hint = document.createElement("small");
+    hint.textContent = subtitle;
+    heading.append(label, hint);
+    return heading;
+  }
+
+  function recentRow(root, instance, record) {
+    const row = document.createElement("div");
+    row.className = "recent-row";
+    row.dataset.source = record.source || "note";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "recent-edit";
+    const title = document.createElement("b");
+    title.textContent = record.title || "Untitled";
+    const preview = document.createElement("span");
+    preview.className = "recent-preview";
+    preview.textContent = truncatePreview(record.preview, 90);
+    preview.hidden = !preview.textContent;
+    const metadata = document.createElement("small");
+    metadata.textContent = record.editable === false ? `${recentSubtitle(record)} · Open in Notion only` : recentSubtitle(record);
+    edit.append(title, preview, metadata);
+    edit.addEventListener("click", () => void openRecentItem(root, instance, record));
+    const openRemote = document.createElement("button");
+    openRemote.type = "button";
+    openRemote.className = "recent-open";
+    openRemote.innerHTML = icon("open");
+    openRemote.setAttribute("aria-label", `Open ${record.title || "note"} in Notion`);
+    openRemote.hidden = !record.remoteUrl || record.source === "draft";
+    openRemote.addEventListener("click", () => void sendRuntimeMessage({
+      type: "OPEN_CAPTURE_RESULT",
+      id: record.source === "notion" ? "" : record.id,
+      url: record.remoteUrl || ""
+    }, instance));
+    row.append(edit, openRemote);
+    return row;
+  }
+
+  async function openRecentItem(root, instance, record) {
+    if (record.source === "draft") return void openRecentDraft(root, instance, record.id);
+    if (record.source === "notion") return void openNotionPage(root, instance, record);
+    if (record.editable === false) {
+      return void sendRuntimeMessage({ type: "OPEN_CAPTURE_RESULT", id: record.id, url: record.remoteUrl || "" }, instance);
+    }
+    return void openRecentNote(root, instance, record.id);
+  }
+
+  async function openRecentDraft(root, instance, draftId) {
+    if (!draftId || draftId === instance.draftId) {
+      closeTransientUi(root);
+      return;
+    }
+    try {
+      clearTimeout(instance.draftTimer);
+      instance.draftTimer = null;
+      await persistDraft(instance);
+      setStatus(root, "Opening draft…");
+      const response = await sendRuntimeMessage({ type: "ACTIVATE_DRAFT", id: draftId, sessionId: instance.sessionId }, instance);
+      if (!response?.ok || !response.draft) throw new Error(response?.error || "Couldn’t open this draft.");
+      applyDraftToInstance(root, instance, response.draft);
+      closeTransientUi(root);
+      setStatus(root, "Editing draft");
+    } catch (error) {
+      setStatus(root, "Draft preserved");
+      showToast(root, error?.message || "Couldn’t open this draft.", "error", instance);
+    }
+  }
+
+  async function openNotionPage(root, instance, record) {
+    try {
+      clearTimeout(instance.draftTimer);
+      instance.draftTimer = null;
+      await persistDraft(instance);
+      setStatus(root, "Loading from Notion…");
+      const response = await sendRuntimeMessage({
+        type: "LOAD_NOTION_PAGE",
+        pageId: record.pageId || record.id,
+        title: record.title || "",
+        url: record.remoteUrl || "",
+        sessionId: instance.sessionId
+      }, instance);
+      if (!response?.ok || !response.draft) throw new Error(response?.error || "Couldn’t load this Notion page.");
+      applyDraftToInstance(root, instance, { ...response.draft, conflict: response.conflict });
+      closeTransientUi(root);
+      setStatus(root, "Editing Notion page");
+    } catch (error) {
+      setStatus(root, "Draft preserved");
+      showToast(root, error?.message || "Couldn’t load this Notion page.", "error", instance);
+    }
   }
 
   async function openRecentNote(root, instance, recordId) {
@@ -861,6 +1219,13 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
   }
 
   function recentSubtitle(record) {
+    if (record.source === "draft") {
+      const kind = record.mode === "edit" ? "Edit draft" : "Draft";
+      return `${kind} · ${relativeTime(record.updatedAt)}`;
+    }
+    if (record.source === "notion") {
+      return `Notion · ${relativeTime(record.updatedAt)}`;
+    }
     const destination = record.destinationName ? `${record.destinationName} · ` : "";
     const status = record.status === "blocked_conflict" ? "Conflict · local edit preserved" : relativeTime(record.updatedAt);
     return `${destination}${status}`;
@@ -1006,8 +1371,13 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
 
   function markStaleDraft(instance) {
     if (!instance || instance.closed) return;
+    instance.aiController?.abort();
     instance.editor?.setEditable(false);
     instance.root.querySelector(".page-title").readOnly = true;
+    instance.root.querySelector(".ai-panel").hidden = true;
+    instance.root.querySelector(".ai").disabled = true;
+    instance.root.querySelector(".ai").setAttribute("aria-expanded", "false");
+    setAiActionButtonsDisabled(instance.root, true);
     instance.root.querySelector(".stale-banner").hidden = false;
     setStatus(instance.root, "Updated in another tab");
   }
@@ -1342,15 +1712,50 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     const query = slashQuery();
     if (query === null) {
       slash.hidden = true;
+      lastSlashQuery = null;
       return;
     }
     const matches = slashCommands.filter((command) => `${command.label} ${command.id}`.toLowerCase().includes(query));
     if (!matches.length) {
       slash.hidden = true;
+      lastSlashQuery = query;
       return;
     }
-    slashIndex = Math.min(slashIndex, matches.length - 1);
-    slash.replaceChildren(...matches.map((command, index) => slashButton(command, index, root)));
+    if (query !== lastSlashQuery) slashIndex = 0;
+    lastSlashQuery = query;
+
+    const groups = query
+      ? [{ label: "", commands: matches }]
+      : [
+          { label: "Suggested", commands: suggestedSlashCommandIds.map((id) => slashCommands.find((command) => command.id === id)) },
+          { label: "Basic blocks", commands: slashCommands.filter((command) => command.id !== "code") },
+          { label: "Advanced blocks", commands: slashCommands.filter((command) => command.id === "code") }
+        ];
+    const scroll = document.createElement("div");
+    scroll.className = "slash-scroll";
+    let optionIndex = 0;
+    for (const group of groups) {
+      const section = document.createElement("div");
+      section.className = "slash-group";
+      section.setAttribute("role", "group");
+      if (group.label) {
+        const heading = document.createElement("div");
+        heading.className = "slash-group-label";
+        heading.textContent = group.label;
+        section.setAttribute("aria-label", group.label);
+        section.append(heading);
+      }
+      for (const command of group.commands) section.append(slashButton(command, optionIndex++, root));
+      scroll.append(section);
+    }
+
+    const footer = document.createElement("div");
+    footer.className = "slash-footer";
+    footer.setAttribute("aria-hidden", "true");
+    footer.innerHTML = `<span>Type '/' on the page</span><span>esc</span>`;
+    slash.replaceChildren(scroll, footer);
+    const optionCount = scroll.querySelectorAll("button").length;
+    slashIndex = Math.min(slashIndex, optionCount - 1);
     slash.hidden = false;
     positionSlashMenu(root, slash, editor.state.selection.from);
     setSlashActive([...slash.querySelectorAll("button")]);
@@ -1370,7 +1775,8 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     button.className = "slash-item";
     button.dataset.index = String(index);
     button.setAttribute("role", "option");
-    button.innerHTML = `<span class="command-icon">${commandIcon(command.id)}</span><span><b>${command.label}</b><small>${command.hint}</small></span><kbd>${command.keys}</kbd>`;
+    button.setAttribute("aria-label", `${command.label}, ${command.hint}`);
+    button.innerHTML = `<span class="command-icon">${commandIcon(command.id)}</span><span class="slash-label">${command.label}</span><kbd>${command.keys}</kbd>`;
     button.addEventListener("mousedown", (event) => event.preventDefault());
     button.addEventListener("click", () => {
       const { $from } = editor.state.selection;
@@ -1504,7 +1910,11 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
 
   function closeTransientUi(root) {
     let closed = false;
-    for (const selector of [".page-menu", ".recent-panel", ".source-panel", ".slash-menu", ".format-menu", ".link-editor"]) {
+    if (!root.querySelector(".ai-panel").hidden) {
+      const instance = [...instances].find((candidate) => candidate.root === root);
+      instance?.aiController?.abort();
+    }
+    for (const selector of [".page-menu", ".recent-panel", ".source-panel", ".ai-panel", ".slash-menu", ".format-menu", ".link-editor"]) {
       const element = root.querySelector(selector);
       if (!element.hidden) {
         element.hidden = true;
@@ -1514,6 +1924,7 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
     delete root.querySelector(".link-editor").dataset.open;
     root.querySelector(".more").setAttribute("aria-expanded", "false");
     root.querySelector(".recent").setAttribute("aria-expanded", "false");
+    root.querySelector(".ai").setAttribute("aria-expanded", "false");
     return closed;
   }
 
@@ -1548,8 +1959,18 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
   }
 
   function commandIcon(id) {
-    const icons = { text: "T", h1: "H1", h2: "H2", h3: "H3", bullet: "•", number: "1.", todo: "☐", toggle: "▸", quote: "\"", divider: "—", code: "<>" };
-    return icons[id] || "T";
+    const type = { text: "T", h1: "H1", h2: "H2", h3: "H3" };
+    if (type[id]) return `<span class="command-type" aria-hidden="true">${type[id]}</span>`;
+    const paths = {
+      bullet: '<circle cx="4" cy="5" r="1" fill="currentColor"/><circle cx="4" cy="10" r="1" fill="currentColor"/><circle cx="4" cy="15" r="1" fill="currentColor"/><path d="M8 5h10M8 10h10M8 15h10" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.35"/>',
+      number: '<path d="M2.8 4.6h1.8V2.7L3 3.5M2.8 9.5c.15-1 .7-1.55 1.45-1.55.7 0 1.2.4 1.2 1 0 .85-1 1.5-2.55 3h2.7M3 15.2c.25.55.75.85 1.35.85.75 0 1.25-.4 1.25-1.05 0-.7-.55-1-1.35-1h-.6l1.6-1.7H3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.15"/><path d="M9 5h9M9 10h9M9 15h9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.35"/>',
+      todo: '<path d="m2.5 5.4 1.5 1.5 2.8-3.2M9 5.5h9M2.5 12.5h4v4h-4zM9 14.5h9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"/>',
+      toggle: '<path d="m3.5 3.5 3 2.5-3 2.5M10 6h8M3.5 11.5l3 2.5-3 2.5M10 14h8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"/>',
+      quote: '<path d="M4.25 6.5h3.5v3.6c0 2.4-1.1 4-3.3 4.9M12.25 6.5h3.5v3.6c0 2.4-1.1 4-3.3 4.9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.45"/>',
+      divider: '<path d="M2.5 10h17" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.35"/>',
+      code: '<path d="m7.5 5-5 5 5 5M14.5 5l5 5-5 5M12 3 9 17" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"/>'
+    };
+    return `<svg class="command-svg" viewBox="0 0 22 20" aria-hidden="true">${paths[id] || ""}</svg>`;
   }
 
   function icon(name) {
@@ -1558,6 +1979,7 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
       close: '<path d="m4 4 8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/>',
       more: '<circle cx="3.25" cy="8" r="1" fill="currentColor"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="12.75" cy="8" r="1" fill="currentColor"/>',
       recent: '<path d="M3.2 5.25A5.25 5.25 0 1 1 2.75 9M3.2 5.25V2.8M3.2 5.25H5.7M8 5v3.35l2.2 1.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"/>',
+      sparkle: '<path d="M8 1.8c.35 2.65 1.55 3.85 4.2 4.2C9.55 6.35 8.35 7.55 8 10.2 7.65 7.55 6.45 6.35 3.8 6 6.45 5.65 7.65 4.45 8 1.8ZM12.3 9.4c.18 1.38.82 2.02 2.2 2.2-1.38.18-2.02.82-2.2 2.2-.18-1.38-.82-2.02-2.2-2.2 1.38-.18 2.02-.82 2.2-2.2Z" fill="currentColor"/>',
       search: '<circle cx="7" cy="7" r="3.75" fill="none" stroke="currentColor" stroke-width="1.35"/><path d="m10 10 3 3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.35"/>',
       source: '<path d="M6.2 9.8 9.8 6.2M5.15 11.35l-1 .95a2.45 2.45 0 0 1-3.45-3.45l2.2-2.2a2.45 2.45 0 0 1 3.45 0M10.85 4.65l1-.95a2.45 2.45 0 0 1 3.45 3.45l-2.2 2.2a2.45 2.45 0 0 1-3.45 0" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.3"/>',
       open: '<path d="M6 3.5H3.75a1.25 1.25 0 0 0-1.25 1.25v7.5a1.25 1.25 0 0 0 1.25 1.25h7.5a1.25 1.25 0 0 0 1.25-1.25V10M8.5 2.5h5v5M13.25 2.75 7 9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"/>',
@@ -1576,6 +1998,7 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
           <div class="top-actions">
             <button class="top-button more" type="button" aria-label="Note options" aria-haspopup="menu" aria-expanded="false">${icon("more")}</button>
             <button class="top-button recent" type="button" aria-label="Recent notes" aria-haspopup="dialog" aria-expanded="false">${icon("recent")}</button>
+            <button class="top-button ai" type="button" aria-label="AI actions" aria-haspopup="dialog" aria-expanded="false" hidden>${icon("sparkle")}</button>
             <button class="safe-close" type="button" hidden>Close safely</button>
             <button class="save" type="button" data-action="save">Save</button>
             <button class="top-button close" type="button" aria-label="Close Quick Note">${icon("close")}</button>
@@ -1592,8 +2015,8 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
           <div class="menu-shortcut"><span>Save note</span><kbd>⌘ ⇧ ↵</kbd></div>
         </div>
         <section class="recent-panel popover-panel" role="dialog" aria-label="Recent notes" hidden>
-          <div class="popover-heading"><div><b>Recent notes</b><small>Edit your latest saved notes</small></div></div>
-          <label class="recent-search-wrap">${icon("search")}<input class="recent-search" type="search" autocomplete="off" placeholder="Search the last 30 days" aria-label="Search recent notes"></label>
+          <div class="popover-heading"><div><b>Recent</b><small>Drafts, saved notes, and Notion pages</small></div></div>
+          <label class="recent-search-wrap">${icon("search")}<input class="recent-search" type="search" autocomplete="off" placeholder="Search drafts and Notion" aria-label="Search recent notes"></label>
           <div class="recent-list"></div>
         </section>
         <section class="source-panel popover-panel" role="dialog" aria-label="Attached sources" hidden>
@@ -1601,6 +2024,20 @@ import { enqueueWithReconciliation, withRuntimeMessageDeadline } from "./runtime
           <div class="source-list"></div>
           <div class="source-empty" hidden>No pages are attached.</div>
           <button class="add-current-source" type="button">${icon("source")} Add this page</button>
+        </section>
+        <section class="ai-panel popover-panel" role="dialog" aria-label="AI actions" hidden>
+          <div class="popover-heading"><div><b>AI actions</b><small>Runs on this device only when you choose</small></div><button class="ai-panel-close" type="button" aria-label="Close AI actions">${icon("close")}</button></div>
+          <div class="ai-action-list">
+            <button class="ai-action" type="button" data-ai-action="title"><span class="ai-action-icon">${icon("sparkle")}</span><span><b>Suggest title</b><small>Create a short title for this note</small></span></button>
+            <button class="ai-action" type="button" data-ai-action="todos"><span class="ai-action-icon">${icon("check")}</span><span><b>Extract to-dos</b><small>Find action items and preview task blocks</small></span></button>
+          </div>
+          <div class="ai-review" hidden>
+            <label class="ai-preview-title-wrap"><span>Suggested title</span><input class="ai-preview-title" type="text" maxlength="${MAX_CAPTURE_TITLE_CHARACTERS}" autocomplete="off"></label>
+            <label class="ai-preview-todos-wrap" hidden><span>To-dos · one per line</span><textarea class="ai-preview-todos" rows="6"></textarea></label>
+            <div class="ai-review-actions"><button class="ai-review-back" type="button">Back</button><button class="ai-apply-title" type="button">Apply title</button><button class="ai-insert-todos" type="button" hidden>Insert below</button></div>
+          </div>
+          <p class="ai-status" role="status" aria-live="polite"></p>
+          <p class="ai-privacy">Generated text stays separate until you apply it. Saving never depends on AI.</p>
         </section>
         <div class="edit-banner" hidden><span class="edit-banner-copy">Editing a recent note</span><span class="conflict-actions" hidden><button class="reload-remote" type="button">Reload latest</button><button class="save-conflict-new" type="button">Save as new</button><button class="open-conflict-remote" type="button">Open in Notion</button></span><button class="return-draft" type="button">Back to stashed draft</button></div>
         <div class="stale-banner" hidden><span>This composer is out of date and is now read-only.</span><button class="reload-draft" type="button">Reload latest</button></div>

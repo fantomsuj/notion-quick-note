@@ -266,6 +266,31 @@ test("editing a recent note reuses its capture record and reactivates the stashe
   assert.equal(state.activeDraftId, stashed.id);
 });
 
+test("imported Notion pages reuse a delivered capture keyed by remote page id", async () => {
+  const storage = memoryStorage();
+  let id = 0;
+  const repository = createCaptureRepository({ storage, uuid: () => `id-${++id}`, now: () => 100 });
+  const first = await repository.ensureImportedRemoteCapture({
+    pageId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    title: "Spec",
+    url: "https://www.notion.so/Spec",
+    connectionId: "connection",
+    destination: { destinationType: "page", destinationName: "Spec" }
+  });
+  const again = await repository.ensureImportedRemoteCapture({
+    pageId: "aaaaaaaabbbbccccddddeeeeeeeeeeee",
+    title: "Spec updated",
+    url: "https://www.notion.so/Spec-updated"
+  });
+  const found = await repository.findCaptureByRemotePageId("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+  assert.equal(first.id, again.id);
+  assert.equal(found.id, first.id);
+  assert.equal(again.status, DELIVERY_STATES.delivered);
+  assert.equal(again.remote.kind, "page");
+  assert.equal(again.remote.url, "https://www.notion.so/Spec-updated");
+  assert.equal(again.importedFromNotion, true);
+});
+
 test("quota failure rejects the durable write instead of accepting a capture", async () => {
   const repository = createCaptureRepository({
     storage: memoryStorage(),
