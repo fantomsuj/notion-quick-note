@@ -151,6 +151,7 @@ input:focus { border-color: var(--nqn-focus); box-shadow: 0 0 0 2px color-mix(in
 .shortcut-card small, .shortcut-card b { display: block; }
 .shortcut-card small { color: var(--nqn-text-secondary); font-size: 10px; }
 .shortcut-card b { margin-top: 2px; font-size: 13px; font-weight: 500; }
+.shortcut-keys { display: flex; gap: 6px; }
 kbd { padding: 6px 9px; border: 1px solid var(--nqn-border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--nqn-surface); font: 500 12px/1 var(--nqn-font); white-space: nowrap; }
 .ready-actions { display: flex; gap: 8px; margin-top: 20px; }
 .preferences { display: grid; grid-template-columns: minmax(180px, .75fr) minmax(0, 1.6fr); gap: 10px 32px; margin-top: 18px; padding: 22px 24px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-panel); background: var(--nqn-surface); }

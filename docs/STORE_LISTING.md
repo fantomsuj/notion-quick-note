@@ -4,13 +4,13 @@
 
 **Name:** Notion Quick Note
 
-**Single purpose:** Capture a reviewed note, selected text, and optional source-page context into a user-selected Notion page or database without leaving the active tab.
+**Single purpose:** Keep a reviewed note beside your tabs and save it with removable source-page context to a user-selected Notion page or database.
 
 **Short description:** Capture a thought into Notion without leaving the page you're on.
 
 **Detailed description:**
 
-> Open a compact Quick Note from the toolbar, a keyboard shortcut, or the selected-text context menu. Review and format your note, optionally attach the active page title and URL, then save it to a Notion page or database you choose.
+> Open a compact Quick Note side panel from the toolbar, an in-browser keyboard shortcut, a system-wide keyboard shortcut, or the selected-text context menu. It remains open as you switch tabs, automatically attaching each active page's title and URL. Remove an unwanted source with one click and it stays dismissed for that draft.
 >
 > On supported Chrome desktop devices, optional AI actions can suggest a title or extract editable to-dos using Chrome's on-device language model. These actions run only when you choose them, have no cloud AI fallback, and never change or save a note until you review and apply the preview. A master setting and separate feature toggles let you turn them off.
 >
@@ -22,7 +22,7 @@
 >
 > If you explicitly enable the extension in Incognito, Incognito drafts, queued notes, and local history remain session-only. Saving still sends the capture to your selected Notion workspace.
 >
-> Quick Note reads active-page details only when you invoke it. It uses Notion's OAuth flow for production connections and does not continuously read browsing activity, run analytics, show ads, or load remote program code.
+> Quick Note reads the active tab's title and URL while the Quick Note side panel is open, and stops when the panel closes. It does not automatically read page bodies, selected text, background tabs, or browsing history. It uses Notion's OAuth flow for production connections and does not run analytics, show ads, or load remote program code.
 >
 > Notion Quick Note is an independent product and is not endorsed by Notion Labs, Inc.
 
@@ -32,17 +32,16 @@ Recommended category: **Productivity**.
 
 | Permission | Dashboard justification |
 |---|---|
-| `activeTab` | Temporarily accesses the active tab only after the user clicks the extension, invokes its shortcut, or chooses its context-menu command, so the user can review the page title, URL, and selected text before saving. |
-| `scripting` | Injects the locally packaged Quick Note composer and collects the user-invoked active-page context. No script is injected continuously. |
 | `contextMenus` | Adds “Save selection to Notion Quick Note” to the selection context menu. |
 | `identity` | Opens Notion's OAuth authorization flow and receives its callback through Chrome's identity redirect. |
 | `storage` | Stores the current Notion access token, an opaque broker connection handle, settings, and a small capture index in extension-scoped storage. A non-exportable signing key used to prove refresh, revoke, and replaced-connection cleanup requests is kept in the extension's local IndexedDB database, alongside regular capture records. Incognito drafts and queue records use memory-backed session keys. |
 | `alarms` | Wakes the service worker for scheduled retry of captures that could not be delivered immediately. |
-| `sidePanel` | Opens a Chrome side-panel fallback when the in-page composer cannot run, such as on restricted pages or PDFs. |
+| `sidePanel` | Opens the persistent Quick Note composer beside webpages so it remains available while the user switches tabs. |
+| `tabs` | Reads only the active tab's title and URL while the Quick Note side panel is open so those visible page references can be attached to the draft and removed by the user. It does not grant access to page bodies. |
 | `https://api.notion.com/*` | Sends user-approved captures to Notion and searches, validates, creates, or updates the user's chosen Notion destination. |
 | Production OAuth broker origin (optional) | Requested only when the user chooses Connect Notion; used to create a one-time authorization transaction, exchange the authorization code, and make device-signed refresh and revocation requests. The broker stores the rotating refresh credential encrypted at rest and returns only an opaque connection handle. The release packager narrows access to the exact production origin. |
 
-The `<all_urls>` match appears only on three web-accessible packaged design resources used by the gesture-injected composer: its two CSS files and local font files. It is not a host permission and does not grant page access.
+The `<all_urls>` match appears only on three packaged design resources used by the composer: its two CSS files and local font files. It is not a host permission and does not grant page access.
 
 ## Privacy Practices answers
 
@@ -50,7 +49,7 @@ Confirm the dashboard's current wording before submission. Based on current beha
 
 - **Authentication information:** the current Notion OAuth access token and opaque connection handle stored by the extension; a non-exportable device signing key stored only in extension-local IndexedDB; and the rotating Notion refresh credential stored encrypted by the OAuth broker.
 - **Website content:** selected text and the page title/URL attached to a capture.
-- **Web history / browsing activity:** the active page title and URL, accessed only when the user invokes Quick Note and used only for the capture feature.
+- **Web history / browsing activity:** the active tab's title and URL while the Quick Note side panel is open, used only to show removable source references in the current draft. Background tabs and prior browsing history are not read.
 
 Do not select advertising, analytics, personalization, or sale/transfer uses. Certify that data is used only for the extension's single purpose, is not sold, is not used for credit or lending, and is not used for personalized advertising. Supply the public URL hosting [`PRIVACY.md`](../PRIVACY.md), after replacing its contact placeholder.
 
@@ -66,5 +65,5 @@ Reviewer notes should include:
 
 - A test Notion account or clear steps for completing OAuth.
 - The exact user gesture needed to see active-page capture.
-- How to test toolbar, shortcut, selection context menu, side-panel fallback, disconnect/revocation, and Incognito.
+- How to test the toolbar, browser-scoped and global shortcuts, selection context menu, persistent side panel, automatic source removal/dismissal, extension-tab fallback, disconnect/revocation, and Incognito.
 - A statement that the OAuth broker contains the client secret, holds rotating refresh credentials encrypted for at most 180 days of inactivity, and returns only an opaque handle; the submitted ZIP contains no remote executable code.

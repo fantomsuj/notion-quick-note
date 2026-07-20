@@ -1,7 +1,22 @@
-// @ts-nocheck
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker, { OAuthSession } from "../oauth-worker/src/index.js";
+import type {
+  ConfiguredOAuthWorkerEnv,
+  OAuthConnectionRecord,
+  OAuthRateLimiter,
+  OAuthSessionId,
+  OAuthSessionNamespace,
+  OAuthSessionState,
+  OAuthStoredRecord,
+  OAuthTransactionRecord,
+  WorkerFetch
+} from "../oauth-worker/src/contracts.js";
+
+interface NotionCall {
+  url: string;
+  body: Record<string, unknown>;
+}
 
 const EXTENSION_ID = "abcdefghijklmnopabcdefghijklmnop";
 const ORIGIN = `chrome-extension://${EXTENSION_ID}`;
@@ -62,9 +77,9 @@ test("start creates an alarm-backed ten-minute transaction for an exact redirect
 });
 
 test("exchange atomically consumes state and stores only an encrypted refresh token in a per-connection object", async () => {
-  const calls = [];
+  const calls: NotionCall[] = [];
   const env = makeEnv(async (url, options) => {
-    calls.push({ url, body: JSON.parse(options.body) });
+    calls.push({ url: String(url), body: requestBody(options) });
     return notionResponse(tokenPayload("access-one", "refresh-one"));
   });
   const keys = await makeSigningKeys();
@@ -79,12 +94,13 @@ test("exchange atomically consumes state and stores only an encrypted refresh to
   assert.equal(calls.length, 1);
 
   const successResponse = responses.find((response) => response.status === 200);
+  assert.ok(successResponse);
   const payload = await successResponse.json();
   assert.equal(payload.access_token, "access-one");
   assert.equal(payload.refresh_token, undefined);
   assert.match(payload.connection_handle, /^[A-Za-z0-9_-]{43}$/);
   assert.equal((await env.OAUTH_SESSIONS.storage(`transaction:${state}`).get("record")), undefined);
-  assert.deepEqual(calls[0].body, {
+  assert.deepEqual(requiredItem(calls, 0).body, {
     grant_type: "authorization_code",
     code: "authorization-code",
     redirect_uri: REDIRECT_URI
@@ -138,13 +154,23 @@ test("exchange validates the complete Notion response and preserves Notion error
   }), deniedEnv);
   assert.equal(denied.status, 401);
   assert.deepEqual(await denied.json(), { code: "unauthorized", message: "Denied" });
+
+  const malformedEnv = makeEnv(async () => notionResponse({
+    ...tokenPayload("access", "refresh"),
+    workspace_name: 42
+  }));
+  const malformedState = await start(malformedEnv, keys.publicJwk);
+  const malformed = await worker.fetch(request("/exchange", {
+    code: "code", redirect_uri: REDIRECT_URI, state: malformedState
+  }), malformedEnv);
+  assert.equal(malformed.status, 502);
 });
 
 test("refresh verifies proof, rotates custody, rejects replay, and renews the inactivity alarm", async () => {
-  const calls = [];
+  const calls: NotionCall[] = [];
   const env = makeEnv(async (url, options) => {
-    const body = JSON.parse(options.body);
-    calls.push({ url, body });
+    const body = requestBody(options);
+    calls.push({ url: String(url), body });
     return notionResponse(body.grant_type === "authorization_code"
       ? tokenPayload("access-one", "refresh-one")
       : tokenPayload("access-two", "refresh-two"));
@@ -162,7 +188,7 @@ test("refresh verifies proof, rotates custody, rejects replay, and renews the in
     bot_id: "bot-id",
     workspace_id: "workspace-id"
   });
-  assert.deepEqual(calls[1].body, { grant_type: "refresh_token", refresh_token: "refresh-one" });
+  assert.deepEqual(requiredItem(calls, 1).body, { grant_type: "refresh_token", refresh_token: "refresh-one" });
   const record = await storage.get("record");
   assert.equal(JSON.stringify(record).includes("refresh-two"), false);
   assert.equal(record.nonces[proof.nonce] > Date.now(), true);
@@ -174,15 +200,16 @@ test("refresh verifies proof, rotates custody, rejects replay, and renews the in
 });
 
 test("concurrent refreshes allow exactly one rotation and deny the other while it is in progress", async () => {
-  let releaseRefresh;
-  const refreshStarted = new Promise((resolve) => { releaseRefresh = resolve; });
-  let signalStarted;
-  const started = new Promise((resolve) => { signalStarted = resolve; });
+  let releaseRefresh: (() => void) | undefined;
+  const refreshStarted = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let signalStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
   let refreshCalls = 0;
   const env = makeEnv(async (_url, options) => {
-    const body = JSON.parse(options.body);
+    const body = requestBody(options);
     if (body.grant_type === "authorization_code") return notionResponse(tokenPayload("access-one", "refresh-one"));
     refreshCalls += 1;
+    assert.ok(signalStarted);
     signalStarted();
     await refreshStarted;
     return notionResponse(tokenPayload("access-two", "refresh-two"));
@@ -197,6 +224,7 @@ test("concurrent refreshes allow exactly one rotation and deny the other while i
   const second = await worker.fetch(request("/refresh", secondProof), env);
   assert.equal(second.status, 409);
   assert.match((await second.json()).error, /in progress/);
+  assert.ok(releaseRefresh);
   releaseRefresh();
   const first = await firstPromise;
   assert.equal(first.status, 200);
@@ -206,11 +234,12 @@ test("concurrent refreshes allow exactly one rotation and deny the other while i
 test("a stale operation lease recovers while a Notion timeout releases its live lease", async () => {
   let timeOutRefresh = false;
   const env = makeEnv(async (_url, options) => {
-    const body = JSON.parse(options.body);
+    const body = requestBody(options);
     if (body.grant_type === "authorization_code") return notionResponse(tokenPayload("access-one", "refresh-one"));
     if (timeOutRefresh) {
-      return new Promise((_resolve, reject) => {
+      return new Promise<Response>((_resolve, reject) => {
         const keepAlive = setTimeout(() => reject(new Error("timeout signal did not fire")), 100);
+        assert.ok(options.signal);
         options.signal.addEventListener("abort", () => {
           clearTimeout(keepAlive);
           reject(options.signal.reason);
@@ -243,7 +272,7 @@ test("refresh rejects expired and forged proofs without forwarding", async () =>
   let calls = 0;
   const env = makeEnv(async (_url, options) => {
     calls += 1;
-    if (JSON.parse(options.body).grant_type === "authorization_code") {
+    if (requestBody(options).grant_type === "authorization_code") {
       return notionResponse(tokenPayload("access", "refresh"));
     }
     throw new Error("refresh must not be forwarded");
@@ -271,13 +300,12 @@ test("refresh rejects expired and forged proofs without forwarding", async () =>
 test("revoke deletes local custody even when Notion rejects revocation", async () => {
   const env = makeEnv(async (url, options) => {
     if (url.endsWith("/token")) return notionResponse(tokenPayload("access", "refresh"));
-    assert.deepEqual(JSON.parse(options.body), { token: "access" });
+    assert.deepEqual(requestBody(options), { token: "access" });
     return notionResponse({ code: "service_unavailable" }, 503);
   });
   const keys = await makeSigningKeys();
   const handle = await connect(env, keys.publicJwk);
-  const proof = await makeProof(keys.privateKey, "/revoke", handle, "access");
-  proof.token = "access";
+  const proof = { ...(await makeProof(keys.privateKey, "/revoke", handle, "access")), token: "access" };
 
   const response = await worker.fetch(request("/revoke", proof), env);
   assert.equal(response.status, 503);

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import test from "node:test";
 import assert from "node:assert/strict";
 import { IDBFactory } from "fake-indexeddb";
@@ -10,7 +9,18 @@ import {
   retireOAuthConnection,
   revokeAccessToken
 } from "../src/oauth.js";
-import { createOAuthDeviceKeyStore, generateOAuthDeviceKeyPair } from "../src/oauth-device.js";
+import type { OAuthFetch } from "../src/oauth.js";
+import {
+  OAuthDeviceUnavailableError,
+  createOAuthDeviceKeyStore,
+  generateOAuthDeviceKeyPair
+} from "../src/oauth-device.js";
+import type { OAuthDeviceKeyStore } from "../src/oauth-device.js";
+
+interface BrokerCall {
+  url: string;
+  body: Record<string, unknown>;
+}
 
 const redirectUri = "https://extension.chromiumapp.org/notion";
 
@@ -36,16 +46,17 @@ test("does not silently create a different device key in split incognito storage
   });
   await assert.rejects(
     keyStore.getOrCreateKeyPair(),
-    (error) => error.code === "oauth_device_unavailable" && /regular window/i.test(error.message)
+    (error) => error instanceof OAuthDeviceUnavailableError && /regular window/i.test(error.message)
   );
 });
 
 test("uses the device-bound broker routes for the OAuth lifecycle", async () => {
   const keyPair = await generateOAuthDeviceKeyPair();
   const keyStore = memoryKeyStore(keyPair);
-  const calls = [];
-  const fetchImpl = async (url, options) => {
-    const body = JSON.parse(options.body);
+  const calls: BrokerCall[] = [];
+  const fetchImpl: OAuthFetch = async (input, options) => {
+    const url = String(input);
+    const body = requestBody(options);
     calls.push({ url, body });
     if (url.endsWith("/start")) return response(200, { state: "oauth-state" });
     if (url.endsWith("/exchange")) {
@@ -92,24 +103,29 @@ test("uses the device-bound broker routes for the OAuth lifecycle", async () => 
     "https://auth.example/refresh",
     "https://auth.example/revoke"
   ]);
-  assert.deepEqual(calls[0].body.redirect_uri, redirectUri);
+  const startCall = requiredItem(calls, 0);
+  const exchangeCall = requiredItem(calls, 1);
+  const refreshCall = requiredItem(calls, 2);
+  const revokeCall = requiredItem(calls, 3);
+  assert.deepEqual(startCall.body.redirect_uri, redirectUri);
+  assert.ok(isRecord(startCall.body.public_key));
   assert.deepEqual(
-    { kty: calls[0].body.public_key.kty, crv: calls[0].body.public_key.crv },
+    { kty: startCall.body.public_key.kty, crv: startCall.body.public_key.crv },
     { kty: "EC", crv: "P-256" }
   );
-  assert.equal(calls[0].body.public_key.d, undefined);
-  assert.deepEqual(calls[1].body, {
+  assert.equal(startCall.body.public_key.d, undefined);
+  assert.deepEqual(exchangeCall.body, {
     code: "code",
     redirect_uri: redirectUri,
     state: "oauth-state"
   });
   assert.equal(exchanged.refresh_token, undefined);
   assert.deepEqual(
-    pick(calls[2].body, ["connection_handle", "timestamp", "nonce"]),
+    pick(refreshCall.body, ["connection_handle", "timestamp", "nonce"]),
     { connection_handle: "connection-handle", timestamp: "1721234567890", nonce: "refresh-nonce" }
   );
   assert.deepEqual(
-    pick(calls[3].body, ["connection_handle", "token", "timestamp", "nonce"]),
+    pick(revokeCall.body, ["connection_handle", "token", "timestamp", "nonce"]),
     {
       connection_handle: "connection-handle",
       token: "access-2",
@@ -119,19 +135,24 @@ test("uses the device-bound broker routes for the OAuth lifecycle", async () => 
   );
   await assertValidSignature(
     keyPair.publicKey,
-    calls[2].body.signature,
+    requiredField(refreshCall.body, "signature"),
     ["/refresh", "connection-handle", "1721234567890", "refresh-nonce", ""].join("\n")
   );
   await assertValidSignature(
     keyPair.publicKey,
-    calls[3].body.signature,
+    requiredField(revokeCall.body, "signature"),
     ["/revoke", "connection-handle", "1721234567891", "revoke-nonce", "access-2"].join("\n")
   );
 });
 
 test("surfaces a broker error message and metadata", async () => {
   const keyStore = await newMemoryKeyStore();
-  const fetchImpl = async () => response(401, { error: "Reconnect Notion", code: "invalid_connection" });
+  const fetchImpl = async () => response(401, {
+    error: "Reconnect Notion",
+    code: "invalid_connection",
+    retry_after: 7,
+    retryable: true
+  });
   await assert.rejects(
     refreshAccessToken({
       brokerUrl: "https://auth.example",
@@ -139,9 +160,12 @@ test("surfaces a broker error message and metadata", async () => {
       fetchImpl,
       keyStore
     }),
-    (error) => error.message === "Reconnect Notion"
+    (error) => isOAuthError(error)
+      && error.message === "Reconnect Notion"
       && error.status === 401
       && error.code === "invalid_connection"
+      && error.retryAfter === 7
+      && error.retryable === true
   );
 });
 
@@ -157,7 +181,7 @@ test("validates start and exchange responses before returning credentials", asyn
     /invalid state/
   );
 
-  for (const missing of ["access_token", "connection_handle", "bot_id", "workspace_id"]) {
+  for (const missing of ["access_token", "connection_handle", "bot_id", "workspace_id"] as const) {
     const payload = validExchangePayload();
     delete payload[missing];
     await assert.rejects(
@@ -171,6 +195,17 @@ test("validates start and exchange responses before returning credentials", asyn
       /invalid token response/
     );
   }
+
+  await assert.rejects(
+    exchangeAuthorizationCode({
+      brokerUrl: "https://auth.example",
+      code: "code",
+      redirectUri,
+      state: "state",
+      fetchImpl: async () => response(200, validExchangePayload({ workspace_name: 42 }))
+    }),
+    /invalid token response/
+  );
 });
 
 test("requires state and a connection handle before contacting the broker", async () => {
@@ -198,12 +233,12 @@ test("coalesces refreshes and stores only the returned access token", async () =
     oauthBrokerUrl: "https://auth.example"
   };
   const keyStore = await newMemoryKeyStore();
-  const savedValues = [];
+  const savedValues: Array<{ token: string }> = [];
   let requests = 0;
-  let release;
-  const fetchImpl = async () => {
+  let release: (() => void) | undefined;
+  const fetchImpl: OAuthFetch = async () => {
     requests += 1;
-    return new Promise((resolve) => {
+    return new Promise<Response>((resolve) => {
       release = () => resolve(response(200, {
         access_token: "access-2",
         refresh_token: "broker-secret-must-not-be-stored"
@@ -225,11 +260,12 @@ test("coalesces refreshes and stores only the returned access token", async () =
   const second = refresh(stale);
   await waitFor(() => requests === 1);
   assert.equal(requests, 1);
+  assert.ok(release);
   release();
   const [left, right] = await Promise.all([first, second]);
   assert.deepEqual(left, right);
   assert.equal(state.token, "access-2");
-  assert.equal(state.refreshToken, undefined);
+  assert.equal("refreshToken" in state ? state.refreshToken : undefined, undefined);
   assert.deepEqual(savedValues, [{ token: "access-2" }]);
 
   const third = await refresh(stale);
@@ -261,13 +297,13 @@ test("does not restore a stale access token after the connection changes during 
     token: "expired",
     oauthBrokerUrl: "https://auth.example"
   };
-  let release;
-  const fetchImpl = async () => new Promise((resolve) => {
+  let release: (() => void) | undefined;
+  const fetchImpl: OAuthFetch = async () => new Promise<Response>((resolve) => {
     release = () => resolve(response(200, { access_token: "stale-access" }));
   });
   const refresh = createAccessTokenRefresher({
     loadSettings: async () => ({ ...state }),
-    saveSettings: async (values) => Object.assign(state, values),
+    saveSettings: async (values) => { Object.assign(state, values); },
     brokerUrlForSettings: (settings) => settings.oauthBrokerUrl,
     fetchImpl,
     keyStore: await newMemoryKeyStore()
@@ -275,8 +311,9 @@ test("does not restore a stale access token after the connection changes during 
   const pending = refresh({ ...state });
   await waitFor(() => typeof release === "function");
   Object.assign(state, { connectionId: "connection-2", connectionHandle: "handle-2", token: "new-access" });
+  assert.ok(release);
   release();
-  await assert.rejects(pending, (error) => error.status === 401 && error.code === "connection_changed");
+  await assert.rejects(pending, (error) => isOAuthError(error) && error.status === 401 && error.code === "connection_changed");
   assert.equal(state.token, "new-access");
 });
 
@@ -288,6 +325,7 @@ test("skips remote revocation when there is no access token", async () => {
     token: "",
     fetchImpl: async () => {
       requested = true;
+      return response(500, {});
     }
   });
   assert.deepEqual(result, {});
@@ -297,9 +335,9 @@ test("skips remote revocation when there is no access token", async () => {
 test("retires replaced broker custody with a device-bound proof and no Notion token", async () => {
   const cryptoImpl = crypto;
   const keyPair = await generateOAuthDeviceKeyPair(cryptoImpl);
-  const requests = [];
-  const fetchImpl = async (url, init) => {
-    requests.push({ url, body: JSON.parse(init.body) });
+  const requests: BrokerCall[] = [];
+  const fetchImpl: OAuthFetch = async (input, init) => {
+    requests.push({ url: String(input), body: requestBody(init) });
     return response(200, { ok: true });
   };
 
@@ -313,25 +351,26 @@ test("retires replaced broker custody with a device-bound proof and no Notion to
     nonceGenerator: () => "retirement-nonce"
   });
 
-  assert.equal(requests[0].url, "https://auth.example/retire");
-  assert.deepEqual(Object.keys(requests[0].body).sort(), ["connection_handle", "nonce", "signature", "timestamp"]);
-  assert.equal(requests[0].body.connection_handle, "old-handle");
+  const retirementRequest = requiredItem(requests, 0);
+  assert.equal(retirementRequest.url, "https://auth.example/retire");
+  assert.deepEqual(Object.keys(retirementRequest.body).sort(), ["connection_handle", "nonce", "signature", "timestamp"]);
+  assert.equal(retirementRequest.body.connection_handle, "old-handle");
   await assertValidSignature(
     keyPair.publicKey,
-    requests[0].body.signature,
-    ["/retire", "old-handle", requests[0].body.timestamp, "retirement-nonce", ""].join("\n")
+    requiredField(retirementRequest.body, "signature"),
+    ["/retire", "old-handle", requiredField(retirementRequest.body, "timestamp"), "retirement-nonce", ""].join("\n")
   );
 });
 
-async function newMemoryKeyStore() {
+async function newMemoryKeyStore(): Promise<OAuthDeviceKeyStore> {
   return memoryKeyStore(await generateOAuthDeviceKeyPair());
 }
 
-function memoryKeyStore(keyPair) {
+function memoryKeyStore(keyPair: CryptoKeyPair): OAuthDeviceKeyStore {
   return { getOrCreateKeyPair: async () => keyPair };
 }
 
-async function assertValidSignature(publicKey, signature, message) {
+async function assertValidSignature(publicKey: CryptoKey, signature: string, message: string): Promise<void> {
   const valid = await crypto.subtle.verify(
     { name: "ECDSA", hash: "SHA-256" },
     publicKey,
@@ -341,7 +380,7 @@ async function assertValidSignature(publicKey, signature, message) {
   assert.equal(valid, true);
 }
 
-function validExchangePayload(overrides = {}) {
+function validExchangePayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     access_token: "access",
     connection_handle: "connection-handle",
@@ -352,11 +391,11 @@ function validExchangePayload(overrides = {}) {
   };
 }
 
-function pick(value, keys) {
+function pick(value: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   return Object.fromEntries(keys.map((key) => [key, value[key]]));
 }
 
-async function waitFor(predicate) {
+async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setImmediate(resolve));
@@ -364,10 +403,45 @@ async function waitFor(predicate) {
   assert.fail("Timed out waiting for the OAuth request.");
 }
 
-function response(status, payload) {
-  return {
-    ok: status >= 200 && status < 300,
+function response(status: number, payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
     status,
-    async json() { return payload; }
-  };
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+function requestBody(init?: RequestInit): Record<string, unknown> {
+  assert.equal(typeof init?.body, "string");
+  const parsed: unknown = JSON.parse(init.body);
+  assert.ok(isRecord(parsed));
+  return parsed;
+}
+
+function requiredItem<T>(items: readonly T[], index: number): T {
+  const item = items[index];
+  assert.ok(item);
+  return item;
+}
+
+function requiredField(value: Record<string, unknown>, field: string): string {
+  const fieldValue = value[field];
+  assert.equal(typeof fieldValue, "string");
+  return fieldValue;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOAuthError(error: unknown): error is Error & {
+  status: number;
+  code: string;
+  retryAfter: number;
+  retryable: boolean;
+} {
+  return error instanceof Error
+    && "status" in error && typeof error.status === "number"
+    && "code" in error && typeof error.code === "string"
+    && "retryAfter" in error && typeof error.retryAfter === "number"
+    && "retryable" in error && typeof error.retryable === "boolean";
 }

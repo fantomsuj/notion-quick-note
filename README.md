@@ -2,15 +2,15 @@
 
 A Notion-styled Chrome extension for saving a thought without leaving the webpage you're viewing, using the fast invocation model popularized by Apple Quick Note. See [`DESIGN.md`](DESIGN.md) for the visual system.
 
-Open it from the toolbar, press `Option + Z` on macOS (`Ctrl + Shift + Space` elsewhere), or right-click selected text. The floating Notion-style page keeps a structured local draft, optionally includes the source page, and sends native blocks to either a running Notion page or a database.
+Open it once from the toolbar, press `Option + Z` while the browser is active, use `Command + Shift + 0` on macOS (`Ctrl + Shift + 0` elsewhere) to bring it forward from another app, or right-click selected text. The Notion-style side panel remains open while you switch tabs, keeps one structured local draft, and sends native blocks to either a running Notion page or a database.
 
 ## What works
 
-- Floating bottom-right composer isolated from the host webpage with Shadow DOM, with automatic side-panel and extension-tab fallbacks
+- Persistent Chrome side-panel composer that stays available across tab switches, with an extension-tab fallback
 - Toolbar, keyboard shortcut, and selected-text context menu entry points
 - Locally bundled Tiptap block editor with Markdown input rules, slash commands, and a selection toolbar
 - Optional on-device AI actions for editable title suggestions and to-do extraction, with no cloud fallback and no mutation before review
-- One versioned active draft across regular Chrome tabs, with explicit cross-tab handoff, stale-revision protection, and separately isolated Incognito state
+- One versioned active draft across regular Chrome tabs, with automatic active-page title/URL context, stale-revision protection, and separately isolated Incognito state
 - A local Recent picker for the last 30 days, with five-note quick access, search, stashed-draft return, and live editing of supported Notion content
 - Multi-page source management with normalized URL deduplication, a stable primary source, selection quotes, and a 20-source cap
 - Durable local delivery queue with serialized retries, restart recovery, toolbar badges, and a 30-day Notes view
@@ -36,7 +36,7 @@ Open it from the toolbar, press `Option + Z` on macOS (`Ctrl + Shift + Space` el
 5. Open the extension's **Details → Extension options**.
 6. Open **Advanced setup**, create a personal access token in Notion's [developer portal](https://www.notion.so/profile/integrations/internal), and paste it into settings.
 7. Quick Note will create a private **Quick Notes** database automatically. If Notion cannot complete setup, retry recovery or choose a shared page or database from the destination picker.
-8. On a normal webpage, click the extension icon or press `Option + Z` on macOS (`Ctrl + Shift + Space` elsewhere).
+8. On a normal webpage, click the extension icon or press `Option + Z` on macOS (`Ctrl + Shift + Space` elsewhere). Quick Note stays open as you browse, so no further toolbar clicks are needed. To bring it forward while another app is active, press `Command + Shift + 0` on macOS (`Ctrl + Shift + 0` elsewhere).
 
 After rebuilding an already loaded unpacked extension, click **Reload** for Notion Quick Note on `chrome://extensions` before testing. Chrome otherwise keeps the previous service worker alive, which can continue referencing an older content-script path.
 
@@ -44,7 +44,7 @@ Inside the editor, type `/` for block commands. Markdown shortcuts such as `# `,
 
 On supported Chrome desktop devices, the sparkle menu can suggest a title or extract editable to-dos using Chrome's on-device Prompt API. Both actions are explicitly invoked and never block Save. The settings page includes a master AI switch plus separate controls for each action; unsupported browsers simply omit generation after reporting that the local model is unavailable.
 
-Opening Quick Note explicitly on another tab moves the same regular-profile draft there and adds that page to Sources. Use **Recent** to reopen one of the latest five notes or search retained local history. The current draft is stashed while a recent note is edited and returns after that edit is saved or discarded.
+While the side panel is open, activating a webpage automatically adds its title and URL to Sources without copying selected text or other page content. Remove an unwanted source with its × control; that source does not reappear when you revisit the tab during the same draft. Use **Recent** to reopen one of the latest five notes or search retained local history. The current draft is stashed while a recent note is edited and returns after that edit is saved or discarded.
 
 Personal tokens act as the user who created them. Treat the token as a password and use this setup only for your own local build. Packaged Chrome Web Store releases use the bundled OAuth connection and do not show Advanced setup.
 
@@ -79,8 +79,8 @@ For a Web Store build, keep production values out of the development source and 
 
 ```mermaid
 flowchart TD
-  A["Toolbar / shortcut / selection"] --> B["Context collector"]
-  B --> C["Overlay / side panel / extension tab"]
+  A["Toolbar / shortcut / selection"] --> B["Persistent side panel"]
+  B --> C["Active-tab title/URL context"]
   C --> D["Per-record IndexedDB drafts + queue"]
   D --> E["Serialized service-worker delivery"]
   E --> F["Notion REST API"]
@@ -93,7 +93,7 @@ The composer never receives the stored Notion token or accesses extension storag
 
 ## Why this shape
 
-Chrome's [Side Panel API](https://developer.chrome.com/docs/extensions/reference/api/sidePanel) is persistent across tabs and is a strong future fallback, but it is browser-owned and visually heavier than Apple Quick Note. A content-script card is closer to the requested bottom-right interaction. Chrome documents that [content scripts run in an isolated world](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts), making this a practical way to add an overlay without sharing JavaScript state with the host page.
+Chrome's [Side Panel API](https://developer.chrome.com/docs/extensions/reference/api/sidePanel) supplies the persistent, window-scoped workspace: after one invocation, the composer remains available while the user moves among tabs. The panel reads only each active tab's title and URL while it is open; selected text enters a note only through the explicit selection context-menu command.
 
 Flylighter validates the fast-capture demand. Its public listing emphasizes flows, database properties, formatted highlights, append-to-existing-capture, instant capture, and shortcuts. This MVP borrows the speed and source-capture principles without copying its power-user configuration surface.
 
@@ -145,8 +145,8 @@ npm run check
 ## Privacy posture
 
 - Requests are limited to Notion's API and an optional user-configured OAuth broker.
-- The extension asks for `activeTab`, not permanent read access to every page.
-- Page content is read only after a toolbar/shortcut/context-menu gesture.
+- The `tabs` permission supplies active-page title and URL while the Quick Note side panel is open; required host permissions remain limited to Notion's API.
+- Page body content is not read automatically. Selected text is captured only through the explicit selection context-menu command.
 - Regular drafts, queued captures, and delivery history use per-record IndexedDB storage; only a small capture index and settings remain in trusted `chrome.storage.local`.
 - Incognito capture data uses one `chrome.storage.session` key per record and disappears with that Incognito session.
 - Notes can report local storage use and export capture-only recovery files as JSON or Markdown; credentials and settings are excluded.

@@ -131,6 +131,36 @@ test("mounted composer tracks active page context and keeps dismissed pages supp
   await expect(root.locator(".source-list")).toContainText("First page revisited");
 });
 
+test("automatic tab context does not alter a draft that is editing an existing note", async ({ page }) => {
+  await page.evaluate(() => {
+    window.currentDraft = {
+      version: 2,
+      id: "edit-draft",
+      tabId: 1,
+      sessionId: "session-test",
+      revision: 1,
+      mode: "edit",
+      targetRecordId: "capture-existing",
+      title: "Existing note",
+      sources: [{ title: "Original source", url: "https://original.example/page" }],
+      dismissedSourceUrls: [],
+      doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Existing body" }] }] }
+    };
+  });
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".more").click();
+  await root.locator(".manage-sources").click();
+
+  await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
+    page: { title: "Unrelated tab", url: "https://unrelated.example/path", selection: "" },
+    tabId: 2,
+    explicit: false
+  }));
+  await expect(root.locator(".source-row")).toHaveCount(1);
+  await expect(root.locator(".source-list")).not.toContainText("Unrelated tab");
+});
+
 test("on-device AI keeps title and to-dos in editable previews until explicitly applied", async ({ page }) => {
   await installLanguageModel(page);
   await openQuickNote(page, { title: "Launch source", url: "https://example.com/launch", selection: "" });

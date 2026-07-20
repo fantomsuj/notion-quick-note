@@ -31,6 +31,7 @@ export interface CaptureContext {
 export interface CaptureSource {
   title: string;
   url: string;
+  selection: string;
   capturedAt: number;
 }
 
@@ -50,6 +51,20 @@ export interface Destination {
   schemaVersion?: number;
   marker?: string;
   properties?: Record<string, DestinationProperty>;
+}
+
+export interface CaptureDestination {
+  destinationId?: string;
+  destinationDatabaseId?: string;
+  destinationName?: string;
+  destinationUrl?: string;
+  destinationType?: "page" | "database";
+  titleProperty?: string;
+  managedDestination?: boolean;
+  destinationSchemaVersion?: number;
+  destinationMarker?: string;
+  destinationProperties?: Record<string, DestinationProperty>;
+  destinationConnectionId?: string;
 }
 
 export interface Connection {
@@ -107,12 +122,23 @@ export type DeliveryState =
 
 export type DeliveryErrorKind =
   | "authentication"
+  | "auth"
+  | "setup"
   | "destination"
   | "conflict"
+  | "remote_conflict"
+  | "connection_changed"
   | "rate_limited"
   | "retryable"
   | "ambiguous"
+  | "ambiguous_managed"
+  | "ambiguous_manual"
   | "interrupted"
+  | "attention_required"
+  | "timeout"
+  | "timeout_manual"
+  | "offline"
+  | "delivery"
   | "unknown";
 
 export interface DeliveryErrorMetadata {
@@ -124,19 +150,18 @@ export interface DeliveryErrorMetadata {
 }
 
 export interface RemoteTarget {
+  kind: "page" | "section" | "legacy_section";
   id: string;
   url: string;
+  pageId: string;
   lastEditedTime?: string;
-  blockIds?: string[];
-  fingerprint?: string;
+  blockIds: string[];
+  fingerprint: string;
 }
 
 export interface SyncJournal {
-  version: 1;
-  phase: "inserting" | "archiving";
-  insertedBlockIds: string[];
-  archivedBlockIds: string[];
-  replacementFingerprint: string;
+  insertedSegments?: Record<string, string[]>;
+  [key: string]: JsonValue | undefined;
 }
 
 export interface CaptureDraft {
@@ -147,37 +172,54 @@ export interface CaptureDraft {
   mode: "new" | "edit";
   targetRecordId: string;
   sources: CaptureSource[];
+  dismissedSourceUrls: string[];
   revision: number;
   sessionId: string;
   returnDraftId: string;
   title: string;
   includeSource: boolean;
   doc: EditorNode;
+  remote: RemoteTarget | null;
+  baseFingerprint: string;
   createdAt: number;
   updatedAt: number;
 }
 
-interface CaptureRecordBase {
+export interface CapturePayload {
+  document: CaptureDocument;
+  captureId: string;
+  sources: CaptureSource[];
+  includeSource: boolean;
+}
+
+export interface CaptureRecordBase {
   version: 2;
   id: string;
   draftId: string;
-  document: CaptureDocument;
-  destination: Destination | null;
+  scope: "regular" | "incognito";
+  capture: CapturePayload;
+  syncedCapture: CapturePayload | null;
+  pendingCapture: CapturePayload | null;
+  operation: "" | "create" | "update";
+  context: CaptureContext;
+  destination: CaptureDestination | null;
   connectionId: string;
-  sources: CaptureSource[];
   attemptCount: number;
+  firstAttemptAt: number;
+  lastAttemptAt: number;
   nextAttemptAt: number;
   createdAt: number;
   updatedAt: number;
-  lastError: DeliveryErrorMetadata | null;
-  remote: RemoteTarget | null;
-  syncJournal?: SyncJournal;
+  forceRetry: boolean;
+  baseFingerprint: string;
+  syncJournal: SyncJournal | null;
+  importedFromNotion: boolean;
 }
 
 export type CaptureRecord = CaptureRecordBase & (
-  | { status: "pending" | "sending"; deliveredAt: 0 }
-  | { status: "delivered"; deliveredAt: number; remote: RemoteTarget }
-  | { status: "blocked_setup" | "blocked_auth" | "blocked_destination" | "blocked_conflict" | "uncertain"; deliveredAt: 0; lastError: DeliveryErrorMetadata }
+  | { status: "pending" | "sending"; deliveredAt: 0; lastError: DeliveryErrorMetadata | null; remote: RemoteTarget | null }
+  | { status: "delivered"; deliveredAt: number; lastError: null; remote: RemoteTarget }
+  | { status: "blocked_setup" | "blocked_auth" | "blocked_destination" | "blocked_conflict" | "uncertain"; deliveredAt: 0; lastError: DeliveryErrorMetadata; remote: RemoteTarget | null }
 );
 
 export interface CaptureState {
@@ -191,9 +233,10 @@ export interface StorageMetadata {
   key: "state";
   version: 3;
   activeDraftId: string;
-  migrationStatus: "pending" | "complete" | "failed";
+  migrationStatus: "pending" | "complete" | "failed" | "imported" | "legacy";
   migrationError: string;
   lastMaintenanceAt: number;
+  migratedAt?: number | undefined;
 }
 
 export interface RecoveryExport {
@@ -204,10 +247,55 @@ export interface RecoveryExport {
 }
 
 export interface KeyValueStoragePort {
-  get(keys: string | string[]): Promise<Record<string, unknown>>;
+  get(keys?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>>;
   set(values: Record<string, unknown>): Promise<void>;
   remove(keys: string | string[]): Promise<void>;
+  getKeys?(): Promise<string[]>;
+  getBytesInUse?(keys?: string | string[] | null): Promise<number>;
 }
+
+export type Clock = () => number;
+export type UUIDFactory = () => string;
+
+export type CaptureStoreName = "meta" | "drafts" | "captures";
+export type CaptureTransactionMode = "readonly" | "readwrite";
+
+export interface CaptureBackendTransaction {
+  getMeta(): Promise<StorageMetadata | undefined>;
+  putMeta(value: StorageMetadata): Promise<unknown>;
+  getDraft(id: string): Promise<CaptureDraft | undefined>;
+  putDraft(draft: CaptureDraft): Promise<unknown>;
+  deleteDraft(id: string): Promise<unknown>;
+  clearDrafts(): Promise<unknown>;
+  getAllDrafts(): Promise<CaptureDraft[]>;
+  getCapture(id: string): Promise<CaptureRecord | undefined>;
+  putCapture(record: CaptureRecord): Promise<unknown>;
+  deleteCapture(id: string): Promise<unknown>;
+  clearCaptures(): Promise<unknown>;
+  getAllCaptures(): Promise<CaptureRecord[]>;
+  findCaptureByDraftId(draftId: string): Promise<CaptureRecord | undefined>;
+  getDueCaptures(timestamp: number): Promise<CaptureRecord[]>;
+}
+
+export interface CaptureBackend {
+  readonly name: string;
+  transaction<T>(
+    stores: CaptureStoreName[],
+    mode: CaptureTransactionMode,
+    callback: (transaction: CaptureBackendTransaction) => Promise<T> | T
+  ): Promise<T>;
+  reconcile?(): Promise<unknown>;
+}
+
+export interface CaptureChangeEvent {
+  kind: "import" | "draft" | "capture" | "maintenance";
+  structural?: boolean;
+  created?: boolean;
+  id?: string;
+  record?: CaptureRecord;
+}
+
+export type CaptureChangeHandler = (event: CaptureChangeEvent) => void | Promise<void>;
 
 export interface TimerPort {
   now(): number;
@@ -223,11 +311,27 @@ export interface CryptoPort {
 export type FetchPort = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface CaptureRepositoryPort {
+  readonly backendName: string;
+  setChangeHandler(handler: CaptureChangeHandler): void;
+  load(): Promise<CaptureState>;
+  save(state: CaptureState): Promise<CaptureState>;
+  getDraft(id: string): Promise<CaptureDraft | null>;
+  getActiveDraft(): Promise<CaptureDraft | null>;
   getCapture(id: string): Promise<CaptureRecord | null>;
   listCaptures(options?: { statuses?: DeliveryState[] }): Promise<CaptureRecord[]>;
+  listDueCaptures(timestamp?: number): Promise<CaptureRecord[]>;
   listDrafts(): Promise<CaptureDraft[]>;
   upsertDraft(draft: CaptureDraft, expectedRevision?: number): Promise<CaptureDraft | null>;
+  updateCapture(id: string, updates: CaptureRecordUpdate): Promise<CaptureRecord | null>;
+  claimCapture(id: string, timestamp?: number): Promise<CaptureRecord | null>;
 }
+
+export type CaptureRecordUpdate = Partial<Omit<CaptureRecordBase, "version" | "id">> & {
+  status?: DeliveryState;
+  deliveredAt?: number;
+  lastError?: DeliveryErrorMetadata | null;
+  remote?: RemoteTarget | null;
+};
 
 type EmptyRequest<T extends string> = T extends string ? { type: T } : never;
 type IdRequest<T extends string> = T extends string ? { type: T; id: string } : never;
@@ -243,7 +347,7 @@ export type RuntimeRequest =
   | { type: "LOAD_RECENT_NOTE"; id: string; tabId?: number; sessionId?: string }
   | { type: "ACTIVATE_DRAFT"; id: string; returnDraftId?: string }
   | { type: "RELEASE_COMPOSER_SURFACE"; sessionId: string }
-  | { type: "GET_PANEL_DRAFT"; draftId?: string; sessionId?: string }
+  | { type: "GET_PANEL_DRAFT"; draftId?: string; tabId?: number; sessionId?: string }
   | { type: "RETRY_CAPTURE" | "RETARGET_CAPTURE"; id: string; force?: boolean }
   | { type: "MARK_CAPTURE_DELIVERED"; id: string; remote: RemoteTarget }
   | { type: "EXPORT_CAPTURE_RECOVERY"; format: "json" | "markdown" }
@@ -297,7 +401,7 @@ export interface RuntimeResponseMap {
 
 export type RuntimeResponse<T extends RuntimeRequest> = RuntimeResponseMap[T["type"]] | FailureResponse;
 
-const MESSAGE_TYPES: ReadonlySet<RuntimeRequest["type"]> = new Set([
+const MESSAGE_TYPES: ReadonlySet<string> = new Set([
   "GET_QUICK_SETTINGS", "GET_OR_CREATE_DRAFT", "UPSERT_DRAFT", "DISCARD_DRAFT", "ENQUEUE_CAPTURE", "SAVE_CAPTURE",
   "GET_CAPTURE_STATUS", "LIST_CAPTURE_ACTIVITY", "LIST_RECENT_NOTES", "LOAD_RECENT_NOTE", "CONVERT_EDIT_TO_NEW_DRAFT",
   "ACTIVATE_DRAFT", "RELEASE_COMPOSER_SURFACE", "GET_PANEL_DRAFT", "RETRY_CAPTURE", "RETARGET_CAPTURE",
@@ -307,7 +411,7 @@ const MESSAGE_TYPES: ReadonlySet<RuntimeRequest["type"]> = new Set([
 ]);
 
 export function isRuntimeRequest(value: unknown): value is RuntimeRequest {
-  if (!isRecord(value) || typeof value.type !== "string" || !MESSAGE_TYPES.has(value.type as RuntimeRequest["type"])) return false;
+  if (!isRecord(value) || typeof value.type !== "string" || !isRuntimeMessageType(value.type)) return false;
   switch (value.type) {
     case "UPSERT_DRAFT":
       return isRecord(value.draft) && typeof value.draft.id === "string";
@@ -335,6 +439,10 @@ export function isRuntimeRequest(value: unknown): value is RuntimeRequest {
     default:
       return true;
   }
+}
+
+function isRuntimeMessageType(value: string): value is RuntimeRequest["type"] {
+  return MESSAGE_TYPES.has(value);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

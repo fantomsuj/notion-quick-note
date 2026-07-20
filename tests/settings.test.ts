@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -95,7 +94,7 @@ test("bundled production OAuth hides developer-only setup", async () => {
 });
 
 test("legacy browser refresh tokens are removed and OAuth must reconnect", async () => {
-  const state = {
+  const state: Record<string, unknown> = {
     authType: "oauth",
     token: "old-access",
     refreshToken: "old-refresh",
@@ -103,13 +102,13 @@ test("legacy browser refresh tokens are removed and OAuth must reconnect", async
     connectionId: "legacy-random-id"
   };
   const storage = {
-    async get(keys) {
+    async get(keys: string[]) {
       return Object.fromEntries(keys.filter((key) => Object.hasOwn(state, key)).map((key) => [key, state[key]]));
     },
-    async remove(keys) {
+    async remove(keys: string[]) {
       for (const key of keys) delete state[key];
     },
-    async set(values) {
+    async set(values: Record<string, unknown>) {
       Object.assign(state, values);
     }
   };
@@ -123,7 +122,7 @@ test("legacy browser refresh tokens are removed and OAuth must reconnect", async
 });
 
 test("a nonempty legacy refresh token is treated as OAuth when authType is absent", async () => {
-  const state = {
+  const state: Record<string, unknown> = {
     token: "old-access",
     refreshToken: "old-refresh",
     botId: "bot-123",
@@ -140,15 +139,15 @@ test("a nonempty legacy refresh token is treated as OAuth when authType is absen
 });
 
 test("a personal token is preserved while an obsolete empty refresh field is removed", async () => {
-  const state = { authType: "token", token: "personal", refreshToken: "" };
+  const state: Record<string, unknown> = { authType: "token", token: "personal", refreshToken: "" };
   const storage = {
-    async get(keys) {
+    async get(keys: string[]) {
       return Object.fromEntries(keys.filter((key) => Object.hasOwn(state, key)).map((key) => [key, state[key]]));
     },
-    async remove(keys) {
+    async remove(keys: string[]) {
       for (const key of keys) delete state[key];
     },
-    async set(values) {
+    async set(values: Record<string, unknown>) {
       Object.assign(state, values);
     }
   };
@@ -158,15 +157,15 @@ test("a personal token is preserved while an obsolete empty refresh field is rem
   assert.equal(state.refreshToken, undefined);
 });
 
-function storageFor(state) {
+function storageFor(state: Record<string, unknown>) {
   return {
-    async get(keys) {
+    async get(keys: string[]) {
       return Object.fromEntries(keys.filter((key) => Object.hasOwn(state, key)).map((key) => [key, state[key]]));
     },
-    async remove(keys) {
+    async remove(keys: string[] | string) {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete state[key];
     },
-    async set(values) {
+    async set(values: Record<string, unknown>) {
       Object.assign(state, values);
     }
   };

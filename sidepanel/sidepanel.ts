@@ -1,11 +1,35 @@
 // @ts-nocheck
 const params = new URLSearchParams(location.search);
 const requestedDraftId = params.get("draft") || "";
-const requestedTabId = params.get("tab") || "";
+const requestedTabId = Number(params.get("tab"));
 let activity = null;
 let activeDraft = null;
+let activeTabId = Number.isInteger(requestedTabId) && requestedTabId > 0 ? requestedTabId : null;
+let pendingActiveContext = null;
 const DRAFT_PREVIEW_CHARACTERS = 600;
 const CAPTURE_PREVIEW_CHARACTERS = 180;
+
+const panelWindow = await chrome.windows.getCurrent();
+const panelWindowId = panelWindow.id;
+const panelPort = chrome.runtime.connect({ name: "notion-quick-note-panel" });
+if (panelWindowId !== undefined) panelPort.postMessage({ type: "REGISTER_PANEL", windowId: panelWindowId });
+panelPort.onMessage.addListener((message) => {
+  if (message?.type === "ACTIVE_PAGE_CONTEXT") {
+    activeTabId = message.tabId;
+    pendingActiveContext = message;
+    applyActiveContext();
+  }
+  if (message?.type === "OPEN_DRAFT" && message.draft) {
+    activeDraft = message.draft;
+    selectView("compose");
+    void openComposer(message.draft);
+  }
+});
+
+if (activeTabId === null && panelWindowId !== undefined) {
+  const [activeTab] = await chrome.tabs.query({ active: true, windowId: panelWindowId });
+  activeTabId = activeTab?.id ?? null;
+}
 
 document.querySelectorAll(".tabs button").forEach((button) => {
   button.addEventListener("click", () => selectView(button.dataset.view));
@@ -30,7 +54,7 @@ if (requestedDraftId) activeDraft = activity?.drafts.find((draft) => draft.id ==
 if (params.get("view") === "activity") selectView("activity");
 else {
   selectView("compose");
-  if (requestedDraftId) await openComposer();
+  await openComposer();
 }
 
 function selectView(view) {
@@ -53,12 +77,23 @@ function scheduleActivityRefresh() {
 
 async function openComposer(draft = activeDraft) {
   if (!draft) {
-    const response = await send({ type: "GET_PANEL_DRAFT", tabId: requestedTabId, draftId: requestedDraftId });
+    const response = await send({ type: "GET_PANEL_DRAFT", tabId: activeTabId, draftId: requestedDraftId });
     if (!response?.ok) return showToast(response?.error || "Couldn’t prepare a draft.", "error");
     draft = response.draft;
   }
   activeDraft = draft;
   window.__notionQuickNoteOpen?.({ page: draft.context, draftId: draft.id, tabId: draft.tabId, sessionId: draft.sessionId, revision: draft.revision });
+  applyActiveContext();
+}
+
+function applyActiveContext() {
+  if (!pendingActiveContext || !window.__notionQuickNoteUpdateContext) return;
+  window.__notionQuickNoteUpdateContext({
+    page: pendingActiveContext.page,
+    tabId: pendingActiveContext.tabId,
+    explicit: false
+  });
+  pendingActiveContext = null;
 }
 
 async function loadActivity() {

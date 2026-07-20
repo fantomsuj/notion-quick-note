@@ -44,12 +44,45 @@ test("manifest exposes only packaged design resources", async () => {
   }]);
 });
 
-test("Option+Z is the declared and displayed macOS quick-note shortcut", async () => {
+test("Quick Note keeps Option+Z in-browser and provides a Chrome-compatible global shortcut", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   const options = await read("options/options.html");
 
   assert.equal(manifest.commands["toggle-quick-note"].suggested_key.mac, "Option+Z");
-  assert.match(options, /<kbd>⌥ Z<\/kbd>/);
+  assert.notEqual(manifest.commands["toggle-quick-note"].global, true);
+  assert.deepEqual(manifest.commands["open-quick-note-global"], {
+    suggested_key: {
+      default: "Ctrl+Shift+0",
+      mac: "Command+Shift+0"
+    },
+    description: "Open Quick Note from any app",
+    global: true
+  });
+  assert.match(options, /<kbd[^>]*>⌥ Z<\/kbd>/);
+  assert.match(options, /<kbd[^>]*>⌘ ⇧ 0<\/kbd>/);
+});
+
+test("the command listener targets the invoking tab and focuses the browser for global capture", async () => {
+  const background = await read("src/background.ts");
+
+  assert.match(background, /QUICK_NOTE_COMMANDS\.has\(command\)/);
+  assert.match(background, /onCommand\.addListener\(async \(command, commandTab\)/);
+  assert.match(background, /active:\s*true,\s*lastFocusedWindow:\s*true/);
+  assert.match(background, /windows\.update\(tab\.windowId,\s*\{\s*focused:\s*true\s*\}\)/);
+});
+
+test("persistent side panel opens by window and tracks active tabs only while connected", async () => {
+  const manifest = JSON.parse(await read("manifest.json"));
+  const background = await read("src/background.ts");
+  const sidepanel = await read("sidepanel/sidepanel.ts");
+
+  assert.ok(manifest.permissions.includes("tabs"));
+  assert.equal(manifest.action.default_popup, undefined);
+  assert.match(background, /chrome\.sidePanel\.open\(\{ windowId:/);
+  assert.match(background, /chrome\.tabs\.onActivated\.addListener/);
+  assert.match(background, /chrome\.tabs\.onUpdated\.addListener/);
+  assert.match(sidepanel, /chrome\.runtime\.connect\(\{ name: "notion-quick-note-panel" \}\)/);
+  assert.match(sidepanel, /await openComposer\(\)/);
 });
 
 test("both surfaces consume shared tokens and keep the compact Notion page geometry", async () => {
@@ -94,4 +127,15 @@ test("privacy handling is explained in settings, Notes, policy, and store copy",
   for (const phrase of ["note text", "selected text", "page title and URL", "until delivery succeeds or you delete them", "In Incognito", "selected Notion workspace"]) {
     assert.match(copy, new RegExp(phrase, "i"));
   }
+});
+
+test("persistent side panel documentation matches automatic context behavior", async () => {
+  const storeListing = await read("docs/STORE_LISTING.md");
+  const readme = await read("README.md");
+
+  assert.match(storeListing, /\| `tabs` \|/);
+  assert.match(storeListing, /while the Quick Note side panel is open/i);
+  assert.doesNotMatch(storeListing, /reads active-page details only when you invoke it/i);
+  assert.match(readme, /remains open while you switch tabs/i);
+  assert.match(readme, /remove.*source.*does not reappear/i);
 });

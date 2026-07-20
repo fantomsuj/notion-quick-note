@@ -1,13 +1,35 @@
 export interface OAuthWorkerEnv {
+  NOTION_CLIENT_ID?: string;
+  NOTION_CLIENT_SECRET?: string;
+  ALLOWED_EXTENSION_IDS?: string;
+  ALLOWED_ORIGINS?: string;
+  TOKEN_ENCRYPTION_KEY?: string;
+  NOTION_REQUEST_TIMEOUT_MS?: string;
+  OAUTH_SESSIONS?: OAuthSessionNamespace;
+  OAUTH_RATE_LIMITER?: OAuthRateLimiter;
+  FETCH?: WorkerFetch;
+}
+
+export interface ConfiguredOAuthWorkerEnv extends OAuthWorkerEnv {
   NOTION_CLIENT_ID: string;
   NOTION_CLIENT_SECRET: string;
   ALLOWED_EXTENSION_IDS: string;
   ALLOWED_ORIGINS: string;
   TOKEN_ENCRYPTION_KEY: string;
-  NOTION_REQUEST_TIMEOUT_MS?: string;
-  OAUTH_SESSIONS: DurableObjectNamespace<OAuthSessionStub>;
-  OAUTH_RATE_LIMITER: RateLimit;
-  FETCH?: typeof fetch;
+  OAUTH_SESSIONS: OAuthSessionNamespace;
+  OAUTH_RATE_LIMITER: OAuthRateLimiter;
+}
+
+export type WorkerFetch = (input: string | URL | Request, init: RequestInit) => Promise<Response>;
+export type OAuthSessionId = string | DurableObjectId;
+
+export interface OAuthSessionNamespace {
+  idFromName(name: string): OAuthSessionId;
+  get(id: OAuthSessionId): OAuthSessionStub;
+}
+
+export interface OAuthRateLimiter {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
 }
 
 export interface OAuthSessionStub extends Rpc.DurableObjectBranded {
@@ -26,7 +48,8 @@ export interface StartRequest {
   public_key: JsonWebKey;
 }
 
-export interface ExchangeRequest extends StartRequest {
+export interface ExchangeRequest {
+  redirect_uri: string;
   code: string;
   state: string;
 }
@@ -46,6 +69,26 @@ export interface NotionTokenResponse {
   workspace_id: string;
   workspace_name?: string;
   workspace_icon?: string;
+}
+
+export interface OAuthStorage {
+  get(key: "record"): Promise<OAuthStoredRecord | undefined>;
+  put(key: "record", value: OAuthStoredRecord): Promise<void>;
+  delete(key: string): Promise<boolean | void>;
+  deleteAll(): Promise<void>;
+  setAlarm(timestamp: number): Promise<void>;
+  deleteAlarm(): Promise<void>;
+  transaction<T>(callback: (storage: OAuthStorage) => Promise<T>): Promise<T>;
+}
+
+export interface OAuthSessionState {
+  storage: OAuthStorage;
+}
+
+export interface OAuthResult<T extends Record<string, unknown> = Record<string, unknown>> {
+  ok: boolean;
+  status: number;
+  payload: T;
 }
 
 export interface OAuthTransactionRecord {
@@ -78,7 +121,13 @@ export interface OAuthConnectionRecord {
 export type OAuthStoredRecord = OAuthTransactionRecord | OAuthConnectionRecord;
 
 export class OAuthHttpError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code = "",
+    readonly retryAfter = 0,
+    readonly retryable = false
+  ) {
     super(message);
     this.name = "OAuthHttpError";
   }
@@ -105,5 +154,7 @@ export function isNotionTokenResponse(value: unknown): value is NotionTokenRespo
     && hasString(value, "access_token")
     && hasString(value, "refresh_token")
     && hasString(value, "bot_id")
-    && hasString(value, "workspace_id");
+    && hasString(value, "workspace_id")
+    && (!Object.prototype.hasOwnProperty.call(value, "workspace_name") || typeof value.workspace_name === "string")
+    && (!Object.prototype.hasOwnProperty.call(value, "workspace_icon") || typeof value.workspace_icon === "string");
 }

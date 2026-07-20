@@ -1,12 +1,13 @@
-// @ts-nocheck
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDatabaseProvisioner, ProvisioningPendingError } from "../src/provisioning.js";
+import type { ManagedDestination, ProvisioningApi, ProvisioningSettings } from "../src/provisioning.js";
 
 test("coalesces concurrent provisioning into one database creation", async () => {
   const harness = createHarness();
-  let release;
+  let release: (() => void) | undefined;
   harness.api.create = async (_settings, marker) => new Promise((resolve) => {
+    assert.ok(harness.state.databaseProvisioning);
     assert.equal(harness.state.databaseProvisioning.status, "creating");
     assert.equal(harness.state.databaseProvisioning.marker, marker);
     release = () => resolve(destination());
@@ -17,7 +18,7 @@ test("coalesces concurrent provisioning into one database creation", async () =>
   const second = provisioner.ensure();
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(release);
-  release();
+  release?.();
   const [left, right] = await Promise.all([first, second]);
 
   assert.equal(harness.calls.create, 1);
@@ -36,7 +37,7 @@ test("recovers a marked database before attempting creation", async () => {
       lastAttemptAt: 0
     }
   });
-  harness.api.recover = async (_settings, marker) => {
+  harness.api.recover = async (_settings: ProvisioningSettings, marker: string) => {
     assert.equal(marker, "persisted-marker");
     return destination({ marker });
   };
@@ -51,13 +52,12 @@ test("recovers a marked database before attempting creation", async () => {
 test("recovers after an uncertain create response without posting twice", async () => {
   const harness = createHarness();
   let recoveries = 0;
-  harness.api.recover = async (_settings, marker) => {
+  harness.api.recover = async (_settings: ProvisioningSettings, marker: string) => {
     recoveries += 1;
     return recoveries >= 2 ? destination({ marker }) : null;
   };
   harness.api.create = async () => {
-    const error = new Error("Gateway timed out");
-    error.status = 503;
+    const error = Object.assign(new Error("Gateway timed out"), { status: 503 });
     throw error;
   };
 
@@ -102,7 +102,7 @@ test("migrates only an existing automatically managed destination", async () => 
 
 test("does not save a provisioned destination after the Notion connection changes", async () => {
   const harness = createHarness({ connectionId: "connection-1" });
-  let release;
+  let release: (() => void) | undefined;
   harness.api.create = async () => new Promise((resolve) => {
     release = () => resolve(destination());
   });
@@ -112,11 +112,11 @@ test("does not save a provisioned destination after the Notion connection change
   assert.ok(release);
 
   harness.state.connectionId = "connection-2";
-  release();
+  release?.();
 
   await assert.rejects(pending, (error) => {
-    assert.equal(error.code, "connection_changed");
-    assert.equal(error.status, 409);
+    assert.equal(errorField(error, "code"), "connection_changed");
+    assert.equal(errorField(error, "status"), 409);
     return true;
   });
   assert.equal(harness.state.destinationId, undefined);
@@ -137,17 +137,32 @@ test("leaves an existing manual destination unchanged", async () => {
   assert.equal(harness.calls.create, 0);
 });
 
-function createHarness(initial = {}, { now = 1000 } = {}) {
-  const state = { token: "secret", ...initial };
+test("preserves an existing manual page destination type and ID", async () => {
+  const harness = createHarness({
+    connectionId: "connection",
+    destinationId: "page-id",
+    destinationType: "page",
+    destinationName: "Running notes",
+    destinationUrl: "https://notion.so/page-id"
+  });
+
+  const result = await harness.provisioner().ensure();
+  assert.equal(result.outcome, "existing");
+  assert.equal(result.destination.type, "page");
+  assert.equal(result.destination.id, "page-id");
+});
+
+function createHarness(initial: ProvisioningSettings = {}, { now = 1000 }: { now?: number } = {}) {
+  const state: ProvisioningSettings = { token: "secret", ...initial };
   const calls = { create: 0, recover: 0, migrate: 0, wait: 0 };
-  const publicApi = {
-    async create(_settings, marker) {
+  const publicApi: ProvisioningApi = {
+    async create(_settings: ProvisioningSettings, marker: string) {
       return destination({ marker });
     },
-    async recover() {
+    async recover(_settings: ProvisioningSettings, _marker: string, _isFresh: boolean) {
       return null;
     },
-    async migrate(_settings, marker) {
+    async migrate(_settings: ProvisioningSettings, marker: string) {
       return destination({ marker });
     }
   };
@@ -157,16 +172,23 @@ function createHarness(initial = {}, { now = 1000 } = {}) {
     calls,
     api: publicApi,
     provisioner() {
-      const countedApi = {};
-      for (const method of ["create", "recover", "migrate"]) {
-        countedApi[method] = (...args) => {
-          calls[method] += 1;
-          return publicApi[method](...args);
-        };
-      }
+      const countedApi: ProvisioningApi = {
+        async create(settings, marker) {
+          calls.create += 1;
+          return publicApi.create(settings, marker);
+        },
+        async recover(settings, marker, isFresh) {
+          calls.recover += 1;
+          return publicApi.recover(settings, marker, isFresh);
+        },
+        async migrate(settings, marker) {
+          calls.migrate += 1;
+          return publicApi.migrate(settings, marker);
+        }
+      };
       return createDatabaseProvisioner({
         loadSettings: async () => ({ ...state }),
-        saveSettings: async (values) => Object.assign(state, values),
+        saveSettings: async (values) => { Object.assign(state, values); },
         api: countedApi,
         uuid: () => "generated-marker",
         now: () => now,
@@ -177,7 +199,7 @@ function createHarness(initial = {}, { now = 1000 } = {}) {
   };
 }
 
-function destination(overrides = {}) {
+function destination(overrides: Partial<ManagedDestination> = {}): ManagedDestination {
   return {
     id: "data-source-id",
     databaseId: "database-id",
@@ -188,7 +210,11 @@ function destination(overrides = {}) {
     managedDestination: true,
     schemaVersion: 3,
     marker: "marker",
-    properties: { title: { id: "title", name: "Name", type: "title" } },
+    properties: { title: { id: "title", name: "Name" } },
     ...overrides
   };
+}
+
+function errorField(error: unknown, key: string): unknown {
+  return typeof error === "object" && error !== null ? Reflect.get(error, key) : undefined;
 }

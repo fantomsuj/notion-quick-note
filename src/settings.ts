@@ -5,7 +5,7 @@ interface PublicProductConfig {
   oauthBrokerUrl: string;
 }
 
-export const DEFAULT_SETTINGS = Object.freeze({
+export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   authType: "oauth",
   token: "",
   connectionHandle: "",
@@ -35,7 +35,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   aiExtractTodos: true,
   oauthClientId: "",
   oauthBrokerUrl: ""
-} satisfies Settings);
+});
 
 export function hasBundledOAuthConfig(config: Partial<PublicProductConfig> = {}): boolean {
   return Boolean(String(config.notionClientId || "").trim() && String(config.oauthBrokerUrl || "").trim());

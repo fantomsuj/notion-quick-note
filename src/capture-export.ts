@@ -1,25 +1,60 @@
-// @ts-nocheck
 import { DELIVERY_STATES, normalizeSources } from "./capture-store.js";
+import { normalizeDraft, normalizeEditorNode, normalizeRecord } from "./capture-store.js";
+import type { CaptureDraft, CaptureRecord, CaptureSource, EditorNode, JsonValue } from "./contracts.js";
+import { isRecord } from "./contracts.js";
 
-export function createRecoveryExport({ drafts = [], captures = [], profile = "regular", format, now = new Date() }) {
-  const queued = captures.filter((record) => record.status !== DELIVERY_STATES.delivered);
-  const delivered = captures.filter((record) => record.status === DELIVERY_STATES.delivered);
+interface RecoveryExportOptions {
+  drafts?: unknown[];
+  captures?: unknown[];
+  profile?: string;
+  format: "json" | "markdown";
+  now?: Date;
+}
+
+interface RecoveryPayload {
+  format: "notion-quick-note-recovery";
+  version: 1;
+  exportedAt: string;
+  profile: string;
+  drafts: CaptureDraft[];
+  queued: CaptureRecord[];
+  delivered: CaptureRecord[];
+}
+
+interface RecoveryFile {
+  filename: string;
+  mimeType: "application/json" | "text/markdown";
+  content: string;
+}
+
+interface NoteView {
+  title: string;
+  metadata: string[];
+  sources: CaptureSource[];
+  body: string;
+}
+
+export function createRecoveryExport({ drafts = [], captures = [], profile = "regular", format, now = new Date() }: RecoveryExportOptions): RecoveryFile {
+  const normalizedDrafts = drafts.map((draft) => normalizeDraft(draft)).filter((draft): draft is CaptureDraft => draft !== null);
+  const normalizedCaptures = captures.map((capture) => normalizeRecord(capture)).filter((capture): capture is CaptureRecord => capture !== null);
+  const queued = normalizedCaptures.filter((record) => record.status !== DELIVERY_STATES.delivered);
+  const delivered = normalizedCaptures.filter((record) => record.status === DELIVERY_STATES.delivered);
   const exportedAt = now.toISOString();
-  const payload = sanitizeRecoveryValue({
+  const payload: RecoveryPayload = {
     format: "notion-quick-note-recovery",
     version: 1,
     exportedAt,
     profile,
-    drafts,
+    drafts: normalizedDrafts,
     queued,
     delivered
-  });
+  };
   const stamp = exportedAt.replace(/[:.]/g, "-");
   if (format === "json") {
     return {
       filename: `notion-quick-note-recovery-${stamp}.json`,
       mimeType: "application/json",
-      content: `${JSON.stringify(payload, null, 2)}\n`
+      content: `${JSON.stringify(sanitizeRecoveryValue(payload), null, 2)}\n`
     };
   }
   if (format === "markdown") {
@@ -32,8 +67,8 @@ export function createRecoveryExport({ drafts = [], captures = [], profile = "re
   throw new Error("Choose JSON or Markdown for the recovery export.");
 }
 
-export function recoveryMarkdown(payload) {
-  const lines = [
+export function recoveryMarkdown(payload: RecoveryPayload): string {
+  const lines: string[] = [
     "# Notion Quick Note recovery export",
     "",
     `Exported: ${payload.exportedAt}`,
@@ -46,11 +81,12 @@ export function recoveryMarkdown(payload) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function documentToMarkdown(doc) {
-  return (doc?.content || []).map((node) => blockMarkdown(node, 0)).filter(Boolean).join("\n\n").trim();
+export function documentToMarkdown(doc: unknown): string {
+  const normalized = normalizeEditorNode(doc);
+  return (normalized.content || []).map((node) => blockMarkdown(node, 0)).filter(Boolean).join("\n\n").trim();
 }
 
-function appendGroup(lines, title, records, view) {
+function appendGroup<T>(lines: string[], title: string, records: T[], view: (record: T) => NoteView): void {
   lines.push(`## ${title}`, "");
   if (!records.length) {
     lines.push("_None_", "");
@@ -72,21 +108,21 @@ function appendGroup(lines, title, records, view) {
   }
 }
 
-function draftView(draft) {
+function draftView(draft: CaptureDraft): NoteView {
   return {
     title: draft.title || firstText(draft.doc),
     metadata: [
       "Status: Draft",
       `Updated: ${isoDate(draft.updatedAt)}`,
       draft.context?.title ? `Source page: ${escapeInline(draft.context.title)}` : ""
-    ].filter(Boolean),
+    ].filter((item): item is string => Boolean(item)),
     sources: normalizeSources(draft.sources || []),
     body: documentToMarkdown(draft.doc)
   };
 }
 
-function captureView(record) {
-  const capture = record.pendingCapture || record.syncedCapture || record.capture || {};
+function captureView(record: CaptureRecord): NoteView {
+  const capture = record.pendingCapture || record.syncedCapture || record.capture;
   return {
     title: capture.document?.title || firstText(capture.document?.doc),
     metadata: [
@@ -95,13 +131,13 @@ function captureView(record) {
       record.destination?.destinationName ? `Destination: ${escapeInline(record.destination.destinationName)}` : "",
       record.lastError?.message ? `Delivery error: ${escapeInline(record.lastError.message)}` : "",
       record.remote?.url ? `Notion URL: ${record.remote.url}` : ""
-    ].filter(Boolean),
+    ].filter((item): item is string => Boolean(item)),
     sources: normalizeSources(capture.sources || []),
     body: documentToMarkdown(capture.document?.doc)
   };
 }
 
-function blockMarkdown(node, depth) {
+function blockMarkdown(node: EditorNode | undefined, depth: number): string {
   switch (node?.type) {
     case "paragraph": return inlineMarkdown(node.content);
     case "heading": return `${"#".repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1)))} ${inlineMarkdown(node.content)}`;
@@ -117,12 +153,12 @@ function blockMarkdown(node, depth) {
   }
 }
 
-function blockquoteMarkdown(node, depth) {
+function blockquoteMarkdown(node: EditorNode, depth: number): string {
   return (node.content || []).map((child) => blockMarkdown(child, depth)).join("\n")
     .split("\n").map((line) => `> ${line}`).join("\n");
 }
 
-function listMarkdown(node, marker, depth) {
+function listMarkdown(node: EditorNode, marker: "-" | "ordered", depth: number): string {
   const start = Number(node.attrs?.start) || 1;
   return (node.content || []).map((item, index) => {
     const prefix = marker === "ordered" ? `${start + index}.` : marker;
@@ -130,11 +166,11 @@ function listMarkdown(node, marker, depth) {
   }).join("\n");
 }
 
-function taskListMarkdown(node, depth) {
+function taskListMarkdown(node: EditorNode, depth: number): string {
   return (node.content || []).map((item) => listItemMarkdown(item, `- [${item.attrs?.checked ? "x" : " "}]`, depth)).join("\n");
 }
 
-function listItemMarkdown(item, prefix, depth) {
+function listItemMarkdown(item: EditorNode, prefix: string, depth: number): string {
   const [first, ...rest] = item.content || [];
   const indent = "  ".repeat(depth);
   const firstLine = first?.type === "paragraph" ? inlineMarkdown(first.content) : blockMarkdown(first, depth + 1);
@@ -143,7 +179,7 @@ function listItemMarkdown(item, prefix, depth) {
   return [`${indent}${prefix} ${firstLine || ""}`.trimEnd(), ...nested].join("\n");
 }
 
-function inlineMarkdown(nodes = []) {
+function inlineMarkdown(nodes: EditorNode[] = []): string {
   return nodes.map((node) => {
     if (node.type === "hardBreak") return "  \n";
     if (node.type !== "text") return "";
@@ -160,39 +196,40 @@ function inlineMarkdown(nodes = []) {
   }).join("");
 }
 
-function sanitizeRecoveryValue(value) {
+function sanitizeRecoveryValue(value: unknown): JsonValue {
   if (Array.isArray(value)) return value.map(sanitizeRecoveryValue);
-  if (!value || typeof value !== "object") return value;
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (!isRecord(value)) return null;
   const blocked = new Set(["token", "refreshToken", "accessToken", "clientSecret", "oauthClientId"]);
   return Object.fromEntries(Object.entries(value)
     .filter(([key]) => !blocked.has(key))
     .map(([key, child]) => [key, sanitizeRecoveryValue(child)]));
 }
 
-function firstText(node) {
+function firstText(node: EditorNode): string {
   return rawText(node).trim().split("\n")[0] || "Untitled note";
 }
 
-function rawText(node) {
+function rawText(node: EditorNode | undefined): string {
   if (!node) return "";
   if (node.type === "text") return node.text || "";
   if (node.type === "hardBreak") return "\n";
   return (node.content || []).map(rawText).join(node.type === "doc" ? "\n" : "");
 }
 
-function escapeHeading(value) {
+function escapeHeading(value: unknown): string {
   return String(value || "").replace(/[\r\n]+/g, " ").replace(/#/g, "\\#").trim();
 }
 
-function escapeInline(value) {
+function escapeInline(value: unknown): string {
   return String(value || "").replace(/[\r\n]+/g, " ").replace(/([\\`*_[\]<>])/g, "\\$1");
 }
 
-function escapeUrl(value) {
+function escapeUrl(value: unknown): string {
   return String(value || "").replace(/[()\s]/g, (character) => encodeURIComponent(character));
 }
 
-function isoDate(value) {
+function isoDate(value: unknown): string {
   const date = new Date(Number(value || 0));
   return Number.isNaN(date.valueOf()) ? "Unknown" : date.toISOString();
 }

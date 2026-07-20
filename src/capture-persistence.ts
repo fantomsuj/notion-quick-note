@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   createCaptureRepository,
   emptyCaptureState,
@@ -9,25 +8,56 @@ import {
 import { createIndexedDbBackend, REGULAR_CAPTURE_INDEX_KEY } from "./capture-indexed-db.js";
 import { createKeyedCaptureBackend, INCOGNITO_CAPTURE_INDEX_KEY } from "./capture-key-store.js";
 import { CAPTURE_INDEX_VERSION, createRecordCaptureRepository } from "./capture-record-repository.js";
+import type {
+  CaptureChangeHandler,
+  Clock,
+  DeliveryState,
+  KeyValueStoragePort,
+  StorageMetadata,
+  UUIDFactory
+} from "./contracts.js";
+import { isRecord } from "./contracts.js";
+
+type LegacyRepository = ReturnType<typeof createCaptureRepository>;
+type RecordRepository = ReturnType<typeof createRecordCaptureRepository>;
+type ActiveRepository = LegacyRepository | RecordRepository;
+
+interface PersistenceInitialization {
+  backend: "legacy" | "indexeddb" | "session-keys";
+  migrationError: string;
+}
+
+interface PersistenceConfiguration {
+  initialize: () => Promise<PersistenceInitialization>;
+  active: () => ActiveRepository;
+  backendName: () => string;
+  migrationError: () => string;
+  setChangeHandler: (handler: CaptureChangeHandler) => void;
+}
 
 export function createRegularCapturePersistence({
   storage,
   indexedDB = globalThis.indexedDB,
   now = () => Date.now(),
   uuid = () => crypto.randomUUID()
+}: {
+  storage: KeyValueStoragePort;
+  indexedDB?: IDBFactory;
+  now?: Clock;
+  uuid?: UUIDFactory;
 }) {
   const legacy = createCaptureRepository({ storage, key: REGULAR_CAPTURE_STATE_KEY, now, uuid });
   const backend = createIndexedDbBackend({ indexedDB });
   const records = createRecordCaptureRepository({ backend, now, uuid });
-  let active = records;
-  let initialized;
+  let active: ActiveRepository = records;
+  let initialized: Promise<PersistenceInitialization> | undefined;
   let migrationError = "";
   let readyComplete = false;
-  let externalChangeHandler = async () => undefined;
+  let externalChangeHandler: CaptureChangeHandler = async () => undefined;
 
   records.setChangeHandler(async (event) => {
     if (!readyComplete) return;
-    if (event.structural) await syncRegularIndex(records, storage, migrationError).catch((error) => { migrationError = error.message; });
+    if (event.structural) await syncRegularIndex(records, storage, migrationError).catch((error: unknown) => { migrationError = errorMessage(error); });
     await externalChangeHandler(event);
   });
 
@@ -37,8 +67,8 @@ export function createRegularCapturePersistence({
       let meta;
       try {
         meta = await records.getMeta();
-      } catch (error) {
-        migrationError = error.message;
+      } catch (error: unknown) {
+        migrationError = errorMessage(error);
         active = legacy;
         readyComplete = true;
         return { backend: "legacy", migrationError };
@@ -54,8 +84,8 @@ export function createRegularCapturePersistence({
           });
           await syncRegularIndex(records, storage, "");
           meta = await records.updateMeta({ migrationStatus: "complete", migrationError: "" });
-        } catch (error) {
-          migrationError = error.message;
+        } catch (error: unknown) {
+          migrationError = errorMessage(error);
           await records.updateMeta({ migrationStatus: "pending", migrationError }).catch(() => undefined);
           active = legacy;
           readyComplete = true;
@@ -64,12 +94,12 @@ export function createRegularCapturePersistence({
       } else {
         try {
           await syncRegularIndex(records, storage, "");
-        } catch (error) {
-          migrationError = error.message;
+        } catch (error: unknown) {
+          migrationError = errorMessage(error);
         }
       }
       if (legacyValue !== undefined) {
-        await storage.remove(REGULAR_CAPTURE_STATE_KEY).catch((error) => { migrationError = error.message; });
+        await storage.remove(REGULAR_CAPTURE_STATE_KEY).catch((error: unknown) => { migrationError = errorMessage(error); });
       }
       readyComplete = true;
       return { backend: "indexeddb", migrationError };
@@ -82,17 +112,17 @@ export function createRegularCapturePersistence({
     active: () => active,
     backendName: () => active === legacy ? "legacy" : "indexeddb",
     migrationError: () => migrationError,
-    setChangeHandler(handler) { externalChangeHandler = handler; }
+    setChangeHandler(handler: CaptureChangeHandler) { externalChangeHandler = handler; }
   });
 }
 
-export function createIncognitoCapturePersistence({ storage, now = () => Date.now(), uuid = () => crypto.randomUUID() }) {
+export function createIncognitoCapturePersistence({ storage, now = () => Date.now(), uuid = () => crypto.randomUUID() }: { storage: KeyValueStoragePort; now?: Clock; uuid?: UUIDFactory }) {
   const backend = createKeyedCaptureBackend({ storage });
   const records = createRecordCaptureRepository({ backend, now, uuid });
-  let initialized;
+  let initialized: Promise<PersistenceInitialization> | undefined;
   let migrationError = "";
   let readyComplete = false;
-  let externalChangeHandler = async () => undefined;
+  let externalChangeHandler: CaptureChangeHandler = async () => undefined;
   records.setChangeHandler((event) => readyComplete ? externalChangeHandler(event) : undefined);
 
   async function initialize() {
@@ -111,8 +141,8 @@ export function createIncognitoCapturePersistence({ storage, now = () => Date.no
         if (stored[INCOGNITO_CAPTURE_STATE_KEY] !== undefined) await storage.remove(INCOGNITO_CAPTURE_STATE_KEY);
         await backend.reconcile();
         readyComplete = true;
-      } catch (error) {
-        migrationError = error.message;
+      } catch (error: unknown) {
+        migrationError = errorMessage(error);
         throw error;
       }
       return { backend: "session-keys", migrationError };
@@ -125,32 +155,33 @@ export function createIncognitoCapturePersistence({ storage, now = () => Date.no
     active: () => records,
     backendName: () => "session-keys",
     migrationError: () => migrationError,
-    setChangeHandler(handler) { externalChangeHandler = handler; }
+    setChangeHandler(handler: CaptureChangeHandler) { externalChangeHandler = handler; }
   });
 }
 
-function delegatePersistence(configuration) {
-  const wrapper = {
+function delegatePersistence(configuration: PersistenceConfiguration) {
+  async function repository(): Promise<ActiveRepository> {
+    await configuration.initialize();
+    return configuration.active();
+  }
+
+  return {
     ready: configuration.initialize,
     initialize: configuration.initialize,
     setChangeHandler: configuration.setChangeHandler,
     get backendName() { return configuration.backendName(); },
-    get migrationError() { return configuration.migrationError(); }
-  };
-  for (const method of [
-    "load", "save", "updateState", "importState", "getMeta", "getDraft", "getActiveDraft", "getCapture",
-    "findCaptureByDraftId", "listDrafts", "listCaptures", "listDueCaptures", "countByStatus", "getOrCreateDraft",
-    "upsertDraft", "activateDraft", "createEditDraft", "convertEditDraftToNew", "discardDraft", "enqueue",
-    "enqueueUpdate", "updateCapture", "claimCapture", "removeCapture", "findCaptureByRemotePageId",
-    "ensureImportedRemoteCapture", "maintain", "logicalBytes"
-  ]) {
-    wrapper[method] = async (...args) => {
-      await configuration.initialize();
-      const repository = configuration.active();
-      if (typeof repository[method] === "function") return repository[method](...args);
-      if (method === "getDraft") return (await repository.load()).drafts[String(args[0] || "")] || null;
-      if (method === "getMeta") {
-        const state = await repository.load();
+    get migrationError() { return configuration.migrationError(); },
+    async load() { return (await repository()).load(); },
+    async save(...args: Parameters<LegacyRepository["save"]>) { return (await repository()).save(...args); },
+    async updateState(...args: Parameters<LegacyRepository["updateState"]>) { return (await repository()).updateState(...args); },
+    async importState(...args: Parameters<RecordRepository["importState"]>) {
+      const active = await repository();
+      return "importState" in active ? active.importState(...args) : active.save(args[0] || emptyCaptureState());
+    },
+    async getMeta(): Promise<StorageMetadata> {
+      const active = await repository();
+      if ("getMeta" in active) return active.getMeta();
+      const state = await active.load();
         return {
           key: "state",
           version: CAPTURE_INDEX_VERSION,
@@ -159,34 +190,49 @@ function delegatePersistence(configuration) {
           migrationError: configuration.migrationError(),
           lastMaintenanceAt: 0
         };
-      }
-      if (method === "getActiveDraft") {
-        const state = await repository.load();
-        return state.drafts[state.activeDraftId] || null;
-      }
-      if (method === "getCapture") return (await repository.load()).captures[String(args[0] || "")] || null;
-      if (method === "findCaptureByDraftId") return Object.values((await repository.load()).captures).find((item) => item.draftId === args[0]) || null;
-      if (method === "listDrafts") return Object.values((await repository.load()).drafts);
-      if (method === "listCaptures") {
-        const records = Object.values((await repository.load()).captures);
-        const statuses = args[0]?.statuses;
-        return statuses?.length ? records.filter((item) => statuses.includes(item.status)) : records;
-      }
-      if (method === "listDueCaptures") return Object.values((await repository.load()).captures)
-        .filter((item) => item.status === "pending" && item.nextAttemptAt <= args[0]);
-      if (method === "countByStatus") return Object.values((await repository.load()).captures).reduce((counts, item) => {
+    },
+    async getDraft(...args: Parameters<LegacyRepository["getDraft"]>) { return (await repository()).getDraft(...args); },
+    async getActiveDraft() { return (await repository()).getActiveDraft(); },
+    async getCapture(...args: Parameters<LegacyRepository["getCapture"]>) { return (await repository()).getCapture(...args); },
+    async findCaptureByDraftId(...args: Parameters<LegacyRepository["findCaptureByDraftId"]>) { return (await repository()).findCaptureByDraftId(...args); },
+    async listDrafts() { return (await repository()).listDrafts(); },
+    async listCaptures(...args: Parameters<LegacyRepository["listCaptures"]>) { return (await repository()).listCaptures(...args); },
+    async listDueCaptures(...args: Parameters<LegacyRepository["listDueCaptures"]>) { return (await repository()).listDueCaptures(...args); },
+    async countByStatus(): Promise<Partial<Record<DeliveryState, number>>> {
+      const active = await repository();
+      if ("countByStatus" in active) return active.countByStatus();
+      return (await active.listCaptures()).reduce<Partial<Record<DeliveryState, number>>>((counts, item) => {
         counts[item.status] = (counts[item.status] || 0) + 1;
         return counts;
       }, {});
-      if (method === "logicalBytes") return new TextEncoder().encode(JSON.stringify(await repository.load())).length;
-      if (method === "maintain") return repository.updateState(() => undefined);
-      throw new Error(`Capture repository method ${method} is unavailable.`);
-    };
-  }
-  return wrapper;
+    },
+    async getOrCreateDraft(...args: Parameters<LegacyRepository["getOrCreateDraft"]>) { return (await repository()).getOrCreateDraft(...args); },
+    async upsertDraft(...args: Parameters<LegacyRepository["upsertDraft"]>) { return (await repository()).upsertDraft(...args); },
+    async activateDraft(...args: Parameters<LegacyRepository["activateDraft"]>) { return (await repository()).activateDraft(...args); },
+    async createEditDraft(...args: Parameters<LegacyRepository["createEditDraft"]>) { return (await repository()).createEditDraft(...args); },
+    async convertEditDraftToNew(...args: Parameters<LegacyRepository["convertEditDraftToNew"]>) { return (await repository()).convertEditDraftToNew(...args); },
+    async discardDraft(...args: Parameters<LegacyRepository["discardDraft"]>) { return (await repository()).discardDraft(...args); },
+    async enqueue(...args: Parameters<LegacyRepository["enqueue"]>) { return (await repository()).enqueue(...args); },
+    async enqueueUpdate(...args: Parameters<LegacyRepository["enqueueUpdate"]>) { return (await repository()).enqueueUpdate(...args); },
+    async updateCapture(...args: Parameters<LegacyRepository["updateCapture"]>) { return (await repository()).updateCapture(...args); },
+    async claimCapture(...args: Parameters<LegacyRepository["claimCapture"]>) { return (await repository()).claimCapture(...args); },
+    async removeCapture(...args: Parameters<LegacyRepository["removeCapture"]>) { return (await repository()).removeCapture(...args); },
+    async findCaptureByRemotePageId(...args: Parameters<LegacyRepository["findCaptureByRemotePageId"]>) { return (await repository()).findCaptureByRemotePageId(...args); },
+    async ensureImportedRemoteCapture(...args: Parameters<LegacyRepository["ensureImportedRemoteCapture"]>) { return (await repository()).ensureImportedRemoteCapture(...args); },
+    async maintain(...args: Parameters<RecordRepository["maintain"]>) {
+      const active = await repository();
+      return "maintain" in active ? active.maintain(...args) : active.updateState(() => undefined).then(() => ({ changed: false, maintained: false }));
+    },
+    async logicalBytes(): Promise<number> {
+      const active = await repository();
+      return "logicalBytes" in active
+        ? active.logicalBytes()
+        : new TextEncoder().encode(JSON.stringify(await active.load())).length;
+    }
+  };
 }
 
-async function syncRegularIndex(repository, storage, migrationError) {
+async function syncRegularIndex(repository: RecordRepository, storage: KeyValueStoragePort, migrationError: string): Promise<void> {
   const [meta, drafts, captures] = await Promise.all([
     repository.getMeta(), repository.listDrafts(), repository.listCaptures()
   ]);
@@ -203,4 +249,8 @@ async function syncRegularIndex(repository, storage, migrationError) {
       lastMaintenanceAt: Number(meta.lastMaintenanceAt || 0)
     }
   });
+}
+
+function errorMessage(error: unknown): string {
+  return isRecord(error) && typeof error.message === "string" ? error.message : "Capture persistence failed.";
 }

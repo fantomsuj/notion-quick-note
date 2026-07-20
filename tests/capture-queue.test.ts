@@ -76,6 +76,24 @@ test("independent drainers atomically claim one due capture only once", async ()
   assert.equal(stored.attemptCount, 1);
 });
 
+test("malformed remote delivery results stay queued instead of becoming delivered", async () => {
+  const repository = repositoryFixture(() => 1_750);
+  const record = await enqueue(repository);
+  const queue = createDeliveryQueue({
+    repository,
+    now: () => 1_750,
+    getConnection: async () => ({ configured: true, connectionId: "connection-1" }),
+    deliver: async () => ({})
+  });
+
+  const result = await queue.attempt(record.id);
+
+  assert.equal(result.status, DELIVERY_STATES.pending);
+  assert.equal(result.remote, null);
+  assert.equal(result.lastError.kind, "ambiguous_managed");
+  assert.ok(result.nextAttemptAt > 1_750);
+});
+
 test("managed ambiguous delivery verifies before retry while manual delivery requires review", async () => {
   let timestamp = 2_000;
   const managedRepository = repositoryFixture(() => timestamp);
@@ -100,6 +118,26 @@ test("managed ambiguous delivery verifies before retry while manual delivery req
   });
   await manualQueue.attempt(manual.id);
   assert.equal((await manualRepository.load()).captures[manual.id].status, DELIVERY_STATES.uncertain);
+});
+
+test("malformed verification results cannot strand a claimed capture in sending", async () => {
+  const repository = repositoryFixture(() => 2_500);
+  const record = await enqueue(repository);
+  const queue = createDeliveryQueue({
+    repository,
+    now: () => 2_500,
+    getConnection: async () => ({ configured: true, connectionId: "connection-1" }),
+    deliver: async () => { throw Object.assign(new Error("Gateway"), { status: 502 }); },
+    findExisting: async () => ({})
+  });
+
+  await queue.attempt(record.id).catch(() => null);
+  const stored = await repository.getCapture(record.id);
+
+  assert.equal(stored.status, DELIVERY_STATES.pending);
+  assert.notEqual(stored.status, DELIVERY_STATES.sending);
+  assert.notEqual(stored.status, DELIVERY_STATES.delivered);
+  assert.equal(stored.lastError.kind, "ambiguous_managed");
 });
 
 test("retarget without setup clears the old binding so completed setup can adopt it", async () => {

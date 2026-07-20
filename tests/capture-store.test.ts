@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  addContextToDraft,
   badgeForState,
   CaptureStorageError,
   createCaptureRepository,
@@ -10,6 +11,8 @@ import {
   emptyCaptureState,
   migrateCaptureStateV1,
   normalizeCaptureState,
+  normalizeDraft,
+  normalizeRecord,
   normalizeSources,
   pruneCaptureState,
   recoverInterruptedRecords
@@ -19,6 +22,65 @@ test("corrupted and unsupported persisted state versions fail closed", () => {
   assert.deepEqual(normalizeCaptureState(null), emptyCaptureState());
   assert.deepEqual(normalizeCaptureState({ version: 999, drafts: { hostile: { id: "hostile" } } }), emptyCaptureState());
   assert.deepEqual(normalizeCaptureState({ version: 2, drafts: "not-an-object", captures: [] }), emptyCaptureState());
+});
+
+test("unsupported explicit draft and capture versions are rejected instead of rewritten as v2", () => {
+  const document = { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Body" }] }] };
+  const unsupportedDraft = { version: 999, id: "future-draft", doc: document };
+  const unsupportedRecord = {
+    version: 999,
+    id: "future-capture",
+    status: DELIVERY_STATES.pending,
+    capture: { document: { doc: document } }
+  };
+
+  assert.equal(normalizeDraft(unsupportedDraft), null);
+  assert.equal(normalizeRecord(unsupportedRecord), null);
+
+  const state = normalizeCaptureState({
+    version: 2,
+    activeDraftId: "future-draft",
+    drafts: { "future-draft": unsupportedDraft },
+    captures: { "future-capture": unsupportedRecord }
+  });
+  assert.deepEqual(state, emptyCaptureState());
+});
+
+test("non-record persisted draft and capture entries fail closed", () => {
+  const invalidValues = [null, "corrupt", 42, true, [], ["not", "a", "record"]];
+  for (const value of invalidValues) {
+    assert.equal(normalizeDraft(value), null);
+    assert.equal(normalizeRecord(value), null);
+  }
+
+  const state = normalizeCaptureState({
+    version: 2,
+    activeDraftId: "null",
+    drafts: Object.fromEntries(invalidValues.map((value, index) => [`draft-${index}`, value])),
+    captures: Object.fromEntries(invalidValues.map((value, index) => [`capture-${index}`, value]))
+  });
+
+  assert.deepEqual(state, emptyCaptureState());
+});
+
+test("missing-version and known v1 persisted items still migrate to v2", () => {
+  const document = { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Legacy body" }] }] };
+  const state = normalizeCaptureState({
+    version: 2,
+    activeDraftId: "unversioned",
+    drafts: {
+      unversioned: { id: "unversioned", doc: document },
+      v1: { version: 1, id: "v1", doc: document }
+    },
+    captures: {
+      unversioned: { id: "unversioned", status: DELIVERY_STATES.pending, capture: { document: { doc: document } } },
+      v1: { version: 1, id: "v1", status: DELIVERY_STATES.pending, capture: { document: { doc: document } } }
+    }
+  });
+
+  assert.deepEqual(Object.values(state.drafts).map((draft) => draft.version), [2, 2]);
+  assert.deepEqual(Object.values(state.captures).map((record) => record.version), [2, 2]);
+  assert.equal(state.activeDraftId, "unversioned");
 });
 
 function memoryStorage() {
@@ -228,6 +290,35 @@ test("sources normalize, deduplicate fragments, preserve the primary, and cap at
   assert.equal(sources.length, 20);
   assert.equal(sources[0].title, "Source 0");
   assert.equal(sources[0].url, "https://example.com/");
+});
+
+test("automatic context respects draft-scoped source dismissals until explicit restore", () => {
+  const draft = normalizeDraft({
+    version: 2,
+    id: "draft",
+    sources: [],
+    dismissedSourceUrls: ["https://example.com/article#old"],
+    doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Body" }] }] }
+  });
+  assert.ok(draft);
+
+  const automatic = addContextToDraft(
+    draft,
+    { title: "Article", url: "https://example.com/article#new" },
+    200,
+    { explicit: false }
+  );
+  assert.deepEqual(automatic.sources, []);
+  assert.deepEqual(automatic.dismissedSourceUrls, ["https://example.com/article"]);
+
+  const restored = addContextToDraft(
+    automatic,
+    { title: "Article", url: "https://example.com/article" },
+    300,
+    { explicit: true }
+  );
+  assert.deepEqual(restored.sources.map((source) => source.url), ["https://example.com/article"]);
+  assert.deepEqual(restored.dismissedSourceUrls, []);
 });
 
 test("editing a recent note reuses its capture record and reactivates the stashed draft", async () => {

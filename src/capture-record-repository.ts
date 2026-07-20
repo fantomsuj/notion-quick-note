@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   addContextToDraft,
   CAPTURE_DRAFT_VERSION,
@@ -8,16 +7,36 @@ import {
   emptyCaptureState,
   hasDraftBody,
   normalizeDraft,
+  normalizeEditorNode,
   normalizeRecord,
   normalizeSources,
   selectionDocument,
   sourceFromContext
 } from "./capture-store.js";
+import type {
+  CaptureBackend,
+  CaptureBackendTransaction,
+  CaptureChangeEvent,
+  CaptureChangeHandler,
+  CaptureDestination,
+  CaptureDocument,
+  CaptureDraft,
+  CaptureRecord,
+  CaptureRecordUpdate,
+  CaptureState,
+  Clock,
+  DeliveryState,
+  EditorNode,
+  RemoteTarget,
+  StorageMetadata,
+  UUIDFactory
+} from "./contracts.js";
+import { isRecord } from "./contracts.js";
 
 export const CAPTURE_INDEX_VERSION = 3;
 export const CAPTURE_META_KEY = "state";
 
-export function emptyCaptureMeta() {
+export function emptyCaptureMeta(): StorageMetadata {
   return {
     key: CAPTURE_META_KEY,
     version: CAPTURE_INDEX_VERSION,
@@ -28,52 +47,92 @@ export function emptyCaptureMeta() {
   };
 }
 
-function compactRemoteId(value = "") {
+function compactRemoteId(value: unknown = ""): string {
   return String(value || "").replaceAll("-", "").toLowerCase();
 }
 
-export function createRecordCaptureRepository({ backend, now = () => Date.now(), uuid = () => crypto.randomUUID() }) {
-  let changeHandler = async () => undefined;
+interface RecordRepositoryOptions {
+  backend: CaptureBackend;
+  now?: Clock;
+  uuid?: UUIDFactory;
+}
 
-  async function transaction(stores, mode, callback) {
+interface EditDraftRequest {
+  recordId: string;
+  title: string;
+  doc: unknown;
+  sources?: unknown;
+  remote?: unknown;
+  baseFingerprint?: string;
+  returnDraftId?: string;
+  tabId?: number | null;
+  sessionId?: string;
+  replace?: boolean;
+}
+
+interface EnqueueRequest {
+  draftId?: string;
+  capture: unknown;
+  context?: unknown;
+  destination: CaptureDestination | null;
+  connectionId?: string;
+  status: DeliveryState;
+  incognito?: boolean;
+}
+
+interface ImportRemoteCaptureRequest {
+  pageId: string;
+  title?: string;
+  url?: string;
+  connectionId?: string;
+  destination?: CaptureDestination | null;
+  remote?: unknown;
+  document?: unknown;
+}
+
+export function createRecordCaptureRepository({ backend, now = () => Date.now(), uuid = () => crypto.randomUUID() }: RecordRepositoryOptions) {
+  let changeHandler: CaptureChangeHandler = async () => undefined;
+
+  async function transaction<T>(stores: Parameters<CaptureBackend["transaction"]>[0], mode: Parameters<CaptureBackend["transaction"]>[1], callback: (transaction: CaptureBackendTransaction) => Promise<T> | T): Promise<T> {
     try {
       return await backend.transaction(stores, mode, callback);
-    } catch (error) {
+    } catch (error: unknown) {
       if (error instanceof CaptureStorageError) throw error;
-      if (error?.name === "QuotaExceededError") {
+      if (isRecord(error) && error.name === "QuotaExceededError") {
         throw new CaptureStorageError("Quick Note local storage is full. Remove old drafts or delivered history before saving.", "capture_storage_full");
       }
-      throw new CaptureStorageError(error?.message || "Quick Note could not store this capture locally.");
+      throw new CaptureStorageError(errorMessage(error, "Quick Note could not store this capture locally."));
     }
   }
 
-  async function changed(kind, detail = {}) {
+  async function changed(kind: CaptureChangeEvent["kind"], detail: Omit<CaptureChangeEvent, "kind"> = {}): Promise<void> {
     const event = { kind, ...detail };
     await Promise.resolve(globalThis.__notionQuickNoteCaptureCheckpoint?.(event));
     await Promise.resolve(changeHandler(event)).catch(() => undefined);
   }
 
-  async function metaIn(tx) {
+  async function metaIn(tx: CaptureBackendTransaction): Promise<StorageMetadata> {
     return { ...emptyCaptureMeta(), ...(await tx.getMeta()) };
   }
 
   const repository = {
     backendName: backend.name,
-    setChangeHandler(handler) {
+    setChangeHandler(handler: CaptureChangeHandler) {
       changeHandler = typeof handler === "function" ? handler : async () => undefined;
     },
     async load() {
       return transaction(["meta", "drafts", "captures"], "readonly", async (tx) => {
         const [meta, drafts, captures] = await Promise.all([metaIn(tx), tx.getAllDrafts(), tx.getAllCaptures()]);
-        return {
+        const state: CaptureState = {
           version: 2,
           drafts: Object.fromEntries(drafts.map((draft) => [draft.id, normalizeDraft(draft)])),
           activeDraftId: drafts.some((draft) => draft.id === meta.activeDraftId) ? meta.activeDraftId : "",
           captures: Object.fromEntries(captures.map((record) => [record.id, normalizeRecord(record)]))
         };
+        return state;
       });
     },
-    async importState(state, metaUpdates = {}) {
+    async importState(state: CaptureState | null | undefined, metaUpdates: Partial<StorageMetadata> = {}) {
       const normalized = state || emptyCaptureState();
       await transaction(["meta", "drafts", "captures"], "readwrite", async (tx) => {
         await tx.clearDrafts();
@@ -91,10 +150,10 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       await changed("import", { structural: true });
       return repository.load();
     },
-    async save(state) {
+    async save(state: CaptureState) {
       return repository.importState(state);
     },
-    async updateState(callback) {
+    async updateState(callback: (state: CaptureState) => void | Promise<void>) {
       const state = await repository.load();
       await callback(state);
       return repository.importState(state);
@@ -102,14 +161,14 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
     async getMeta() {
       return transaction(["meta"], "readonly", metaIn);
     },
-    async updateMeta(updates) {
+    async updateMeta(updates: Partial<StorageMetadata>) {
       return transaction(["meta"], "readwrite", async (tx) => {
-        const meta = { ...(await metaIn(tx)), ...updates, key: CAPTURE_META_KEY };
+        const meta: StorageMetadata = { ...(await metaIn(tx)), ...updates, key: "state" };
         await tx.putMeta(meta);
         return meta;
       });
     },
-    async getDraft(id) {
+    async getDraft(id: string) {
       const draft = await transaction(["drafts"], "readonly", (tx) => tx.getDraft(String(id || "")));
       return draft ? normalizeDraft(draft) : null;
     },
@@ -120,35 +179,35 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         return draft ? normalizeDraft(draft) : null;
       });
     },
-    async getCapture(id) {
+    async getCapture(id: string) {
       const record = await transaction(["captures"], "readonly", (tx) => tx.getCapture(String(id || "")));
       return record ? normalizeRecord(record) : null;
     },
-    async findCaptureByDraftId(draftId) {
+    async findCaptureByDraftId(draftId: string) {
       const record = await transaction(["captures"], "readonly", (tx) => tx.findCaptureByDraftId(String(draftId || "")));
       return record ? normalizeRecord(record) : null;
     },
     async listDrafts() {
       const drafts = await transaction(["drafts"], "readonly", (tx) => tx.getAllDrafts());
-      return drafts.map(normalizeDraft);
+      return drafts;
     },
-    async listCaptures({ statuses } = {}) {
+    async listCaptures({ statuses }: { statuses?: DeliveryState[] } = {}) {
       const records = await transaction(["captures"], "readonly", (tx) => tx.getAllCaptures());
       const allowed = statuses?.length ? new Set(statuses) : null;
-      return records.map(normalizeRecord).filter((record) => !allowed || allowed.has(record.status));
+      return records.filter((record) => !allowed || allowed.has(record.status));
     },
     async listDueCaptures(timestamp = now()) {
       const records = await transaction(["captures"], "readonly", (tx) => tx.getDueCaptures(timestamp));
-      return records.map(normalizeRecord).sort((left, right) => left.createdAt - right.createdAt);
+      return records.sort((left, right) => left.createdAt - right.createdAt);
     },
     async countByStatus() {
       const records = await repository.listCaptures();
-      return records.reduce((counts, record) => {
+      return records.reduce<Partial<Record<DeliveryState, number>>>((counts, record) => {
         counts[record.status] = (counts[record.status] || 0) + 1;
         return counts;
       }, {});
     },
-    async getOrCreateDraft({ tabId, context, includeSource = true, sessionId = "", draftId = "" }) {
+    async getOrCreateDraft({ tabId, context, includeSource = true, sessionId = "", draftId = "" }: { tabId?: number | null; context?: unknown; includeSource?: boolean; sessionId?: string; draftId?: string }) {
       let structural = false;
       const result = await transaction(["meta", "drafts"], "readwrite", async (tx) => {
         const meta = await metaIn(tx);
@@ -176,7 +235,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         const id = requestedId || uuid();
         const timestamp = now();
         const source = sourceFromContext(context);
-        const draft = normalizeDraft({
+        const draft = requireDraft({
           version: CAPTURE_DRAFT_VERSION,
           id,
           tabId: tabId ?? null,
@@ -189,7 +248,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
           returnDraftId: "",
           title: "",
           includeSource,
-          doc: selectionDocument(context?.selection || ""),
+          doc: selectionDocument(source?.selection || ""),
           createdAt: timestamp,
           updatedAt: timestamp
         });
@@ -204,30 +263,30 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       await changed("draft", { structural, id: result.id });
       return result;
     },
-    async upsertDraft(draft, expectedRevision) {
+    async upsertDraft(draft: CaptureDraft, expectedRevision?: number) {
       let structural = false;
       const result = await transaction(["meta", "drafts"], "readwrite", async (tx) => {
         if (!draft?.id) throw new CaptureStorageError("Draft ID is required.", "invalid_draft");
         const meta = await metaIn(tx);
-        const existing = await tx.getDraft(draft.id) || {};
-        const staleRevision = expectedRevision !== undefined && Number(expectedRevision) !== Number(existing.revision || 0);
-        const staleSession = Boolean(draft.sessionId && existing.sessionId && draft.sessionId !== existing.sessionId);
-        if (existing.id && (staleRevision || staleSession)) {
+        const existing = await tx.getDraft(draft.id);
+        const staleRevision = expectedRevision !== undefined && Number(expectedRevision) !== Number(existing?.revision || 0);
+        const staleSession = Boolean(draft.sessionId && existing?.sessionId && draft.sessionId !== existing.sessionId);
+        if (existing && (staleRevision || staleSession)) {
           throw new CaptureStorageError("This note was updated in another tab. Reload the latest copy to continue.", "stale_draft");
         }
-        const next = normalizeDraft({
-          ...existing,
+        const next = requireDraft({
+          ...(existing || {}),
           ...draft,
           version: CAPTURE_DRAFT_VERSION,
-          mode: draft.mode === "edit" ? "edit" : existing.mode || "new",
-          targetRecordId: String(draft.targetRecordId ?? existing.targetRecordId ?? ""),
-          sources: normalizeSources(draft.sources ?? existing.sources ?? [sourceFromContext(draft.context || existing.context)].filter(Boolean)),
-          revision: Number(existing.revision || 0) + 1,
-          createdAt: existing.createdAt || now(),
+          mode: draft.mode === "edit" ? "edit" : existing?.mode || "new",
+          targetRecordId: String(draft.targetRecordId ?? existing?.targetRecordId ?? ""),
+          sources: normalizeSources(draft.sources ?? existing?.sources ?? [sourceFromContext(draft.context || existing?.context)].filter(Boolean)),
+          revision: Number(existing?.revision || 0) + 1,
+          createdAt: existing?.createdAt || now(),
           updatedAt: now()
         });
         if (!hasDraftBody(next)) {
-          if (existing.id) {
+          if (existing) {
             await tx.deleteDraft(next.id);
             structural = true;
           }
@@ -239,7 +298,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
           return null;
         }
         await tx.putDraft(next);
-        if (!existing.id) structural = true;
+        if (!existing) structural = true;
         if (!meta.activeDraftId) {
           structural = true;
           meta.activeDraftId = next.id;
@@ -250,7 +309,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       await changed("draft", { structural, id: draft.id });
       return result;
     },
-    async activateDraft(id, { returnDraftId = "" } = {}) {
+    async activateDraft(id: string, { returnDraftId = "" }: { returnDraftId?: string } = {}) {
       const result = await transaction(["meta", "drafts"], "readwrite", async (tx) => {
         const draft = await tx.getDraft(id);
         if (!draft) return null;
@@ -266,7 +325,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       if (result) await changed("draft", { structural: true, id });
       return result;
     },
-    async createEditDraft({ recordId, title, doc, sources, remote, baseFingerprint, returnDraftId = "", tabId = null, sessionId = "", replace = false }) {
+    async createEditDraft({ recordId, title, doc, sources, remote, baseFingerprint, returnDraftId = "", tabId = null, sessionId = "", replace = false }: EditDraftRequest) {
       let created = false;
       const result = await transaction(["meta", "drafts", "captures"], "readwrite", async (tx) => {
         const record = await tx.getCapture(recordId);
@@ -288,7 +347,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         }
         const timestamp = now();
         const normalizedSources = normalizeSources(sources);
-        const draft = normalizeDraft({
+        const draft = requireDraft({
           id: uuid(), tabId, mode: "edit", targetRecordId: recordId, returnDraftId, sessionId,
           title, doc, sources: normalizedSources, remote, baseFingerprint,
           includeSource: normalizedSources.length > 0, createdAt: timestamp, updatedAt: timestamp,
@@ -303,7 +362,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       if (result) await changed("draft", { structural: true, created, id: result.id });
       return result;
     },
-    async convertEditDraftToNew(id) {
+    async convertEditDraftToNew(id: string) {
       const result = await transaction(["meta", "drafts"], "readwrite", async (tx) => {
         const draft = await tx.getDraft(id);
         if (!draft) return null;
@@ -318,7 +377,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       if (result) await changed("draft", { structural: true, id });
       return result;
     },
-    async discardDraft(id) {
+    async discardDraft(id: string) {
       const discarded = await transaction(["meta", "drafts"], "readwrite", async (tx) => {
         const draft = await tx.getDraft(id);
         if (!draft) return false;
@@ -333,15 +392,16 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       if (discarded) await changed("draft", { structural: true, id });
       return discarded;
     },
-    async enqueue({ draftId, capture, context, destination, connectionId, status, incognito = false }) {
+    async enqueue({ draftId, capture, context, destination, connectionId, status, incognito = false }: EnqueueRequest) {
       const result = await transaction(["meta", "drafts", "captures"], "readwrite", async (tx) => {
         const existing = draftId ? await tx.findCaptureByDraftId(draftId) : null;
         if (existing) return normalizeRecord(existing);
         const id = uuid();
         const timestamp = now();
-        const record = normalizeRecord({
+        const captureValue = isRecord(capture) ? capture : {};
+        const record = requireRecord({
           version: CAPTURE_RECORD_VERSION, id, draftId: draftId || "", scope: incognito ? "incognito" : "regular", status,
-          capture: { ...capture, captureId: id }, syncedCapture: null, pendingCapture: { ...capture, captureId: id },
+          capture: { ...captureValue, captureId: id }, syncedCapture: null, pendingCapture: { ...captureValue, captureId: id },
           operation: "create", syncJournal: null, context, destination, connectionId: connectionId || "",
           createdAt: timestamp, updatedAt: timestamp, attemptCount: 0, firstAttemptAt: 0, lastAttemptAt: 0,
           nextAttemptAt: status === DELIVERY_STATES.pending ? timestamp : 0, lastError: null, remote: null, forceRetry: false
@@ -350,7 +410,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         const draft = draftId ? await tx.getDraft(draftId) : null;
         await tx.putCapture(record);
         if (draft) {
-          await tx.deleteDraft(draftId);
+          await tx.deleteDraft(draft.id);
           if (meta.activeDraftId === draftId) {
             meta.activeDraftId = draft.returnDraftId && await tx.getDraft(draft.returnDraftId) ? draft.returnDraftId : "";
             await tx.putMeta(meta);
@@ -361,17 +421,19 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       await changed("capture", { structural: true, id: result.id, record: result });
       return result;
     },
-    async enqueueUpdate({ draftId, recordId, capture, baseFingerprint, status }) {
+    async enqueueUpdate({ draftId, recordId, capture, baseFingerprint, status }: { draftId: string; recordId: string; capture: unknown; baseFingerprint?: string; status: DeliveryState }) {
       const result = await transaction(["meta", "drafts", "captures"], "readwrite", async (tx) => {
         const record = await tx.getCapture(recordId);
         if (!record) throw new CaptureStorageError("The recent note is no longer available locally.", "missing_capture");
         const draft = await tx.getDraft(draftId);
-        Object.assign(record, {
-          pendingCapture: { ...capture, captureId: record.capture?.captureId || record.id },
+        const captureValue = isRecord(capture) ? capture : {};
+        const next = requireRecord({
+          ...record,
+          pendingCapture: { ...captureValue, captureId: record.capture.captureId || record.id },
           operation: "update", baseFingerprint: baseFingerprint || draft?.baseFingerprint || "", syncJournal: null,
           status, nextAttemptAt: status === DELIVERY_STATES.pending ? now() : 0, lastError: null, updatedAt: now()
         });
-        await tx.putCapture(record);
+        await tx.putCapture(next);
         if (draft) {
           const meta = await metaIn(tx);
           await tx.deleteDraft(draftId);
@@ -380,29 +442,29 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
             await tx.putMeta(meta);
           }
         }
-        return normalizeRecord(record);
+        return next;
       });
       await changed("capture", { structural: true, id: result.id, record: result });
       return result;
     },
-    async updateCapture(id, updates) {
+    async updateCapture(id: string, updates: CaptureRecordUpdate) {
       let statusChanged = false;
       const result = await transaction(["captures"], "readwrite", async (tx) => {
         const existing = await tx.getCapture(id);
         if (!existing) return null;
         statusChanged = updates.status !== undefined && updates.status !== existing.status;
-        const next = normalizeRecord({ ...existing, ...updates, updatedAt: now() });
+        const next = requireRecord({ ...existing, ...updates, updatedAt: now() });
         await tx.putCapture(next);
         return next;
       });
       if (result) await changed("capture", { structural: statusChanged, id, record: result });
       return result;
     },
-    async claimCapture(id, timestamp = now()) {
+    async claimCapture(id: string, timestamp = now()) {
       const result = await transaction(["captures"], "readwrite", async (tx) => {
         const existing = await tx.getCapture(id);
         if (!existing || existing.status !== DELIVERY_STATES.pending || existing.nextAttemptAt > timestamp) return null;
-        const claimed = normalizeRecord({
+        const claimed = requireRecord({
           ...existing,
           status: DELIVERY_STATES.sending,
           firstAttemptAt: existing.firstAttemptAt || timestamp,
@@ -419,7 +481,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       if (result) await changed("capture", { structural: true, id, record: result });
       return result;
     },
-    async removeCapture(id) {
+    async removeCapture(id: string) {
       const removed = await transaction(["captures"], "readwrite", async (tx) => {
         if (!await tx.getCapture(id)) return false;
         await tx.deleteCapture(id);
@@ -428,49 +490,47 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       if (removed) await changed("capture", { structural: true, id });
       return removed;
     },
-    async findCaptureByRemotePageId(pageId) {
+    async findCaptureByRemotePageId(pageId: string) {
       const needle = compactRemoteId(pageId);
       if (!needle) return null;
       const records = await this.listCaptures();
       return records.find((record) => {
-        const remote = record.remote || {};
-        return compactRemoteId(remote.pageId) === needle || compactRemoteId(remote.id) === needle;
+        return compactRemoteId(record.remote?.pageId) === needle || compactRemoteId(record.remote?.id) === needle;
       }) || null;
     },
-    async ensureImportedRemoteCapture({ pageId, title = "", url = "", connectionId = "", destination = null, remote = null, document = null }) {
+    async ensureImportedRemoteCapture({ pageId, title = "", url = "", connectionId = "", destination = null, remote = null, document = null }: ImportRemoteCaptureRequest) {
       const needle = compactRemoteId(pageId);
       if (!needle) throw new CaptureStorageError("A Notion page ID is required.", "invalid_remote_page");
       let created = false;
       const result = await transaction(["captures"], "readwrite", async (tx) => {
         const records = await tx.getAllCaptures();
         const existing = records.find((record) => {
-          const value = record.remote || {};
-          return compactRemoteId(value.pageId) === needle || compactRemoteId(value.id) === needle;
+          return compactRemoteId(record.remote?.pageId) === needle || compactRemoteId(record.remote?.id) === needle;
         });
         const timestamp = now();
-        const captureDocument = {
+        const captureDocument: CaptureDocument = {
           version: 1,
           title: String(title || "").trim(),
-          doc: document?.type === "doc" ? document : { type: "doc", content: [{ type: "paragraph" }] }
+          doc: isRecord(document) && document.type === "doc" ? normalizeEditorNode(document) : selectionDocument()
         };
-        const nextRemote = normalizeRecord({
-          remote: {
-            kind: "page",
-            id: compactRemoteId(remote?.id) || needle,
-            pageId: compactRemoteId(remote?.pageId) || needle,
-            url: remote?.url || url || "",
-            blockIds: Array.isArray(remote?.blockIds) ? remote.blockIds : [],
-            fingerprint: remote?.fingerprint || ""
-          }
-        }).remote;
+        const remoteValue = isRecord(remote) ? remote : {};
+        const nextRemote: RemoteTarget = {
+          kind: "page",
+          id: compactRemoteId(remoteValue.id) || needle,
+          pageId: compactRemoteId(remoteValue.pageId) || needle,
+          url: typeof remoteValue.url === "string" ? remoteValue.url : url,
+          blockIds: Array.isArray(remoteValue.blockIds) ? remoteValue.blockIds.map(String) : [],
+          fingerprint: typeof remoteValue.fingerprint === "string" ? remoteValue.fingerprint : ""
+        };
         if (existing) {
           if (existing.status === DELIVERY_STATES.delivered || existing.status === DELIVERY_STATES.blockedConflict) {
-            existing.remote = { ...existing.remote, ...nextRemote };
-            if (url) existing.remote.url = url || existing.remote.url;
-            if (destination && !existing.destination) existing.destination = destination;
-            if (connectionId && !existing.connectionId) existing.connectionId = connectionId;
-            existing.updatedAt = timestamp;
-            const normalized = normalizeRecord(existing);
+            const normalized = requireRecord({
+              ...existing,
+              remote: { ...(existing.remote || nextRemote), ...nextRemote, url: url || nextRemote.url },
+              destination: existing.destination || destination,
+              connectionId: existing.connectionId || connectionId,
+              updatedAt: timestamp
+            });
             await tx.putCapture(normalized);
             return normalized;
           }
@@ -478,7 +538,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         }
         const id = uuid();
         const capture = { document: captureDocument, captureId: id, sources: [], includeSource: false };
-        const record = normalizeRecord({
+        const record = requireRecord({
           version: CAPTURE_RECORD_VERSION,
           id,
           draftId: "",
@@ -510,7 +570,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       if (result) await changed("capture", { structural: created, created, id: result.id, record: result });
       return result;
     },
-    async maintain({ recoverInterrupted = true, force = false } = {}) {
+    async maintain({ recoverInterrupted = true, force = false }: { recoverInterrupted?: boolean; force?: boolean } = {}) {
       const timestamp = now();
       const result = await transaction(["meta", "drafts", "captures"], "readwrite", async (tx) => {
         const meta = await metaIn(tx);
@@ -559,4 +619,20 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
   };
 
   return repository;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return isRecord(error) && typeof error.message === "string" ? error.message : fallback;
+}
+
+function requireDraft(value: unknown): CaptureDraft {
+  const draft = normalizeDraft(value);
+  if (!draft) throw new CaptureStorageError("This draft uses an unsupported storage version.", "unsupported_draft_version");
+  return draft;
+}
+
+function requireRecord(value: unknown): CaptureRecord {
+  const record = normalizeRecord(value);
+  if (!record) throw new CaptureStorageError("This capture uses an unsupported storage version.", "unsupported_capture_version");
+  return record;
 }

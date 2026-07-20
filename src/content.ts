@@ -543,6 +543,10 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     if (!url) return;
     instance.page = { ...instance.page, ...page, url, selection: explicit ? page.selection || "" : "" };
     if (typeof tabId === "number") instance.tabId = tabId;
+    if (!explicit && instance.mode === "edit") {
+      renderSources(instance.root, instance);
+      return;
+    }
 
     const dismissed = new Set(normalizeDismissedSourceUrls(instance.dismissedSourceUrls));
     if (!explicit && dismissed.has(url)) {

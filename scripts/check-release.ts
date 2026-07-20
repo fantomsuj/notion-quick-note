@@ -42,7 +42,7 @@ assert.equal(
   "extension pages must use the reviewed MV3 CSP"
 );
 
-const requiredPermissions = ["activeTab", "alarms", "contextMenus", "identity", "sidePanel", "scripting", "storage"];
+const requiredPermissions = ["alarms", "contextMenus", "identity", "sidePanel", "storage", "tabs"];
 assert.deepEqual([...manifest.permissions].sort(), requiredPermissions.sort(), "manifest permissions changed; update the release review intentionally");
 assert.deepEqual(manifest.host_permissions, ["https://api.notion.com/*"], "only the Notion API may be a required host permission");
 assert.ok(!(manifest.optional_host_permissions || []).includes("<all_urls>"), "optional host permissions must not use <all_urls>");

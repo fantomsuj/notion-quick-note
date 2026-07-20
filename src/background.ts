@@ -26,17 +26,19 @@ import { DEFAULT_SETTINGS, migrateLegacyOAuthCredentials } from "./settings.js";
 import {
   badgeForState,
   DELIVERY_STATES,
+  normalizeDismissedSourceUrls,
   normalizeSources
 } from "./capture-store.js";
 import { createIncognitoCapturePersistence, createRegularCapturePersistence } from "./capture-persistence.js";
 import { createDeliveryQueue } from "./capture-queue.js";
 import { createRecoveryExport } from "./capture-export.js";
-import { createContentRuntimeLoader } from "./content-loader.js";
 import { assertNever, isRuntimeRequest, type RuntimeRequest } from "./contracts.js";
 
 const DELIVERY_ALARM = "notion-quick-note-delivery";
 const BROWSER_SESSION_KEY = "notionQuickNoteBrowserSessionV1";
-const ACTIVE_SURFACE_KEY = "notionQuickNoteActiveSurfaceV2";
+const QUICK_NOTE_COMMANDS = new Set(["toggle-quick-note", "open-quick-note-global"]);
+const PANEL_PORT_NAME = "notion-quick-note-panel";
+const panelPorts = new Map();
 let activeInitialization;
 let initializationComplete = false;
 const isIncognito = Boolean(chrome.extension?.inIncognitoContext);
@@ -84,8 +86,6 @@ const deliveryQueue = createDeliveryQueue({
   findExisting: findExistingRecord,
   onChanged: updateQueueSurfaces
 });
-const ensureContentRuntime = createContentRuntimeLoader({ tabs: chrome.tabs, scripting: chrome.scripting });
-
 void initializeWorker();
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
@@ -120,9 +120,41 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.action.onClicked.addListener((tab) => openQuickNote(tab));
 
-chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== "toggle-quick-note") return;
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== PANEL_PORT_NAME) return;
+  let panelWindowId;
+  port.onMessage.addListener((message) => {
+    if (message?.type !== "REGISTER_PANEL" || !Number.isInteger(message.windowId)) return;
+    panelWindowId = message.windowId;
+    panelPorts.set(panelWindowId, port);
+    void publishActivePage(panelWindowId);
+  });
+  port.onDisconnect.addListener(() => {
+    if (panelWindowId !== undefined && panelPorts.get(panelWindowId) === port) panelPorts.delete(panelWindowId);
+  });
+});
+
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  if (panelPorts.has(windowId)) void publishActivePage(windowId, tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!tab.active || !panelPorts.has(tab.windowId)) return;
+  if (changeInfo.status !== "complete" && !changeInfo.url && !changeInfo.title) return;
+  void publishActivePage(tab.windowId, tabId);
+});
+
+chrome.commands.onCommand.addListener(async (command, commandTab) => {
+  if (!QUICK_NOTE_COMMANDS.has(command)) return;
+  const [lastFocusedTab] = commandTab?.id
+    ? [commandTab]
+    : await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tab = lastFocusedTab;
+  if (command === "open-quick-note-global" && tab?.windowId !== undefined) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch((error) => {
+      console.warn("Could not bring the Quick Note window forward", error);
+    });
+  }
   await openQuickNote(tab);
 });
 
@@ -412,6 +444,7 @@ function validateDraft(draft = {}, sender) {
     mode: draft.mode === "edit" ? "edit" : "new",
     targetRecordId: String(draft.targetRecordId || ""),
     sources: normalizeSources(draft.sources || []),
+    dismissedSourceUrls: normalizeDismissedSourceUrls(draft.dismissedSourceUrls),
     revision: Number(draft.revision || 1),
     sessionId: String(draft.sessionId || ""),
     returnDraftId: String(draft.returnDraftId || ""),
@@ -467,7 +500,7 @@ async function getPanelDraft(message, sender) {
     const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     tab = activeTab || tab;
   }
-  const context = await collectCaptureContext(tab, "");
+  const context = panelContextFromTab(tab);
   return captureRepository.getOrCreateDraft({
     tabId: tab?.id ?? null,
     context,
@@ -1062,93 +1095,66 @@ async function disconnectNotion(confirmed) {
 }
 
 async function openQuickNote(tab, forcedSelection = "") {
-  if (!tab?.id) return openComposerTab(null, "compose");
-  const context = await collectCaptureContext(tab, forcedSelection);
-  const sessionId = crypto.randomUUID();
-  const activeSurface = (await chrome.storage.session.get(ACTIVE_SURFACE_KEY))[ACTIVE_SURFACE_KEY];
-  if (activeSurface?.tabId === tab.id) {
-    try {
-      const surface = await chrome.tabs.sendMessage(tab.id, { type: "QUICK_NOTE_PING" });
-      if (!surface?.open || surface.sessionId !== activeSurface.sessionId) throw new Error("Stale composer surface");
-      await chrome.tabs.sendMessage(tab.id, {
-        type: "TOGGLE_QUICK_NOTE",
-        page: context,
-        draftId: activeSurface.draftId,
-        tabId: tab.id,
-        sessionId: activeSurface.sessionId
-      });
-      return;
-    } catch {
-      // The recorded surface is stale. Fall through and reopen the autosaved draft.
-    }
-  }
-  if (activeSurface?.tabId && activeSurface.tabId !== tab.id) {
-    await chrome.tabs.sendMessage(activeSurface.tabId, {
-      type: "FLUSH_AND_CLOSE_QUICK_NOTE",
-      sessionId: activeSurface.sessionId
-    }).catch(() => undefined);
-  }
-  const draft = await captureRepository.getOrCreateDraft({
-    tabId: tab.id,
-    context,
-    includeSource: (await getSettings()).includeSource,
-    sessionId
-  });
-  await chrome.storage.session.set({ [ACTIVE_SURFACE_KEY]: { tabId: tab.id, draftId: draft.id, sessionId } });
-  if (!supportsOverlay(tab.url) || isPdfUrl(tab.url)) return openComposerFallback(tab, draft, "compose");
+  if (tab?.windowId === undefined) return openComposerTab(null, "compose");
+  const windowId = tab.windowId;
+  const panelOpening = chrome.sidePanel.open({ windowId: windowId });
+  let draft = null;
   try {
-    const message = { type: "TOGGLE_QUICK_NOTE", page: context, draftId: draft.id, tabId: tab.id, sessionId, revision: draft.revision };
-    await ensureContentRuntime(tab.id);
-    await chrome.tabs.sendMessage(tab.id, message);
+    const context = panelContextFromTab(tab, forcedSelection);
+    draft = await captureRepository.getOrCreateDraft({
+      tabId: tab.id ?? null,
+      context,
+      includeSource: (await getSettings()).includeSource,
+      sessionId: crypto.randomUUID()
+    });
   } catch (error) {
-    console.warn("Quick Note overlay unavailable; using the side panel", error);
-    await openComposerFallback(tab, draft, "compose");
+    console.warn("Quick Note could not prepare the active draft", error);
   }
-}
-
-async function releaseComposerSurface(sessionId, tabId) {
-  const current = (await chrome.storage.session.get(ACTIVE_SURFACE_KEY))[ACTIVE_SURFACE_KEY];
-  if (current && (!sessionId || current.sessionId === sessionId) && (!tabId || current.tabId === tabId)) {
-    await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
-  }
-  return { ok: true };
-}
-
-async function collectCaptureContext(tab, forcedSelection = "") {
-  const fallback = validateContext({ title: tab?.title || "Current tab", url: tab?.url || "", selection: forcedSelection });
-  if (!tab?.id || !supportsOverlay(tab.url) || isPdfUrl(tab.url)) return fallback;
   try {
-    const frames = await chrome.scripting.executeScript({
-      target: { tabId: tab.id, allFrames: true },
-      func: () => ({
-        title: window.top === window ? document.title : "",
-        url: window.top === window ? location.href : "",
-        frameUrl: location.href,
-        selection: window.getSelection()?.toString().trim() || "",
-        focused: document.hasFocus()
-      })
-    });
-    const top = frames.find((frame) => frame.frameId === 0)?.result || {};
-    const focused = frames.find((frame) => frame.result?.focused && frame.result?.selection)?.result
-      || frames.find((frame) => frame.result?.selection)?.result
-      || {};
-    return validateContext({
-      title: top.title || fallback.title,
-      url: top.url || fallback.url,
-      frameUrl: focused.frameUrl || top.url || fallback.url,
-      selection: forcedSelection || focused.selection || top.selection || ""
-    });
+    await panelOpening;
+    if (draft && panelPorts.has(windowId)) {
+      panelPorts.get(windowId).postMessage({ type: "OPEN_DRAFT", draft });
+    }
+    return { ok: true, surface: "side_panel" };
+  } catch (error) {
+    console.warn("Quick Note side panel unavailable; opening an extension tab", error);
+    return openComposerTab(draft, "compose");
+  }
+}
+
+function panelContextFromTab(tab, selection = "") {
+  return validateContext({
+    title: tab?.title || "Current tab",
+    url: tab?.url || "",
+    selection
+  });
+}
+
+async function publishActivePage(windowId, tabId) {
+  const port = panelPorts.get(windowId);
+  if (!port) return;
+  const tab = tabId === undefined
+    ? (await chrome.tabs.query({ active: true, windowId }))[0]
+    : await chrome.tabs.get(tabId).catch(() => null);
+  const context = panelContextFromTab(tab);
+  if (!supportsAutomaticContext(context.url) || isPdfUrl(context.url)) return;
+  try {
+    port.postMessage({ type: "ACTIVE_PAGE_CONTEXT", tabId: tab.id, page: context });
   } catch {
-    return fallback;
+    if (panelPorts.get(windowId) === port) panelPorts.delete(windowId);
   }
 }
 
-function supportsOverlay(url = "") {
+function supportsAutomaticContext(url = "") {
   try {
-    return ["http:", "https:", "file:"].includes(new URL(url).protocol);
+    return ["http:", "https:"].includes(new URL(url).protocol);
   } catch {
     return false;
   }
+}
+
+async function releaseComposerSurface(_sessionId, _tabId) {
+  return { ok: true };
 }
 
 function isPdfUrl(url = "") {

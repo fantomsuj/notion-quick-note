@@ -9,13 +9,12 @@
     "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
   },
   "permissions": [
-    "activeTab",
     "alarms",
     "contextMenus",
     "identity",
     "sidePanel",
-    "scripting",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "optional_host_permissions": [
     "https://*/*",
@@ -62,6 +61,14 @@
         "mac": "Option+Z"
       },
       "description": "Open or close Quick Note"
+    },
+    "open-quick-note-global": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+0",
+        "mac": "Command+Shift+0"
+      },
+      "description": "Open Quick Note from any app",
+      "global": true
     }
   }
 }

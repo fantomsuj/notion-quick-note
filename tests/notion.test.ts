@@ -1,4 +1,3 @@
-// @ts-nocheck
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -18,6 +17,8 @@ import {
   notionRequest,
   plainTextFromCapture,
   refreshManagedDestination,
+  retrieveDatabase,
+  retrieveDataSource,
   searchDestinations,
   searchRecentPages,
   sendCapture,
@@ -34,12 +35,14 @@ test("maps live Notion blocks back to editable Tiptap nodes and locks unsupporte
     { id: "quote", type: "quote", quote: { rich_text: [{ plain_text: "After image" }] } },
     { id: "sources", type: "toggle", toggle: { rich_text: [{ plain_text: "Sources" }], children: [{ id: "source", type: "bulleted_list_item", bulleted_list_item: { rich_text: [{ plain_text: "Example", href: "https://example.com" }] } }] } }
   ]);
-  assert.deepEqual(mapped.doc.content.map((node) => node.type), ["paragraph", "heading", "taskList", "notionBlock", "blockquote"]);
-  assert.equal(mapped.doc.content[0].content[1].type, "hardBreak");
-  assert.deepEqual(mapped.doc.content[0].content[0].marks.map((mark) => mark.type), ["bold", "notionColor", "link"]);
-  assert.equal(notionBlocksFromDocument(mapped.doc)[0].paragraph.rich_text[0].annotations.color, "blue");
-  assert.equal(mapped.doc.content[3].attrs.remoteId, "image");
-  assert.equal(mapped.sources[0].url, "https://example.com");
+  const content = must(mapped.doc.content);
+  assert.deepEqual(content.map((node) => node.type), ["paragraph", "heading", "taskList", "notionBlock", "blockquote"]);
+  assert.equal(item(must(item(content, 0).content), 1).type, "hardBreak");
+  assert.deepEqual(must(item(must(item(content, 0).content), 0).marks).map((mark) => mark.type), ["bold", "notionColor", "link"]);
+  const roundTripped = item(notionBlocksFromDocument(mapped.doc), 0);
+  assert.equal(item(must(must(roundTripped.paragraph).rich_text), 0).annotations?.color, "blue");
+  assert.equal(item(content, 3).attrs?.remoteId, "image");
+  assert.equal(item(mapped.sources, 0).url, "https://example.com");
 });
 
 test("nested structures that cannot round-trip are represented as one locked placeholder", () => {
@@ -52,8 +55,8 @@ test("nested structures that cannot round-trip are represented as one locked pla
       children: [{ id: "nested", type: "paragraph", paragraph: { rich_text: [{ plain_text: "Nested" }] } }]
     }
   }]);
-  assert.equal(mapped.doc.content[0].type, "notionBlock");
-  assert.equal(mapped.doc.content[0].attrs.remoteId, "callout-parent");
+  assert.equal(item(must(mapped.doc.content), 0).type, "notionBlock");
+  assert.equal(item(must(mapped.doc.content), 0).attrs?.remoteId, "callout-parent");
 
   const list = notionDocumentFromBlocks([{
     id: "list-parent",
@@ -63,13 +66,13 @@ test("nested structures that cannot round-trip are represented as one locked pla
       children: [{ id: "nested-image", type: "image", image: { external: { url: "https://example.com/image.png" } } }]
     }
   }]);
-  assert.equal(list.doc.content[0].type, "notionBlock");
-  assert.equal(list.doc.content[0].attrs.remoteId, "list-parent");
+  assert.equal(item(must(list.doc.content), 0).type, "notionBlock");
+  assert.equal(item(must(list.doc.content), 0).attrs?.remoteId, "list-parent");
 });
 
 test("live update detects a remote fingerprint mismatch before the first mutation", async () => {
-  const methods = [];
-  const fetchImpl = async (url, options = {}) => {
+  const methods: string[] = [];
+  const fetchImpl = async (url: string, options: RequestInit = {}) => {
     methods.push(options.method || "GET");
     if (url.includes("/pages/page")) return response(200, {
       id: "page",
@@ -97,8 +100,8 @@ test("live update detects a remote fingerprint mismatch before the first mutatio
 });
 
 test("an interrupted update journal resumes without duplicating or archiving inserted replacements", async () => {
-  const calls = [];
-  const fetchImpl = async (url, options = {}) => {
+  const calls: Array<{ url: string; method: string }> = [];
+  const fetchImpl = async (url: string, options: RequestInit = {}) => {
     calls.push({ url, method: options.method || "GET" });
     if (url.includes("/blocks/page/children")) return response(200, {
       results: [
@@ -128,6 +131,72 @@ test("an interrupted update journal resumes without duplicating or archiving ins
   assert.ok(!calls.some((call) => call.url.includes("/blocks/inserted") && call.method === "DELETE"));
 });
 
+test("rejects inserted blocks without non-empty string IDs before journaling", async () => {
+  const journals: Array<{ phase: string }> = [];
+  await assert.rejects(
+    updateRemoteNote({
+      token: "token",
+      record: { remote: { kind: "page", id: "page", pageId: "page" } },
+      capture: { document: { title: "Note", doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Replacement" }] }] } } },
+      onJournal: async (journal) => { journals.push({ phase: journal.phase }); },
+      fetchImpl: async (url, options = {}) => {
+        if (url.includes("/pages/page")) return response(200, {
+          id: "page",
+          url: "https://notion.so/page",
+          last_edited_time: "2026-07-19T00:00:00.000Z",
+          properties: {}
+        });
+        if (url.includes("/blocks/page/children") && options.method === "PATCH") {
+          return response(200, { results: [{ id: 42, type: "paragraph", paragraph: {} }] });
+        }
+        if (url.includes("/blocks/page/children")) return response(200, { results: [], has_more: false });
+        throw new Error(`Unexpected ${options.method || "GET"} ${url}`);
+      }
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+  assert.deepEqual(journals, []);
+});
+
+test("validates the final page before persisting a complete update journal", async () => {
+  const phases: string[] = [];
+  let pageGets = 0;
+  await assert.rejects(
+    updateRemoteNote({
+      token: "token",
+      record: { remote: { kind: "page", id: "page", pageId: "page" } },
+      capture: { document: { title: "Note", doc: { type: "doc", content: [{ type: "notionBlock", attrs: { remoteId: "image", remoteType: "image", label: "image" } }] } } },
+      onJournal: async (journal) => { phases.push(journal.phase); },
+      fetchImpl: async (url, options = {}) => {
+        if (url.includes("/blocks/page/children")) {
+          return response(200, { results: [{ id: "image", type: "image", image: {} }], has_more: false });
+        }
+        if (url.includes("/pages/page") && options.method === "PATCH") return response(200, { id: "page" });
+        if (url.includes("/pages/page")) {
+          pageGets += 1;
+          return pageGets === 1
+            ? response(200, { id: "page", url: "https://notion.so/page", last_edited_time: "before", properties: {} })
+            : response(200, { id: 42, url: [], last_edited_time: 99 });
+        }
+        throw new Error(`Unexpected ${options.method || "GET"} ${url}`);
+      }
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+  assert.equal(phases.includes("complete"), false);
+});
+
+test("loads sparse page successes as Untitled when properties are absent", async () => {
+  const loaded = await loadRemoteNote({
+    token: "token",
+    record: { remote: { kind: "page", id: "page", pageId: "page" } },
+    fetchImpl: async (url) => response(200, url.includes("/children")
+      ? { results: [], has_more: false }
+      : { id: "page", url: "https://notion.so/page", last_edited_time: "2026-07-19T00:00:00.000Z" })
+  });
+  assert.equal(loaded.title, "Untitled");
+});
+
 test("older running-page captures without tracked block IDs stay open-only", async () => {
   await assert.rejects(
     loadRemoteNote({ token: "token", record: { remote: { kind: "legacy_section", id: "page" } }, fetchImpl: async () => response(500, {}) }),
@@ -151,8 +220,8 @@ test("builds an append request for a running notes page", () => {
 
   assert.equal(request.method, "PATCH");
   assert.match(request.path, /\/v1\/blocks\/1234567890abcdef1234567890abcdef\/children/);
-  assert.equal(request.body.children[0].type, "heading_3");
-  assert.equal(request.body.children.at(-1).type, "divider");
+  assert.equal(item(request.body.children, 0).type, "heading_3");
+  assert.equal(must(request.body.children.at(-1)).type, "divider");
 });
 
 test("builds a data source page with the configured title property", () => {
@@ -162,9 +231,9 @@ test("builds a data source page with the configured title property", () => {
   );
 
   assert.equal(request.path, "/v1/pages");
-  assert.equal(request.body.parent.type, "data_source_id");
-  assert.equal(request.body.properties.Note.title[0].text.content, "A useful thought");
-  assert.equal(request.body.children[0].type, "quote");
+  assert.equal(must(request.body.parent).type, "data_source_id");
+  assert.equal(item(must(must(must(request.body.properties).Note).title), 0).text?.content, "A useful thought");
+  assert.equal(item(request.body.children, 0).type, "quote");
 });
 
 test("maps Tiptap blocks, nesting, to-dos, toggles, code, and dividers to native Notion blocks", () => {
@@ -202,12 +271,12 @@ test("maps Tiptap blocks, nesting, to-dos, toggles, code, and dividers to native
   assert.deepEqual(blocks.map((block) => block.type), [
     "paragraph", "heading_2", "bulleted_list_item", "numbered_list_item", "to_do", "quote", "toggle", "code", "divider"
   ]);
-  assert.equal(blocks[2].bulleted_list_item.children[0].type, "bulleted_list_item");
-  assert.equal(blocks[3].numbered_list_item.list_start_index, 3);
-  assert.equal(blocks[3].numbered_list_item.list_format, "letters");
-  assert.equal(blocks[4].to_do.checked, true);
-  assert.equal(blocks[6].toggle.rich_text[0].text.content, "Details");
-  assert.equal(blocks[7].code.language, "javascript");
+  assert.equal(item(must(must(item(blocks, 2).bulleted_list_item).children), 0).type, "bulleted_list_item");
+  assert.equal(must(item(blocks, 3).numbered_list_item).list_start_index, 3);
+  assert.equal(must(item(blocks, 3).numbered_list_item).list_format, "letters");
+  assert.equal(must(item(blocks, 4).to_do).checked, true);
+  assert.equal(item(must(must(item(blocks, 6).toggle).rich_text), 0).text?.content, "Details");
+  assert.equal(must(item(blocks, 7).code).language, "javascript");
 });
 
 test("preserves mixed inline annotations, links, hard breaks, and merges equivalent runs", () => {
@@ -224,13 +293,13 @@ test("preserves mixed inline annotations, links, hard breaks, and merges equival
       ]
     }]
   });
-  const runs = paragraph.paragraph.rich_text;
+  const runs = must(must(must(paragraph).paragraph).rich_text);
 
   assert.equal(runs.length, 3);
-  assert.equal(runs[0].text.content, "Bold together");
-  assert.equal(runs[0].annotations.bold, true);
-  assert.deepEqual(runs[1].text.link, { url: "https://example.com" });
-  assert.deepEqual(runs[1].annotations, {
+  assert.equal(item(runs, 0).text?.content, "Bold together");
+  assert.equal(item(runs, 0).annotations?.bold, true);
+  assert.deepEqual(item(runs, 1).text?.link, { url: "https://example.com" });
+  assert.deepEqual(item(runs, 1).annotations, {
     bold: false,
     italic: true,
     strikethrough: true,
@@ -238,7 +307,7 @@ test("preserves mixed inline annotations, links, hard breaks, and merges equival
     code: true,
     color: "default"
   });
-  assert.equal(runs[2].text.content, "\nnext line");
+  assert.equal(item(runs, 2).text?.content, "\nnext line");
 });
 
 test("splits rich text at 2,000 Unicode characters without splitting emoji", () => {
@@ -247,10 +316,10 @@ test("splits rich text at 2,000 Unicode characters without splitting emoji", () 
     type: "doc",
     content: [{ type: "paragraph", content: [{ type: "text", text }] }]
   });
-  const runs = paragraph.paragraph.rich_text;
+  const runs = must(must(must(paragraph).paragraph).rich_text);
   assert.equal(runs.length, 2);
-  assert.equal(Array.from(runs[0].text.content).length, 2000);
-  assert.equal(Array.from(runs[1].text.content).length, 1);
+  assert.equal(Array.from(must(item(runs, 0).text?.content)).length, 2000);
+  assert.equal(Array.from(must(item(runs, 1).text?.content)).length, 1);
 });
 
 test("uses the full first formatted block as the title and appends source metadata", () => {
@@ -274,8 +343,8 @@ test("uses the full first formatted block as the title and appends source metada
     includeSource: true
   };
   const request = buildCaptureRequest({ destinationType: "database", destinationId: "source", titleProperty: "Name" }, capture);
-  assert.equal(request.body.properties.Name.title[0].text.content, "Hello world");
-  assert.equal(request.body.children.at(-1).type, "toggle");
+  assert.equal(item(must(must(must(request.body.properties).Name).title), 0).text?.content, "Hello world");
+  assert.equal(must(request.body.children.at(-1)).type, "toggle");
   assert.equal(plainTextFromCapture(capture), "Hello world");
 });
 
@@ -293,7 +362,7 @@ test("keeps explicit titles up to 200 Unicode characters without splitting emoji
     },
     includeSource: false
   });
-  const storedTitle = request.body.properties.Name.title[0].text.content;
+  const storedTitle = must(item(must(must(must(request.body.properties).Name).title), 0).text?.content);
   assert.equal(Array.from(storedTitle).length, 200);
   assert.equal(storedTitle, "🙂".repeat(200));
   assert.doesNotMatch(storedTitle, /[\uD800-\uDFFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
@@ -325,13 +394,13 @@ test("keeps manually selected database properties title-only when source is atta
     { text: "Manual note", url: "https://example.com/article", includeSource: true }
   );
 
-  assert.deepEqual(Object.keys(request.body.properties), ["Note"]);
-  assert.equal(request.body.children.at(-1).type, "toggle");
+  assert.deepEqual(Object.keys(must(request.body.properties)), ["Note"]);
+  assert.equal(must(request.body.children.at(-1)).type, "toggle");
 });
 
 test("resolves a database URL to its first data source before saving", async () => {
-  const calls = [];
-  const fetchImpl = async (url, options = {}) => {
+  const calls: Array<{ url: string; options: RequestInit }> = [];
+  const fetchImpl = async (url: string, options: RequestInit = {}) => {
     calls.push({ url, options });
     if (url.includes("/data_sources/")) return response(404, { message: "not a data source" });
     if (url.includes("/databases/")) return response(200, { data_sources: [{ id: "resolved-source" }] });
@@ -345,15 +414,15 @@ test("resolves a database URL to its first data source before saving", async () 
     fetchImpl
   });
 
-  const finalBody = JSON.parse(calls.at(-1).options.body);
-  assert.equal(finalBody.parent.data_source_id, "resolved-source");
+  const finalBody = parseBody(must(calls.at(-1)).options);
+  assert.equal(mustRecord(finalBody.parent).data_source_id, "resolved-source");
 });
 
 test("builds a workspace-level Quick Notes database with a title property", () => {
   const request = buildQuickNotesDatabaseRequest("Quick Notes", "marker-1");
   assert.equal(request.path, "/v1/databases");
   assert.equal(request.method, "POST");
-  assert.equal(request.body.title[0].text.content, "Quick Notes");
+  assert.equal(item(request.body.title, 0).text?.content, "Quick Notes");
   assert.deepEqual(request.body.initial_data_source.properties, {
     Name: { title: {} },
     "Capture ID": { rich_text: {} },
@@ -362,16 +431,16 @@ test("builds a workspace-level Quick Notes database with a title property", () =
     "Captured At": { created_time: {} }
   });
   assert.deepEqual(request.body.parent, { type: "workspace", workspace: true });
-  assert.equal(request.body.description[0].text.content, "Notion Quick Note · schema=3 · provision=marker-1");
+  assert.equal(item(request.body.description, 0).text?.content, "Notion Quick Note · schema=3 · provision=marker-1");
 });
 
 test("creates a Quick Notes database and returns its managed data source destination", async () => {
-  const calls = [];
+  const calls: Array<{ url: string; options: RequestInit }> = [];
   const destination = await createQuickNotesDatabase({
     token: "secret",
     marker: "marker-1",
     fetchImpl: async (url, options) => {
-      calls.push({ url, options });
+      calls.push({ url, options: options || {} });
       if (url.endsWith("/v1/databases")) return response(200, {
         id: "database-id",
         url: "https://notion.so/database-id",
@@ -388,15 +457,121 @@ test("creates a Quick Notes database and returns its managed data source destina
     }
   });
 
-  assert.equal(calls[0].url, "https://api.notion.com/v1/databases");
-  assert.equal(calls[0].options.headers.Authorization, "Bearer secret");
-  assert.deepEqual(JSON.parse(calls[0].options.body).parent, { type: "workspace", workspace: true });
+  const firstCall = item(calls, 0);
+  assert.equal(firstCall.url, "https://api.notion.com/v1/databases");
+  assert.equal(new Headers(firstCall.options.headers).get("Authorization"), "Bearer secret");
+  assert.deepEqual(parseBody(firstCall.options).parent, { type: "workspace", workspace: true });
   assert.equal(destination.id, "data-source-id");
   assert.equal(destination.databaseId, "database-id");
   assert.equal(destination.managedDestination, true);
   assert.equal(destination.schemaVersion, 3);
   assert.equal(destination.marker, "marker-1");
-  assert.equal(destination.properties.sourceUrl.id, "source-url-id");
+  assert.equal(must(destination.properties.sourceUrl).id, "source-url-id");
+});
+
+test("rejects an incomplete successful database creation payload before follow-up requests", async () => {
+  let calls = 0;
+  await assert.rejects(
+    createQuickNotesDatabase({
+      token: "secret",
+      fetchImpl: async () => {
+        calls += 1;
+        return response(200, { data_sources: [{ id: "data-source-id" }] });
+      }
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+  assert.equal(calls, 1);
+});
+
+test("rejects wrong-type database and data-source IDs in successful payloads", async () => {
+  await assert.rejects(
+    createQuickNotesDatabase({
+      token: "secret",
+      fetchImpl: async () => response(200, { id: 42, data_sources: [{ id: 7 }] })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+  await assert.rejects(
+    retrieveDatabase({ token: "secret", databaseId: "database", fetchImpl: async () => response(200, { id: 42 }) }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+  await assert.rejects(
+    retrieveDataSource({ token: "secret", dataSourceId: "source", fetchImpl: async () => response(200, { id: 42, properties: {} }) }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+  await assert.rejects(
+    refreshManagedDestination({
+      token: "secret",
+      settings: { destinationId: "source" },
+      fetchImpl: async () => response(200, { id: "source", properties: [] })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+});
+
+test("rejects malformed rich-text fields in successful block payloads", async () => {
+  await assert.rejects(
+    loadRemoteNote({
+      token: "token",
+      record: { remote: { kind: "page", id: "page", pageId: "page" } },
+      fetchImpl: async (url) => response(200, url.includes("/children")
+        ? { results: [{ id: "paragraph", type: "paragraph", paragraph: { rich_text: [{ text: { content: 42, link: { url: 9 } }, annotations: { bold: "yes" } }] } }], has_more: false }
+        : { id: "page", last_edited_time: "now", properties: {} })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+});
+
+test("rejects malformed optional and consumed block fields", async () => {
+  const malformedBlocks = [
+    { id: "todo", type: "to_do", to_do: { checked: "false", rich_text: [] } },
+    { id: "paragraph", type: "paragraph", in_trash: "false", last_edited_time: 99, paragraph: { rich_text: [] } }
+  ];
+
+  for (const block of malformedBlocks) {
+    await assert.rejects(
+      loadRemoteNote({
+        token: "token",
+        record: { remote: { kind: "page", id: "page", pageId: "page" } },
+        fetchImpl: async (url) => response(200, url.includes("/children")
+          ? { results: [block], has_more: false }
+          : { id: "page", last_edited_time: "now", properties: {} })
+      }),
+      (error) => error instanceof NotionApiError && error.code === "invalid_response"
+    );
+  }
+
+  await assert.rejects(
+    loadRemoteNote({
+      token: "token",
+      record: { remote: { kind: "page", id: "page", pageId: "page" } },
+      fetchImpl: async (url) => response(200, url.includes("/blocks/page/children")
+        ? { results: [{ id: "paragraph", type: "paragraph", has_children: "false", paragraph: { rich_text: [] } }], has_more: false }
+        : url.includes("/blocks/paragraph/children")
+          ? { results: [], has_more: false }
+          : { id: "page", last_edited_time: "now", properties: {} })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+});
+
+test("rejects incomplete successful search and block-list payloads", async () => {
+  await assert.rejects(
+    searchDestinations({ token: "secret", fetchImpl: async () => response(200, { has_more: false }) }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+
+  await assert.rejects(
+    loadRemoteNote({
+      token: "secret",
+      record: { remote: { kind: "page", id: "page-id", pageId: "page-id" } },
+      fetchImpl: async (url) => response(200, String(url).includes("/children")
+        ? { has_more: false }
+        : { id: "page-id", properties: {}, last_edited_time: "2026-07-19T00:00:00.000Z" })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
 });
 
 test("preserves Notion error details when automatic database creation fails", async () => {
@@ -415,10 +590,7 @@ test("preserves Notion rate-limit timing for setup feedback", async () => {
   await assert.rejects(
     createQuickNotesDatabase({
       token: "secret",
-      fetchImpl: async () => ({
-        ...response(429, { code: "rate_limited", message: "Slow down" }),
-        headers: { get: (name) => name === "Retry-After" ? "7" : null }
-      })
+      fetchImpl: async () => response(429, { code: "rate_limited", message: "Slow down" }, { "Retry-After": "7" })
     }),
     (error) => error instanceof NotionApiError
       && error.status === 429
@@ -431,8 +603,9 @@ test("aborts every Notion request at its deadline and marks the timeout retryabl
   await assert.rejects(
     notionRequest("secret", "/v1/search", { method: "POST", body: {} }, async (_url, options) => {
       await new Promise((resolve, reject) => {
-        options.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+        must(options?.signal).addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
       });
+      throw new Error("unreachable");
     }, 5),
     (error) => error instanceof NotionApiError
       && error.status === 408
@@ -476,12 +649,12 @@ test("turns search results into page and database destinations", async () => {
 });
 
 test("lists recently edited Notion pages and skips archived or trashed results", async () => {
-  const calls = [];
+  const calls: Array<Record<string, unknown>> = [];
   const pages = await searchRecentPages({
     token: "secret",
     limit: 2,
     fetchImpl: async (_url, options) => {
-      calls.push(JSON.parse(options.body));
+      calls.push(parseBody(must(options)));
       return response(200, {
         results: [
           {
@@ -523,8 +696,8 @@ test("lists recently edited Notion pages and skips archived or trashed results",
     }
   });
 
-  assert.deepEqual(calls[0].filter, { value: "page", property: "object" });
-  assert.deepEqual(calls[0].sort, { direction: "descending", timestamp: "last_edited_time" });
+  assert.deepEqual(item(calls, 0).filter, { value: "page", property: "object" });
+  assert.deepEqual(item(calls, 0).sort, { direction: "descending", timestamp: "last_edited_time" });
   assert.deepEqual(pages, [
     {
       pageId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -586,9 +759,10 @@ test("populates managed source metadata using stable property IDs", () => {
     includeSource: true
   });
 
-  assert.equal(request.body.properties.title.title[0].text.content, "Metadata note");
-  assert.equal(request.body.properties["source-url-id"].url, "https://www.example.com/path?q=1");
-  assert.equal(request.body.properties["domain-id"].rich_text[0].text.content, "example.com");
+  const properties = must(request.body.properties);
+  assert.equal(item(must(must(properties.title).title), 0).text?.content, "Metadata note");
+  assert.equal(must(properties["source-url-id"]).url, "https://www.example.com/path?q=1");
+  assert.equal(item(must(must(properties["domain-id"]).rich_text), 0).text?.content, "example.com");
   assert.equal(normalizeSourceDomain("chrome://extensions"), "");
 });
 
@@ -602,9 +776,9 @@ test("writes and queries the managed Capture ID for deduplication", async () => 
       captureId: { id: "capture-id", name: "Renamed Capture ID", type: "rich_text" }
     }
   }, { text: "Reliable note", captureId: "uuid-1", includeSource: false });
-  assert.equal(request.body.properties["capture-id"].rich_text[0].text.content, "uuid-1");
+  assert.equal(item(must(must(must(request.body.properties)["capture-id"]).rich_text), 0).text?.content, "uuid-1");
 
-  let queryBody;
+  let queryBody: Record<string, unknown> | undefined;
   const existing = await findManagedCaptureById({
     token: "secret",
     captureId: "uuid-1",
@@ -614,12 +788,24 @@ test("writes and queries the managed Capture ID for deduplication", async () => 
       destinationProperties: { captureId: { id: "capture-id", name: "Renamed Capture ID", type: "rich_text" } }
     },
     fetchImpl: async (_url, options) => {
-      queryBody = JSON.parse(options.body);
+      queryBody = parseBody(must(options));
       return response(200, { results: [{ id: "page-id", url: "https://notion.so/page-id" }] });
     }
   });
-  assert.deepEqual(queryBody.filter, { property: "capture-id", rich_text: { equals: "uuid-1" } });
+  assert.deepEqual(must(queryBody).filter, { property: "capture-id", rich_text: { equals: "uuid-1" } });
   assert.deepEqual(existing, { id: "page-id", url: "https://notion.so/page-id" });
+});
+
+test("rejects wrong-type managed capture query result IDs and URLs", async () => {
+  await assert.rejects(
+    findManagedCaptureById({
+      token: "secret",
+      captureId: "uuid-1",
+      settings: { destinationId: "source-id", managedDestination: true },
+      fetchImpl: async () => response(200, { results: [{ id: 42, url: { href: "bad" } }] })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
 });
 
 test("omits managed source metadata when attaching the page is disabled", () => {
@@ -632,7 +818,7 @@ test("omits managed source metadata when attaching the page is disabled", () => 
       sourceUrl: { id: "source-url-id", name: "Source URL", type: "url" }
     }
   }, { text: "Private note", url: "https://example.com", includeSource: false });
-  assert.deepEqual(Object.keys(request.body.properties), ["title"]);
+  assert.deepEqual(Object.keys(must(request.body.properties)), ["title"]);
 });
 
 test("recovers only a marked exact-title database with the managed schema", async () => {
@@ -664,18 +850,18 @@ test("recovers only a marked exact-title database with the managed schema", asyn
       return response(200, managedDataSource());
     }
   });
-  assert.equal(destination.databaseId, "database-id");
-  assert.equal(destination.marker, "wanted");
+  assert.equal(must(destination).databaseId, "database-id");
+  assert.equal(must(destination).marker, "wanted");
 });
 
 test("paginates recovery before deciding to create another managed database", async () => {
-  const searchBodies = [];
+  const searchBodies: Array<Record<string, unknown>> = [];
   const destination = await findManagedQuickNotesDatabase({
     token: "secret",
     marker: "wanted",
     fetchImpl: async (url, options = {}) => {
       if (url.endsWith("/v1/search")) {
-        const body = JSON.parse(options.body);
+        const body = parseBody(options);
         searchBodies.push(body);
         return body.start_cursor
           ? response(200, {
@@ -700,12 +886,44 @@ test("paginates recovery before deciding to create another managed database", as
   });
 
   assert.equal(searchBodies.length, 2);
-  assert.equal(searchBodies[1].start_cursor, "page-2");
-  assert.equal(destination.databaseId, "database-id");
+  assert.equal(item(searchBodies, 1).start_cursor, "page-2");
+  assert.equal(must(destination).databaseId, "database-id");
+});
+
+test("rejects malformed parent database IDs during retrieval and recovery", async () => {
+  await assert.rejects(
+    migrateManagedQuickNotesDatabase({
+      token: "secret",
+      marker: "wanted",
+      settings: { destinationId: "data-source-id" },
+      fetchImpl: async () => response(200, {
+        ...managedDataSource(),
+        parent: { database_id: 42 }
+      })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
+
+  await assert.rejects(
+    findManagedQuickNotesDatabase({
+      token: "secret",
+      marker: "wanted",
+      fetchImpl: async () => response(200, {
+        has_more: false,
+        results: [{
+          object: "data_source",
+          id: "data-source-id",
+          title: [{ plain_text: "Quick Notes" }],
+          parent: { database_id: 42 }
+        }]
+      })
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
 });
 
 test("migrates a managed database without overwriting wrong-type name collisions", async () => {
-  let updateBody;
+  let updateBody: Record<string, unknown> | undefined;
   const destination = await migrateManagedQuickNotesDatabase({
     token: "secret",
     marker: "migration-marker",
@@ -722,17 +940,42 @@ test("migrates a managed database without overwriting wrong-type name collisions
         });
       }
       if (url.includes("/data_sources/") && options.method === "PATCH") {
-        updateBody = JSON.parse(options.body);
+        updateBody = parseBody(options);
         return response(200, managedDataSource({ sourceUrlName: "Source URL (Quick Note)" }));
       }
       return response(200, { id: "database-id", title: [{ plain_text: "Quick Notes" }], description: [] });
     }
   });
 
-  assert.deepEqual(updateBody.properties["Source URL (Quick Note)"], { url: {} });
-  assert.deepEqual(updateBody.properties["Source Domain"], { rich_text: {} });
-  assert.deepEqual(updateBody.properties["Captured At"], { created_time: {} });
-  assert.equal(destination.properties.sourceUrl.name, "Source URL (Quick Note)");
+  const updatedProperties = mustRecord(must(updateBody).properties);
+  assert.deepEqual(updatedProperties["Source URL (Quick Note)"], { url: {} });
+  assert.deepEqual(updatedProperties["Source Domain"], { rich_text: {} });
+  assert.deepEqual(updatedProperties["Captured At"], { created_time: {} });
+  assert.equal(must(destination.properties.sourceUrl).name, "Source URL (Quick Note)");
+});
+
+test("rejects a wrong-type data-source ID returned by migration PATCH", async () => {
+  await assert.rejects(
+    migrateManagedQuickNotesDatabase({
+      token: "secret",
+      marker: "migration-marker",
+      settings: { destinationId: "data-source-id", destinationDatabaseId: "database-id" },
+      fetchImpl: async (url, options = {}) => {
+        if (url.includes("/data_sources/") && options.method === "GET") {
+          return response(200, {
+            id: "data-source-id",
+            parent: { database_id: "database-id" },
+            properties: { Name: { id: "title", name: "Name", type: "title", title: {} } }
+          });
+        }
+        if (url.includes("/data_sources/") && options.method === "PATCH") {
+          return response(200, { ...managedDataSource(), id: 42 });
+        }
+        return response(200, { id: "database-id", title: [{ plain_text: "Quick Notes" }], description: [] });
+      }
+    }),
+    (error) => error instanceof NotionApiError && error.code === "invalid_response"
+  );
 });
 
 test("refreshes renamed managed properties by ID and respects deleted optional properties", async () => {
@@ -760,18 +1003,13 @@ test("refreshes renamed managed properties by ID and respects deleted optional p
       : response(200, { id: "database-id", title: [{ plain_text: "Quick Notes" }] })
   });
 
-  assert.equal(destination.properties.title.name, "My note");
-  assert.equal(destination.properties.sourceUrl.name, "Link");
+  assert.equal(must(destination.properties.title).name, "My note");
+  assert.equal(must(destination.properties.sourceUrl).name, "Link");
   assert.equal(destination.properties.sourceDomain, null);
 });
 
-function response(status, payload) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: { get() { return null; } },
-    async json() { return payload; }
-  };
+function response(status: number, payload: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(payload), { status, headers });
 }
 
 function managedDataSource({ sourceUrlName = "Source URL" } = {}) {
@@ -788,4 +1026,28 @@ function managedDataSource({ sourceUrlName = "Source URL" } = {}) {
       "Captured At": { id: "captured-id", name: "Captured At", type: "created_time", created_time: {} }
     }
   };
+}
+
+function must<T>(value: T | null | undefined): T {
+  if (value === null || value === undefined) throw new Error("Expected a value in test fixture.");
+  return value;
+}
+
+function item<T>(values: T[], index: number): T {
+  return must(values[index]);
+}
+
+function parseBody(options: RequestInit): Record<string, unknown> {
+  if (typeof options.body !== "string") throw new Error("Expected a JSON request body in test fixture.");
+  const value: unknown = JSON.parse(options.body);
+  return mustRecord(value);
+}
+
+function mustRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("Expected an object in test fixture.");
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

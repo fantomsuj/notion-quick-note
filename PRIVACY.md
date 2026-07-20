@@ -14,12 +14,12 @@ Notion Quick Note has one purpose: let you review and save a note, selected text
 
 ## Data the extension handles
 
-- **Capture content:** text you type, text you select, and—when “Attach the current webpage” is enabled—the active page title and URL.
+- **Capture content:** text you type, text you explicitly capture through the selection command, and active-page titles and URLs attached while the Quick Note side panel is open.
 - **Notion account data:** an OAuth access token, an opaque broker connection handle, workspace ID/name/icon, destination IDs/names, and the minimum Notion page/database data needed to find, create, validate, or update your chosen destination.
 - **Local operational data:** drafts, queued captures, delivery state, timestamps, source metadata, recent delivery records needed for retry, recovery, deduplication, and activity history, and a non-exportable device signing key used to prove refresh, revocation, and replaced-connection cleanup requests came from this extension installation.
 - **Optional AI input:** when you explicitly run an AI action, the current note text, active-page title, and attached source titles are provided to Chrome's on-device model to generate the requested preview.
 
-The extension reads active-page context only after you invoke it through its toolbar button, keyboard shortcut, or context menu. It does not continuously monitor browsing, run analytics, show ads, or sell data.
+After you open Quick Note through its toolbar button, keyboard shortcut, or context menu, the side panel reads the active tab's title and URL as you switch tabs. This tracking stops when the side panel closes. The extension does not automatically read page bodies or selected text, monitor background tabs or browsing history, run analytics, show ads, or sell data.
 
 ## How data is used and shared
 
@@ -41,7 +41,7 @@ The Notes view can display local storage usage and export drafts, queued capture
 
 ## Your controls
 
-You can disable all AI actions or either individual prompt feature, omit source-page information, discard drafts, delete local delivery history, export local capture data, grant access to additional Notion pages, disconnect Notion, revoke the connection in Notion, or uninstall the extension. Disconnecting removes the locally stored access token and connection handle and asks the broker and Notion to revoke the OAuth connection; Notion content already created is not deleted.
+You can disable all AI actions or either individual prompt feature, remove any automatically attached source page with one click, omit source-page information, close the panel to stop active-tab tracking, discard drafts, delete local delivery history, export local capture data, grant access to additional Notion pages, disconnect Notion, revoke the connection in Notion, or uninstall the extension. A removed source stays dismissed for the rest of that draft unless you explicitly restore it. Disconnecting removes the locally stored access token and connection handle and asks the broker and Notion to revoke the OAuth connection; Notion content already created is not deleted.
 
 ## Changes and contact
 
