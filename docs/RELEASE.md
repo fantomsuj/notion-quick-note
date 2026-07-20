@@ -5,10 +5,10 @@ Use the generated ZIP only. Do not zip or upload the repository: the working tre
 ## 1. Reserve and configure production identities
 
 1. Create the Chrome Web Store item to obtain its stable extension ID.
-2. Create a Notion public connection with the required read, insert, and update content capabilities and the intended installation scope.
+2. Create a Notion public connection with exactly **Read content**, **Insert content**, and **Update content**. Select **No user information**. Do not enable read/write comments or any additional capability unless a shipped feature and privacy disclosure require it.
 3. Register `https://EXTENSION_ID.chromiumapp.org/notion` as the exact Notion OAuth redirect URI.
-4. Deploy `oauth-worker/` over HTTPS. Set `ALLOWED_EXTENSION_IDS` to the production extension ID and `ALLOWED_ORIGINS` to `chrome-extension://EXTENSION_ID`. Store `NOTION_CLIENT_ID` and `NOTION_CLIENT_SECRET` as deployment secrets, never in Git or the extension.
-5. Exercise exchange, refresh-token rotation, revocation, rejected origins, and the exact redirect against the deployed broker. Confirm production logging does not retain authorization codes or tokens.
+4. Deploy `oauth-worker/` over HTTPS. Set `ALLOWED_EXTENSION_IDS` to the production extension ID and `ALLOWED_ORIGINS` to `chrome-extension://EXTENSION_ID`. Apply the `OAuthSession` Durable Object migration and choose an account-unique namespace ID for the `OAUTH_RATE_LIMITER` binding. Store `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET`, and the broker encryption key as deployment secrets, never in Git or the extension. Confirm the broker stores rotating refresh credentials only as encrypted records addressed by opaque connection handles.
+5. Exercise authorization transaction creation, single-use state enforcement, exchange, refresh-token rotation, proof replay rejection, revocation, rate limits, rejected origins, and the exact redirect against the deployed broker. Confirm production logging does not retain authorization codes, access tokens, refresh credentials, connection handles, or request bodies.
 
 ## 2. Configure and verify the release
 
@@ -27,7 +27,7 @@ Keep `manifest.json`, `package.json`, and `package-lock.json` on the same monoto
 npm run release:package
 ```
 
-That command requires the complete `npm run check` suite to pass, audits permissions/CSP/assets/incognito storage/remote code, copies only the explicit allowlist in `scripts/release-files.mjs`, replaces development OAuth patterns with the exact broker origin, and writes:
+That command requires the complete `npm run check` suite to pass, audits permissions/CSP/assets/remote code, builds TypeScript directly into the staging directory, copies only the explicit allowlist in `scripts/release-files.ts`, narrows OAuth permissions to the exact broker origin, and writes:
 
 - `release/chrome-extension/` — unpacked inspection build
 - `release/notion-quick-note-VERSION.zip` — upload artifact with `manifest.json` at its root
@@ -40,6 +40,9 @@ Re-running from the same Git tree, lockfile, Node/npm versions, and release conf
 Load `release/chrome-extension/` in a clean Chrome profile and verify:
 
 - Fresh install, OAuth, automatic database creation, destination search, and disconnect/revocation.
+- Advanced setup is not shown in the packaged build; only source/local builds expose client configuration and personal-token controls.
+- **Grant access to more pages** reruns OAuth. Reauthorizing the same Notion `bot_id` preserves the current destination and resumes matching blocked captures; choosing another workspace resets destination setup.
+- Revoking access in Notion or presenting an obsolete pre-handle OAuth connection produces a clear reconnect path without sending a legacy browser-stored refresh token.
 - Toolbar, keyboard shortcut, selection context menu, formatted capture, source on/off, retry/restart recovery, recent-note editing, and side-panel/tab fallbacks.
 - Legacy `captureStateV1` migration, per-record IndexedDB persistence, Notes storage diagnostics, and JSON/Markdown recovery downloads.
 - Restricted pages and PDFs fail over without losing the draft.
@@ -53,7 +56,7 @@ Load `release/chrome-extension/` in a clean Chrome profile and verify:
 - Supply accurate screenshots, listing copy, category, support contact/site, and reviewer test instructions.
 - Confirm rights to distribute the Notion name/mark and every bundled NotionInter font file; otherwise replace them before submission. Keep license/provenance records outside the ZIP for review.
 - Complete Chrome Web Store developer identity/account verification and any required payment.
-- Confirm the production Notion public connection, redirect URI, capabilities, and installation scope are live for intended users.
+- Confirm the production Notion public connection, exact redirect URI, minimum capabilities (Read/Insert/Update content only), **No user information**, and installation scope are live for intended users.
 - Upload the generated ZIP, address automated warnings, submit for review, and archive the checksum and submitted artifact.
 
 Any code or manifest correction requires another version increment and a newly generated ZIP.

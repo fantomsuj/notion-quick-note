@@ -8,4 +8,5 @@ oauth-worker/wrangler.toml
 release/
 release.config.json
 *.zip
+*.tsbuildinfo
 .gstack/

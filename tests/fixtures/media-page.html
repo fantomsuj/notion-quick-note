@@ -38,8 +38,13 @@
       window.releaseDraft = () => {};
       window.saveDelay = 0;
       window.saveResponse = { ok: true };
+      window.discardResponse = null;
+      window.discardError = null;
+      window.discardDeletesBeforeError = false;
       window.captureStatus = { id: "capture-test", status: "delivered", lastError: null };
       window.settingsResponse = {
+        ok: true,
+        connected: true,
         configured: true,
         destinationName: "Test Inbox",
         includeSource: true,
@@ -58,6 +63,84 @@
       window.recentConflict = false;
       window.runtimeError = null;
       window.storageError = null;
+
+      function completeSource(source = {}, index = 0) {
+        return {
+          title: "Source",
+          url: `https://source-${index}.example/page`,
+          selection: "",
+          capturedAt: 1,
+          ...source
+        };
+      }
+
+      function completeDraft(draft) {
+        if (!draft) return null;
+        const context = {
+          version: 1,
+          title: "Synthetic Media Page",
+          url: location.href,
+          selection: "",
+          capturedAt: 1,
+          ...(draft.context || {})
+        };
+        return {
+          version: 2,
+          id: "draft-test",
+          tabId: 1,
+          context,
+          mode: "new",
+          targetRecordId: "",
+          sources: (draft.sources || []).map(completeSource),
+          dismissedSourceUrls: [],
+          revision: 1,
+          sessionId: "session-test",
+          returnDraftId: "",
+          title: "",
+          includeSource: true,
+          doc: { type: "doc", content: [{ type: "paragraph" }] },
+          remote: null,
+          baseFingerprint: "",
+          createdAt: 1,
+          updatedAt: 1,
+          ...draft,
+          context,
+          sources: (draft.sources || []).map(completeSource)
+        };
+      }
+
+      function completeRecent(item) {
+        return {
+          id: "recent-test",
+          source: "note",
+          title: "Untitled",
+          preview: "",
+          destinationName: "",
+          status: "delivered",
+          updatedAt: Date.now(),
+          remoteUrl: "",
+          editable: true,
+          ...item,
+          ...(item.sources ? { sources: item.sources.map(completeSource) } : {})
+        };
+      }
+
+      function completeCaptureStatus(status, draftId = "draft-test") {
+        if (status === null) return null;
+        return {
+          id: "capture-test",
+          draftId,
+          status: "delivered",
+          updatedAt: Date.now(),
+          nextAttemptAt: 0,
+          attemptCount: 1,
+          lastError: null,
+          remote: null,
+          destination: null,
+          ...status,
+          lastError: status?.lastError ? { message: "Synthetic delivery error", ...status.lastError } : null
+        };
+      }
 
       for (const type of ["keydown", "keyup"]) {
         document.addEventListener(type, (event) => {
@@ -123,12 +206,25 @@
                   sessionId: message.sessionId || "session-test",
                   revision: 1,
                   mode: "new",
-                  sources: [{ title: message.context?.title || "Source", url: message.context?.url || location.href }],
+                  targetRecordId: "",
+                  returnDraftId: "",
+                  sources: [{
+                    title: message.context?.title || "Source",
+                    url: message.context?.url || location.href,
+                    selection: message.context?.selection || "",
+                    capturedAt: message.context?.capturedAt || 1
+                  }],
+                  dismissedSourceUrls: [],
                   context: message.context,
                   title: legacy?.title || "",
                   includeSource: legacy?.includeSource !== false,
-                  doc: legacy?.doc || { type: "doc", content: [{ type: "paragraph" }] }
+                  doc: legacy?.doc || { type: "doc", content: [{ type: "paragraph" }] },
+                  remote: null,
+                  baseFingerprint: "",
+                  createdAt: 1,
+                  updatedAt: 1
                 };
+                window.currentDraft = completeDraft(window.currentDraft);
                 return { ok: true, draft: window.currentDraft };
               }
               if (message.type === "UPSERT_DRAFT") {
@@ -154,13 +250,19 @@
                     return (node.content || []).map(documentText).join("\n");
                   })(message.draft.doc);
                   if (!body.trim()) {
-                    window.currentDraft = { version: 2, ...message.draft, revision: 0 };
+                    window.currentDraft = { version: 2, ...message.draft, revision: 0, createdAt: window.currentDraft.createdAt || 1, updatedAt: Date.now() };
                     delete window.savedSession[`draft:${location.href}`];
                     return { ok: true, draft: null, discarded: true };
                   }
-                  window.currentDraft = { version: 2, ...message.draft, revision: window.currentDraft.revision + 1 };
+                  window.currentDraft = {
+                    version: 2,
+                    ...message.draft,
+                    revision: window.currentDraft.revision + 1,
+                    createdAt: window.currentDraft.createdAt || 1,
+                    updatedAt: Date.now()
+                  };
                   window.savedSession[`draft:${location.href}`] = window.currentDraft;
-                  return { ok: true, draft: window.currentDraft };
+                  return { ok: true, draft: window.currentDraft, discarded: false };
                 } finally {
                   window.activeDraftWrites -= 1;
                 }
@@ -168,40 +270,59 @@
               if (message.type === "LIST_RECENT_NOTES") {
                 return {
                   ok: true,
-                  drafts: window.recentDrafts || [],
-                  notes: window.recentNotes || [],
-                  notionPages: window.recentNotionPages || [],
+                  drafts: (window.recentDrafts || []).map(completeRecent),
+                  notes: (window.recentNotes || []).map(completeRecent),
+                  notionPages: (window.recentNotionPages || []).map(completeRecent),
                   notionError: window.recentNotionError || ""
                 };
               }
               if (message.type === "LOAD_RECENT_NOTE") {
-                window.currentDraft = structuredClone(window.remoteDraft);
-                return { ok: true, draft: window.currentDraft, conflict: window.recentConflict };
+                window.currentDraft = completeDraft(structuredClone(window.remoteDraft));
+                return { ok: true, draft: window.currentDraft, returnDraftId: window.currentDraft?.returnDraftId || "", conflict: window.recentConflict };
               }
               if (message.type === "LOAD_NOTION_PAGE") {
-                window.currentDraft = structuredClone(window.notionPageDraft || window.remoteDraft);
-                return { ok: true, draft: window.currentDraft, conflict: false };
+                window.currentDraft = completeDraft(structuredClone(window.notionPageDraft || window.remoteDraft));
+                return { ok: true, draft: window.currentDraft, returnDraftId: window.currentDraft?.returnDraftId || "", conflict: false };
               }
               if (message.type === "ACTIVATE_DRAFT") {
-                window.currentDraft = structuredClone(
+                window.currentDraft = completeDraft(structuredClone(
                   (window.recentDraftBodies && window.recentDraftBodies[message.id]) || window.currentDraft
-                );
+                ));
                 return { ok: true, draft: window.currentDraft };
               }
               if (message.type === "RELEASE_COMPOSER_SURFACE") return { ok: true };
               if (message.type === "DISCARD_DRAFT") {
+                if (window.discardError) {
+                  if (window.discardDeletesBeforeError) {
+                    window.currentDraft = null;
+                    delete window.savedSession[`draft:${location.href}`];
+                  }
+                  throw window.discardError;
+                }
+                if (window.discardResponse) return window.discardResponse;
                 window.currentDraft = null;
                 delete window.savedSession[`draft:${location.href}`];
                 return { ok: true, discarded: true };
               }
+              if (message.type === "GET_PANEL_DRAFT") {
+                if (window.currentDraft?.id === message.draftId) return { ok: true, draft: completeDraft(window.currentDraft) };
+                return { ok: false, error: "That draft is no longer available.", code: "draft_not_found" };
+              }
               if (message.type === "ENQUEUE_CAPTURE") {
                 await new Promise((resolve) => setTimeout(resolve, window.saveDelay));
+                const record = completeCaptureStatus({
+                  ...window.captureStatus,
+                  ...(window.saveResponse.record || {})
+                }, message.draftId);
                 return window.saveResponse.ok
-                  ? { ...window.saveResponse, accepted: true, record: window.saveResponse.record || window.captureStatus }
+                  ? { ...window.saveResponse, accepted: true, record }
                   : window.saveResponse;
               }
               if (message.type === "GET_CAPTURE_STATUS") {
-                return { ok: true, record: window.captureStatus };
+                return {
+                  ok: true,
+                  record: completeCaptureStatus(window.captureStatus, window.currentDraft?.id || "draft-test")
+                };
               }
               if (["OPEN_SETTINGS", "OPEN_ACTIVITY"].includes(message.type)) return { ok: true };
             }

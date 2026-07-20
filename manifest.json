@@ -9,13 +9,12 @@
     "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
   },
   "permissions": [
-    "activeTab",
     "alarms",
     "contextMenus",
     "identity",
     "sidePanel",
-    "scripting",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "optional_host_permissions": [
     "https://*/*",
@@ -25,7 +24,7 @@
     "https://api.notion.com/*"
   ],
   "background": {
-    "service_worker": "src/background.js",
+    "service_worker": "dist/background.js",
     "type": "module"
   },
   "action": {
@@ -56,12 +55,11 @@
     }
   ],
   "commands": {
-    "toggle-quick-note": {
+    "_execute_action": {
       "suggested_key": {
         "default": "Ctrl+Shift+Space",
-        "mac": "MacCtrl+Shift+Space"
-      },
-      "description": "Open or close Quick Note"
+        "mac": "Command+Shift+Space"
+      }
     }
   }
 }

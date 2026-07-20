@@ -22,11 +22,30 @@
 
       <ol class="progress" aria-label="Setup progress">
         <li data-progress="connect"><span><span class="step-number">1</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><b>Connect</b></li>
-        <li data-progress="destination"><span><span class="step-number">2</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><b>Destination</b></li>
+        <li data-progress="destination"><span><span class="step-number">2</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><b>Automatic setup</b></li>
         <li data-progress="ready"><span><span class="step-number">3</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><b>Ready</b></li>
       </ol>
 
       <div id="message" class="message" role="status" aria-live="polite" hidden></div>
+
+      <section class="shortcut-settings" aria-labelledby="keyboard-shortcut-heading">
+        <div class="shortcut-settings-heading">
+          <p class="kicker">Browser shortcut</p>
+          <h2 id="keyboard-shortcut-heading">Keyboard shortcut</h2>
+          <p>Use Quick Note while this browser is active. Your browser owns this assignment and resolves any extension conflicts.</p>
+        </div>
+        <div class="shortcut-control">
+          <div class="shortcut-summary">
+            <span id="shortcut-assignment-status" class="shortcut-status" data-state="loading">Checking…</span>
+            <div id="shortcut-keycaps" class="shortcut-keycaps" aria-live="polite" aria-label="Checking shortcut"></div>
+          </div>
+          <p id="shortcut-warning" class="shortcut-warning" role="status" hidden></p>
+          <button id="change-shortcut" class="button secondary" type="button">Change shortcut</button>
+          <p id="shortcut-manual-instructions" class="shortcut-manual-instructions" hidden>
+            Arc could not open the shortcut editor. Enter <code>chrome://extensions/shortcuts</code> in the address bar, then find Notion Quick Note.
+          </p>
+        </div>
+      </section>
 
       <section id="connect-panel" class="stage" aria-labelledby="connect-heading">
         <div class="stage-number">01</div>
@@ -44,9 +63,9 @@
             <img src="../assets/brand/notion-mark.svg" alt="" aria-hidden="true">
             <span>Connect Notion</span>
           </button>
-          <p class="fineprint">A Notion window will open so you can choose a workspace and pages.</p>
+          <p class="fineprint">A Notion window will open so you can choose a workspace. Quick Note then finishes setup automatically.</p>
 
-          <details id="advanced-setup" class="advanced">
+          <details id="advanced-setup" class="advanced" hidden>
             <summary>Advanced setup</summary>
             <div class="advanced-body">
               <p class="advanced-copy">Local builds can supply OAuth configuration or use a personal token. Store releases should bundle OAuth configuration.</p>
@@ -87,9 +106,9 @@
           </div>
 
           <div id="destination-picker">
-          <p class="kicker">Pick one for now</p>
-            <h2 id="destination-heading">Where should quick notes land?</h2>
-            <p class="stage-copy">Choose a page for one running inbox, or a database for separate, searchable notes.</p>
+          <p class="kicker">Optional fallback</p>
+            <h2 id="destination-heading">Use a different destination</h2>
+            <p class="stage-copy">Automatic setup could not finish, or you chose to customize where notes land. Select a shared page or database below.</p>
 
             <button id="create-database" class="button primary" type="button">Retry automatic setup</button>
 
@@ -140,15 +159,11 @@
           <p class="stage-copy">Quick Note is connected to <strong id="ready-workspace">Notion</strong> and will save to <strong id="ready-destination">your destination</strong>.</p>
           <p id="ready-outcome" class="ready-outcome"></p>
 
-          <div class="shortcut-card">
-            <div><small>On any webpage</small><b>Open Quick Note</b></div>
-            <kbd>⌃ ⇧ Space</kbd>
-          </div>
-
           <div class="ready-actions">
             <button id="finish" class="button primary" type="button">Start capturing</button>
             <button id="open-destination" class="button secondary" type="button" hidden>Open in Notion</button>
-            <button id="change-destination" class="button secondary" type="button">Change destination</button>
+            <button id="change-destination" class="button secondary" type="button">Use a different destination</button>
+            <button id="refresh-permissions" class="button secondary" type="button" hidden>Grant access to more pages</button>
           </div>
           <button id="disconnect" class="danger-link" type="button">Disconnect Notion</button>
         </div>
@@ -198,6 +213,6 @@
         <span>Private by design · No page access until you open it</span>
       </footer>
     </main>
-    <script type="module" src="options.js"></script>
+    <script type="module" src="../dist/options.js"></script>
   </body>
 </html>

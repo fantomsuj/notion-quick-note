@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": ["node", "chrome"],
+    "rootDir": ".",
+    "outDir": ".context/types/node"
+  },
+  "references": [
+    { "path": "./tsconfig.extension.json" },
+    { "path": "./tsconfig.worker.json" }
+  ],
+  "include": ["scripts/**/*.ts", "tests/**/*.ts", "playwright.config.ts", "types/**/*.d.ts"]
+}

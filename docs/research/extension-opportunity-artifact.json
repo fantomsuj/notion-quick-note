@@ -1,0 +1,570 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Where Notion Quick Note Should Go Next",
+    "description": "A source-backed opportunity study and product concept for the next extension direction.",
+    "generatedAt": "2026-07-19T18:00:00Z",
+    "charts": [
+      {
+        "id": "opportunity_score",
+        "title": "Opportunity prioritization",
+        "subtitle": "Weighted 1–5 score; demand 30%, product fit 25%, differentiation 20%, feasibility 15%, privacy and trust 10%.",
+        "type": "bar",
+        "dataset": "opportunities",
+        "sourceId": "opportunity_scorecard",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {
+            "field": "opportunity_short",
+            "type": "nominal",
+            "label": "Opportunity"
+          },
+          "y": {
+            "field": "weighted_score",
+            "type": "quantitative",
+            "label": "Weighted score",
+            "format": "number"
+          },
+          "tooltip": [
+            {
+              "field": "demand_signal",
+              "type": "quantitative",
+              "label": "Demand"
+            },
+            {
+              "field": "product_fit",
+              "type": "quantitative",
+              "label": "Product fit"
+            },
+            {
+              "field": "differentiation",
+              "type": "quantitative",
+              "label": "Differentiation"
+            },
+            {
+              "field": "feasibility",
+              "type": "quantitative",
+              "label": "Feasibility"
+            },
+            {
+              "field": "privacy_trust",
+              "type": "quantitative",
+              "label": "Privacy and trust"
+            }
+          ]
+        },
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "market_scale",
+        "title": "Current comparator scale",
+        "subtitle": "Chrome Web Store listing metrics observed July 19, 2026; listed-user totals are non-unique and are not a market-size estimate.",
+        "dataset": "market",
+        "sourceId": "opportunity_evidence",
+        "defaultSort": {
+          "field": "listed_users",
+          "direction": "desc"
+        },
+        "columns": [
+          {
+            "field": "product",
+            "label": "Product",
+            "type": "text"
+          },
+          {
+            "field": "listed_users",
+            "label": "Listed users",
+            "format": "number"
+          },
+          {
+            "field": "rating",
+            "label": "Rating",
+            "format": "number"
+          },
+          {
+            "field": "rating_count",
+            "label": "Rating count",
+            "format": "number"
+          },
+          {
+            "field": "positioning",
+            "label": "Primary positioning",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "opportunity_detail",
+        "title": "Opportunity scorecard",
+        "subtitle": "Judgment model for prioritization, not a measured forecast; factor details remain available in the source data.",
+        "dataset": "opportunities",
+        "sourceId": "opportunity_scorecard",
+        "defaultSort": {
+          "field": "weighted_score",
+          "direction": "desc"
+        },
+        "columns": [
+          {
+            "field": "rank",
+            "label": "Rank",
+            "format": "number"
+          },
+          {
+            "field": "opportunity",
+            "label": "Opportunity",
+            "type": "text"
+          },
+          {
+            "field": "weighted_score",
+            "label": "Score",
+            "format": "number"
+          },
+          {
+            "field": "strongest_reason",
+            "label": "Why it scores",
+            "type": "text"
+          },
+          {
+            "field": "recommendation",
+            "label": "Disposition",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "architecture_reuse",
+        "title": "Existing primitives and remaining product work",
+        "subtitle": "Repository-backed assessment of what an evidence-thread prototype can reuse today.",
+        "dataset": "architecture",
+        "sourceId": "local_product_base",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "order",
+            "label": "Step",
+            "format": "number"
+          },
+          {
+            "field": "primitive",
+            "label": "Primitive",
+            "type": "text"
+          },
+          {
+            "field": "current_support",
+            "label": "Current support",
+            "type": "text"
+          },
+          {
+            "field": "thread_work",
+            "label": "Evidence-thread work",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "opportunity_evidence",
+        "label": "Extension opportunity evidence inventory",
+        "path": "docs/research/extension-market-snapshot.sql",
+        "query": {
+          "engine": "sqlite",
+          "language": "sql",
+          "sql": "WITH market(product, listed_users, rating, rating_count, positioning) AS (VALUES ('Notion Web Clipper', 1000000, 3.3, 617, 'Simple one-click page save'), ('Save to Notion', 400000, 4.3, 1300, 'Forms, properties, rich capture'), ('Flylighter', 9000, 3.5, 23, 'Flows, multi-capture, speed')) SELECT product, listed_users, rating, rating_count, positioning FROM market ORDER BY listed_users DESC;",
+          "description": "Reproduces the current comparator metrics transcribed from the cited Chrome Web Store listings.",
+          "executed_at": "2026-07-19T18:00:00Z",
+          "metric_definitions": {
+            "listed_users": "Current non-unique user count displayed by the Chrome Web Store listing",
+            "rating": "Current average rating displayed by the Chrome Web Store listing",
+            "rating_count": "Current rating count displayed by the Chrome Web Store listing; 1.3K is represented as 1,300"
+          }
+        }
+      },
+      {
+        "id": "opportunity_scorecard",
+        "label": "Weighted opportunity scorecard",
+        "path": "docs/research/extension-opportunity-scorecard.sql",
+        "query": {
+          "engine": "sqlite",
+          "language": "sql",
+          "sql": "WITH opportunity_scorecard(rank, opportunity, opportunity_short, demand_signal, product_fit, differentiation, feasibility, privacy_trust, weighted_score, strongest_reason, recommendation) AS (VALUES (1, 'Evidence threads', 'Evidence threads', 4.5, 5.0, 4.5, 4.5, 5.0, 4.68, 'Public multi-clip demand plus exceptional reuse of current architecture', 'Prototype now'), (2, 'Source-aware return paths', 'Source return', 3.5, 4.5, 4.5, 3.0, 4.5, 3.98, 'Distinctive provenance value that compounds multi-source capture', 'Follow evidence threads'), (3, 'Local capture digest', 'Local digest', 2.5, 4.5, 4.5, 4.0, 5.0, 3.88, 'Interesting user-owned insight from existing history and local AI', 'Explore after thread data exists'), (4, 'Database property mapping', 'Property mapping', 5.0, 3.5, 2.0, 3.5, 4.0, 3.70, 'Strongest explicit demand but already an incumbent battleground', 'Add narrowly after core workflow proof'), (5, 'Reusable capture flows', 'Reusable flows', 4.5, 3.5, 2.5, 3.0, 4.0, 3.58, 'Proven power-user value with meaningful configuration cost', 'Defer broad builder UI'), (6, 'Rich media and screenshots', 'Rich media', 4.0, 3.0, 2.5, 2.0, 3.0, 3.05, 'Broad capture demand offset by attachment and host reliability risk', 'Defer until attachment reliability is proven'), (7, 'Full-article extraction', 'Full article', 4.0, 3.0, 2.0, 2.0, 3.0, 2.95, 'Common feature whose failure modes directly threaten trust', 'Do not lead with it'), (8, 'Account and workspace switcher', 'Account switcher', 3.0, 3.0, 3.0, 2.0, 3.0, 2.85, 'Real friction but authentication complexity and unclear breadth', 'Solve only with direct user evidence')) SELECT rank, opportunity, opportunity_short, demand_signal, product_fit, differentiation, feasibility, privacy_trust, weighted_score, strongest_reason, recommendation FROM opportunity_scorecard ORDER BY weighted_score DESC;",
+          "description": "Reproduces the weighted opportunity rows used by the ranking chart and scorecard table.",
+          "executed_at": "2026-07-19T18:00:00Z",
+          "metric_definitions": {
+            "weighted_score": "0.30 × demand signal + 0.25 × product fit + 0.20 × differentiation + 0.15 × feasibility + 0.10 × privacy and trust"
+          }
+        }
+      },
+      {
+        "id": "research_notes",
+        "label": "Method, coding, chart, and validation notes",
+        "path": "docs/research/extension-opportunity-notes.md"
+      },
+      {
+        "id": "local_product_base",
+        "label": "Notion Quick Note product and architecture sources",
+        "path": "docs/research/extension-architecture-reuse.sql",
+        "query": {
+          "engine": "sqlite",
+          "language": "sql",
+          "sql": "WITH architecture(\"order\", primitive, current_support, thread_work) AS (VALUES (1, 'One active regular-profile draft', 'A thought follows explicit invocations across tabs', 'Expose the behavior as an intentional thread state'), (2, 'Cross-tab context merge', 'Adds a new source and appends a selected passage', 'Add a stable clip record and explicit add-to-thread copy'), (3, 'Up to 20 URL-deduplicated sources', 'Tracks distinct pages with a stable primary source', 'Separate page identity from repeated clip provenance'), (4, 'Recent editing and stashed-draft return', 'Reopens local/remote notes without losing the active draft', 'Use it for deliberate resume and finish flows'), (5, 'Revision and remote-conflict protection', 'Prevents stale cross-tab and destructive remote edits', 'Extend fingerprints and migrations to clip-level state'), (6, 'Durable queue and recovery export', 'Reconciles ambiguous saves and preserves recoverable records', 'Verify clip/source counts through atomic enqueue and delivery'), (7, 'Reviewed on-device AI', 'Suggests titles and to-dos without cloud fallback', 'Add optional chunked thread synthesis after the manual MVP')) SELECT \"order\", primitive, current_support, thread_work FROM architecture ORDER BY \"order\" ASC;",
+          "description": "Summarizes repository capabilities inspected in README.md, src/capture-store.js, src/capture-record-repository.js, src/notion.js, and src/ai-note-actions.js.",
+          "executed_at": "2026-07-19T18:00:00Z",
+          "tables_used": [
+            "README.md",
+            "src/capture-store.js",
+            "src/capture-record-repository.js",
+            "src/notion.js",
+            "src/ai-note-actions.js"
+          ]
+        }
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Where Notion Quick Note Should Go Next"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "body": "## Executive Summary\n\n- **Lead with evidence threads.** Turn the extension's already-existing cross-tab draft behavior into an intentional research workflow: one note that accumulates selected passages, annotations, and source links across tabs, then lands in Notion with clip-level provenance. It scores **4.68/5**, materially ahead of the next option.\n- **The market rewards speed but punishes doubt.** The three primary comparators show roughly **1.409M non-unique listed users**, yet their public review evidence repeatedly returns to failed saves, login friction, missing content, duplicated highlights, and uncertainty about whether a capture landed. Reliability is not merely infrastructure; it is the product wedge.\n- **Property mapping is proven demand, but a weak opening move.** It has the strongest explicit request signal, but Save to Notion and Flylighter already compete heavily there. A broad property/form builder would pull this product away from its thought-first thesis and toward a crowded configuration surface.\n- **The codebase has already paid most of the platform cost.** One active draft, cross-tab context merge, up to 20 sources, Recent editing, conflict protection, durable retries, recovery exports, and reviewed on-device AI all support the evidence-thread direction without new always-on page permissions."
+      },
+      {
+        "id": "decision_frame",
+        "type": "markdown",
+        "body": "## The decision is not ‘which clipper feature is missing?’\n\nThe useful question is: **which next direction compounds the extension's dependable, privacy-first quick-capture base while creating a reason to choose it over larger incumbents?**\n\nThe analysis uses current store scale, public review summaries and visible samples, recent community reports, official competitor documentation, official Chrome and Notion documentation, and the local repository. It separates claimed capability from observed user feedback and treats the weighted ranking as a transparent decision model—not as a demand forecast."
+      },
+      {
+        "id": "market_signal_intro",
+        "type": "markdown",
+        "body": "## A large installed base validates the job; ratings expose the gap\n\n[Notion Web Clipper](https://chromewebstore.google.com/detail/notion-web-clipper/knheggckgoiihginacbkhaalnibhilkk), [Save to Notion](https://chromewebstore.google.com/detail/save-to-notion/ldmmifpegigmeammaeckplhnjbbpccmm?hl=en), and [Flylighter](https://chromewebstore.google.com/detail/flylighter-capture-articl/dlmdffmkcggiicjbfnjcnikkpahgplmd) collectively show that web-to-Notion capture is a durable behavior, not an edge case. The contrast matters: the simplest official product has the largest listed base but a **3.3** rating; the more configurable Save to Notion has a smaller base and a stronger **4.3** rating; feature-rich Flylighter remains much smaller and sits at **3.5**.\n\n**So what:** capability helps, but complexity only creates value when the capture remains trustworthy and fast. Notion Quick Note should preserve its reliability discipline as a visible product promise rather than chase feature count."
+      },
+      {
+        "id": "market_table_block",
+        "type": "table",
+        "tableId": "market_scale",
+        "layout": "full"
+      },
+      {
+        "id": "review_findings",
+        "type": "markdown",
+        "body": "## Public feedback converges on four jobs\n\n**1. Capture without breaking thought.** Positive reviews repeatedly praise a few-click flow, daily usefulness, and the absence of bloat. This aligns directly with the current thought-first interaction model.\n\n**2. Route without cleanup.** Database properties, remembered destinations, page metadata, and reusable flows are explicit demand. [Save to Notion](https://chromewebstore.google.com/detail/save-to-notion/ldmmifpegigmeammaeckplhnjbbpccmm?hl=en) and [Flylighter](https://docs.flylighter.com/faq/) make this a central promise; public reviews of the official clipper ask for the same capability.\n\n**3. Trust that the capture landed intact.** The three primary review summaries surface failures around saving, authentication, formatting, missing text, or inconsistent behavior. Recent community reports add duplicated highlights and platform-change outages. This is the highest-confidence cross-product pain.\n\n**4. Keep evidence connected to its source.** Multi-highlight collection, multi-tab capture, annotations, video timestamps, PDF context, and return-to-source behavior appear across Flylighter and [Notate](https://chromewebstore.google.com/detail/notate-%E2%80%94-the-missing-brow/jkhlljnilbhpeoaijknfjbcanafcohbd). The signal is smaller than property mapping, but the differentiation is substantially better.\n\nThe public review-index pages for [Save to Notion](https://chrome-stats.com/d/ldmmifpegigmeammaeckplhnjbbpccmm/reviews), [Notion Web Clipper](https://chrome-stats.com/d/knheggckgoiihginacbkhaalnibhilkk/reviews), and [Flylighter](https://chrome-stats.com/d/dlmdffmkcggiicjbfnjcnikkpahgplmd/reviews) reference **1,627 review records** in total. This report uses their summaries and visible recent samples—not the gated full corpus—so these are directional themes, not frequency estimates."
+      },
+      {
+        "id": "research_backlog",
+        "type": "markdown",
+        "body": "## Ten useful research tracks are available from here\n\n1. **Voice-of-customer and review mining — executed here.** Code praise, failure modes, unmet jobs, and switching triggers across store reviews and communities.\n2. **Store demand and keyword benchmark.** Track listed users, ratings, category rank, copy, update cadence, and search-language positioning over time.\n3. **Reliability event timeline.** Match competitor rating drops and outage reports to Chrome or Notion platform changes; turn the result into a release-risk watchlist.\n4. **Capture-fidelity test corpus.** Benchmark articles, tables, code, email, social posts, PDFs, video, recipes, jobs, and hostile/CSP-heavy pages against exact expected output.\n5. **Notion schema affordance matrix.** Continuously map property types, templates, data-source changes, API gaps, request limits, and migration risk.\n6. **Permission and privacy benchmark.** Compare host access, identity flows, data disclosures, analytics defaults, recovery/export, and Incognito behavior.\n7. **Built-in AI feasibility panel.** Measure device availability, model-download completion, latency, context limits, failure modes, and user-perceived value for each local action.\n8. **Workflow archetype research.** Study how researchers, students, recruiters, shoppers, writers, and analysts actually turn web evidence into Notion objects.\n9. **Return-path reliability study.** Test exact-page, text-fragment, PDF-page, and video-timestamp reopening across real sites and browser updates.\n10. **Opt-in personal capture insights.** Using user-controlled local exports, analyze capture sources, revisit rates, outstanding to-dos, topic clusters, and ‘saved but never used’ patterns—then return those insights to the user locally.\n\nThe final track is especially interesting as a user feature: a private weekly capture review could surface what the user learned, what needs action, and which sources they never revisited. It should follow—not precede—a well-structured evidence-thread model."
+      },
+      {
+        "id": "ranking_intro",
+        "type": "markdown",
+        "body": "## The loudest request is not the strongest strategy\n\nDatabase property mapping receives the maximum demand score, but its differentiation is low and its UI/configuration cost is meaningful. Evidence threads combine strong demand-adjacent signals with exceptional product fit, reuse, and privacy. Source-aware return paths and a local capture digest become more valuable once thread data exists, making the recommendation a platform sequence rather than a one-off feature."
+      },
+      {
+        "id": "ranking_chart_block",
+        "type": "chart",
+        "chartId": "opportunity_score",
+        "layout": "full"
+      },
+      {
+        "id": "ranking_explanation",
+        "type": "markdown",
+        "body": "**How to read the chart:** a one-point score difference reflects the weighted judgment model, not a measured probability of success. Evidence threads lead because they are the only direction that is simultaneously supported by public workflow demand and deeply enabled by current architecture.\n\n**Implication:** prototype the intentional thread workflow first. Treat property mapping as a narrow follow-on—perhaps a small set of destination presets—only after the thread behavior proves useful."
+      },
+      {
+        "id": "opportunity_table_block",
+        "type": "table",
+        "tableId": "opportunity_detail",
+        "layout": "full"
+      },
+      {
+        "id": "recommendation",
+        "type": "markdown",
+        "body": "## Choose evidence threads, not another generic clipping mode\n\nAn **evidence thread** is one durable Quick Note that accumulates selected passages, personal annotations, and source links across multiple tabs before the user finishes and sends it to Notion.\n\nThe promise is simple: **research across the web without losing the thread.**\n\nThis reframes the product from ‘a lighter web clipper’ to ‘the fastest trustworthy place to think with web evidence.’ It complements the current feature base instead of replacing it: the floating composer remains the thinking surface, sources stay explicit and removable, delivery remains recoverable, and AI remains optional and reviewable."
+      },
+      {
+        "id": "mvp_contract",
+        "type": "markdown",
+        "body": "## A useful MVP is small and concrete\n\n1. **Make thread state visible.** Show `Evidence thread · 3 sources · 7 clips` in the composer when more than one clip or source has been added. Do not add a new workspace-like mode.\n2. **Name the next action clearly.** When a draft exists, the context menu becomes `Add selection to current Quick Note`; without one, it remains `Start Quick Note from selection`.\n3. **Preserve clip-level provenance.** Add a `clips[]` collection with a stable ID, `sourceId`, kind, text, optional locator, and capture time. Keep `sources[]` as the distinct-page index. This fixes the current structural ambiguity where repeated selections can enter the document while source metadata is deduplicated by URL.\n4. **Render attribution beside each captured quote.** Each selection should show its source title/domain and support remove, reorder, and open-source actions without forcing the user into the Sources panel.\n5. **Finish or resume deliberately.** Save delivers the complete thread through the existing queue. Close preserves it. Recent can reopen it. A new-note action should explicitly stash or finish the current thread instead of making ownership implicit.\n6. **Do not require AI.** The thread must be excellent with manual notes alone. On supported devices, a later `Synthesize thread` action can preview a title, outline, open questions, or to-dos using the same local/review-before-apply posture.\n\nThe first release should exclude full-article extraction, screenshots, a general flow builder, remote sync, and cloud AI. Those expand the failure surface before the core behavior is proven."
+      },
+      {
+        "id": "architecture_intro",
+        "type": "markdown",
+        "body": "## Most of the hard reliability work is already reusable\n\nThe repository already merges new context into the active draft, appends a selected passage as a quote, deduplicates attached pages, guards revisions across tabs, edits recent Notion content, persists delivery, reconciles ambiguous enqueue outcomes, and recovers drafts. The prototype is therefore primarily a **data-model and interaction clarification**, not a new capture engine.\n\nThe main engineering risk is migration: clip-level provenance must be added without weakening atomic draft-to-queue transitions or remote-edit conflict handling. The Notion API supports block appends but limits one append request to **100 child blocks**, so long threads should continue using the existing segmented delivery approach and explicit caps."
+      },
+      {
+        "id": "architecture_table_block",
+        "type": "table",
+        "tableId": "architecture_reuse",
+        "layout": "full"
+      },
+      {
+        "id": "validation_plan",
+        "type": "markdown",
+        "body": "## Validate the workflow without changing the privacy posture\n\nRun a focused prototype study with **8–12** people who already use Notion for research, study, recruiting, writing, or analysis. Ask each person to collect evidence from three tabs, add one original note, remove or reorder a clip, close and resume, then confirm the final Notion page.\n\nUse proposed launch gates—not claimed outcomes:\n\n- At least **80%** add a second clip without instruction.\n- Median second-clip time is **5 seconds or less** after text selection.\n- **Zero** lost, duplicated, or unattributed clips in the tested flows.\n- The local clip/source count matches the delivered Notion result in **100%** of successful test runs.\n- Participants can explain the difference between Close, Finish/Save, and Start new without prompting.\n\nKeep evaluation data local or session-scoped for the prototype. The extension currently promises no analytics; do not quietly introduce behavioral telemetry. If later aggregate telemetry is useful, make it separately opt-in, disclose it, minimize it to counters and timings, and preserve a user-readable local activity view."
+      },
+      {
+        "id": "next_sequence",
+        "type": "markdown",
+        "body": "## Recommended sequence\n\n1. **Prototype the visible evidence-thread interaction** on top of the current draft system.\n2. **Separate `clips[]` from `sources[]`** and add migration/round-trip tests before UI polish.\n3. **Run the task study and a domain-fidelity corpus** across normal pages, PDFs, video, and restricted hosts.\n4. **Add source-aware return paths** where the reliability study supports them.\n5. **Add local thread synthesis** only after measuring on-device availability, latency, and context overflow on supported machines.\n6. **Introduce narrow destination presets/property mapping** for the top proven thread use cases, avoiding a general flow builder until repeated demand justifies it.\n7. **Explore a private capture review** once thread structure can support meaningful source, topic, revisit, and action insights."
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## Further Questions\n\n- Do users want one active thread globally, or do distinct named threads justify controlled concurrency?\n- Is a thread best represented in Notion as one page with interleaved evidence, one database item with grouped source sections, or an appendable running page?\n- Which provenance locator is reliable enough per surface: URL only, text fragment, DOM path, PDF page, or media timestamp?\n- How many clips and sources feel useful before the composer becomes a research manager instead of a quick note?\n- Does thread synthesis create value beyond title and to-do extraction, or does it make a trustworthy capture feel less predictable?\n- Which two or three database properties recur across real thread workflows strongly enough to justify first-class presets?"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "body": "## Caveats and Assumptions\n\n- Listed-user counts overlap across products and do not estimate unique users, retention, or willingness to pay.\n- Store ratings are current snapshots and may change; small products such as Flylighter and Notate have low rating counts.\n- Public review summaries and visible samples are subject to selection and platform bias. The referenced review indexes gate the full corpus, so no claim here represents a statistically measured theme frequency.\n- Competitor documentation verifies positioning and claimed capability, not observed reliability. Community reports are anecdotal corroboration.\n- Opportunity scores encode explicit product judgment. They should be updated after user testing, capture-fidelity benchmarks, and implementation estimates.\n- The recommendation assumes the product continues to prioritize one-gesture capture, official Notion API access, review-before-mutation AI, and proportional permissions.\n\n**Validation assessment: share with caveats.** The market metrics and technical feasibility claims are source-backed; the strategic ranking is directionally useful but still needs prototype evidence from actual target users."
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-19T18:00:00Z",
+    "status": "ready",
+    "datasets": {
+      "market": [
+        {
+          "product": "Notion Web Clipper",
+          "listed_users": 1000000,
+          "rating": 3.3,
+          "rating_count": 617,
+          "positioning": "Simple one-click page save"
+        },
+        {
+          "product": "Save to Notion",
+          "listed_users": 400000,
+          "rating": 4.3,
+          "rating_count": 1300,
+          "positioning": "Forms, properties, rich capture"
+        },
+        {
+          "product": "Flylighter",
+          "listed_users": 9000,
+          "rating": 3.5,
+          "rating_count": 23,
+          "positioning": "Flows, multi-capture, speed"
+        }
+      ],
+      "opportunities": [
+        {
+          "rank": 1,
+          "opportunity": "Evidence threads",
+          "opportunity_short": "Evidence threads",
+          "demand_signal": 4.5,
+          "product_fit": 5.0,
+          "differentiation": 4.5,
+          "feasibility": 4.5,
+          "privacy_trust": 5.0,
+          "weighted_score": 4.68,
+          "strongest_reason": "Public multi-clip demand plus exceptional reuse of current architecture",
+          "recommendation": "Prototype now"
+        },
+        {
+          "rank": 2,
+          "opportunity": "Source-aware return paths",
+          "opportunity_short": "Source return",
+          "demand_signal": 3.5,
+          "product_fit": 4.5,
+          "differentiation": 4.5,
+          "feasibility": 3.0,
+          "privacy_trust": 4.5,
+          "weighted_score": 3.98,
+          "strongest_reason": "Distinctive provenance value that compounds multi-source capture",
+          "recommendation": "Follow evidence threads"
+        },
+        {
+          "rank": 3,
+          "opportunity": "Local capture digest",
+          "opportunity_short": "Local digest",
+          "demand_signal": 2.5,
+          "product_fit": 4.5,
+          "differentiation": 4.5,
+          "feasibility": 4.0,
+          "privacy_trust": 5.0,
+          "weighted_score": 3.88,
+          "strongest_reason": "Interesting user-owned insight from existing history and local AI",
+          "recommendation": "Explore after thread data exists"
+        },
+        {
+          "rank": 4,
+          "opportunity": "Database property mapping",
+          "opportunity_short": "Property mapping",
+          "demand_signal": 5.0,
+          "product_fit": 3.5,
+          "differentiation": 2.0,
+          "feasibility": 3.5,
+          "privacy_trust": 4.0,
+          "weighted_score": 3.70,
+          "strongest_reason": "Strongest explicit demand but already an incumbent battleground",
+          "recommendation": "Add narrowly after core workflow proof"
+        },
+        {
+          "rank": 5,
+          "opportunity": "Reusable capture flows",
+          "opportunity_short": "Reusable flows",
+          "demand_signal": 4.5,
+          "product_fit": 3.5,
+          "differentiation": 2.5,
+          "feasibility": 3.0,
+          "privacy_trust": 4.0,
+          "weighted_score": 3.58,
+          "strongest_reason": "Proven power-user value with meaningful configuration cost",
+          "recommendation": "Defer broad builder UI"
+        },
+        {
+          "rank": 6,
+          "opportunity": "Rich media and screenshots",
+          "opportunity_short": "Rich media",
+          "demand_signal": 4.0,
+          "product_fit": 3.0,
+          "differentiation": 2.5,
+          "feasibility": 2.0,
+          "privacy_trust": 3.0,
+          "weighted_score": 3.05,
+          "strongest_reason": "Broad capture demand offset by attachment and host reliability risk",
+          "recommendation": "Defer until attachment reliability is proven"
+        },
+        {
+          "rank": 7,
+          "opportunity": "Full-article extraction",
+          "opportunity_short": "Full article",
+          "demand_signal": 4.0,
+          "product_fit": 3.0,
+          "differentiation": 2.0,
+          "feasibility": 2.0,
+          "privacy_trust": 3.0,
+          "weighted_score": 2.95,
+          "strongest_reason": "Common feature whose failure modes directly threaten trust",
+          "recommendation": "Do not lead with it"
+        },
+        {
+          "rank": 8,
+          "opportunity": "Account and workspace switcher",
+          "opportunity_short": "Account switcher",
+          "demand_signal": 3.0,
+          "product_fit": 3.0,
+          "differentiation": 3.0,
+          "feasibility": 2.0,
+          "privacy_trust": 3.0,
+          "weighted_score": 2.85,
+          "strongest_reason": "Real friction but authentication complexity and unclear breadth",
+          "recommendation": "Solve only with direct user evidence"
+        }
+      ],
+      "architecture": [
+        {
+          "order": 1,
+          "primitive": "One active regular-profile draft",
+          "current_support": "A thought follows explicit invocations across tabs",
+          "thread_work": "Expose the behavior as an intentional thread state"
+        },
+        {
+          "order": 2,
+          "primitive": "Cross-tab context merge",
+          "current_support": "Adds a new source and appends a selected passage",
+          "thread_work": "Add a stable clip record and explicit add-to-thread copy"
+        },
+        {
+          "order": 3,
+          "primitive": "Up to 20 URL-deduplicated sources",
+          "current_support": "Tracks distinct pages with a stable primary source",
+          "thread_work": "Separate page identity from repeated clip provenance"
+        },
+        {
+          "order": 4,
+          "primitive": "Recent editing and stashed-draft return",
+          "current_support": "Reopens local/remote notes without losing the active draft",
+          "thread_work": "Use it for deliberate resume and finish flows"
+        },
+        {
+          "order": 5,
+          "primitive": "Revision and remote-conflict protection",
+          "current_support": "Prevents stale cross-tab and destructive remote edits",
+          "thread_work": "Extend fingerprints and migrations to clip-level state"
+        },
+        {
+          "order": 6,
+          "primitive": "Durable queue and recovery export",
+          "current_support": "Reconciles ambiguous saves and preserves recoverable records",
+          "thread_work": "Verify clip/source counts through atomic enqueue and delivery"
+        },
+        {
+          "order": 7,
+          "primitive": "Reviewed on-device AI",
+          "current_support": "Suggests titles and to-dos without cloud fallback",
+          "thread_work": "Add optional chunked thread synthesis after the manual MVP"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "opportunity_evidence",
+      "label": "Extension opportunity evidence inventory",
+      "path": "docs/research/extension-market-snapshot.sql",
+      "query": {
+        "engine": "sqlite",
+        "language": "sql",
+        "sql": "WITH market(product, listed_users, rating, rating_count, positioning) AS (VALUES ('Notion Web Clipper', 1000000, 3.3, 617, 'Simple one-click page save'), ('Save to Notion', 400000, 4.3, 1300, 'Forms, properties, rich capture'), ('Flylighter', 9000, 3.5, 23, 'Flows, multi-capture, speed')) SELECT product, listed_users, rating, rating_count, positioning FROM market ORDER BY listed_users DESC;",
+        "description": "Reproduces the current comparator metrics transcribed from the cited Chrome Web Store listings.",
+        "executed_at": "2026-07-19T18:00:00Z",
+        "metric_definitions": {
+          "listed_users": "Current non-unique user count displayed by the Chrome Web Store listing",
+          "rating": "Current average rating displayed by the Chrome Web Store listing",
+          "rating_count": "Current rating count displayed by the Chrome Web Store listing; 1.3K is represented as 1,300"
+        }
+      }
+    },
+    {
+      "id": "opportunity_scorecard",
+      "label": "Weighted opportunity scorecard",
+      "path": "docs/research/extension-opportunity-scorecard.sql",
+      "query": {
+        "engine": "sqlite",
+        "language": "sql",
+        "sql": "WITH opportunity_scorecard(rank, opportunity, opportunity_short, demand_signal, product_fit, differentiation, feasibility, privacy_trust, weighted_score, strongest_reason, recommendation) AS (VALUES (1, 'Evidence threads', 'Evidence threads', 4.5, 5.0, 4.5, 4.5, 5.0, 4.68, 'Public multi-clip demand plus exceptional reuse of current architecture', 'Prototype now'), (2, 'Source-aware return paths', 'Source return', 3.5, 4.5, 4.5, 3.0, 4.5, 3.98, 'Distinctive provenance value that compounds multi-source capture', 'Follow evidence threads'), (3, 'Local capture digest', 'Local digest', 2.5, 4.5, 4.5, 4.0, 5.0, 3.88, 'Interesting user-owned insight from existing history and local AI', 'Explore after thread data exists'), (4, 'Database property mapping', 'Property mapping', 5.0, 3.5, 2.0, 3.5, 4.0, 3.70, 'Strongest explicit demand but already an incumbent battleground', 'Add narrowly after core workflow proof'), (5, 'Reusable capture flows', 'Reusable flows', 4.5, 3.5, 2.5, 3.0, 4.0, 3.58, 'Proven power-user value with meaningful configuration cost', 'Defer broad builder UI'), (6, 'Rich media and screenshots', 'Rich media', 4.0, 3.0, 2.5, 2.0, 3.0, 3.05, 'Broad capture demand offset by attachment and host reliability risk', 'Defer until attachment reliability is proven'), (7, 'Full-article extraction', 'Full article', 4.0, 3.0, 2.0, 2.0, 3.0, 2.95, 'Common feature whose failure modes directly threaten trust', 'Do not lead with it'), (8, 'Account and workspace switcher', 'Account switcher', 3.0, 3.0, 3.0, 2.0, 3.0, 2.85, 'Real friction but authentication complexity and unclear breadth', 'Solve only with direct user evidence')) SELECT rank, opportunity, opportunity_short, demand_signal, product_fit, differentiation, feasibility, privacy_trust, weighted_score, strongest_reason, recommendation FROM opportunity_scorecard ORDER BY weighted_score DESC;",
+        "description": "Reproduces the weighted opportunity rows used by the ranking chart and scorecard table.",
+        "executed_at": "2026-07-19T18:00:00Z",
+        "metric_definitions": {
+          "weighted_score": "0.30 × demand signal + 0.25 × product fit + 0.20 × differentiation + 0.15 × feasibility + 0.10 × privacy and trust"
+        }
+      }
+    },
+    {
+      "id": "research_notes",
+      "label": "Method, coding, chart, and validation notes",
+      "path": "docs/research/extension-opportunity-notes.md"
+    },
+    {
+      "id": "local_product_base",
+      "label": "Notion Quick Note product and architecture sources",
+      "path": "docs/research/extension-architecture-reuse.sql",
+      "query": {
+        "engine": "sqlite",
+        "language": "sql",
+        "sql": "WITH architecture(\"order\", primitive, current_support, thread_work) AS (VALUES (1, 'One active regular-profile draft', 'A thought follows explicit invocations across tabs', 'Expose the behavior as an intentional thread state'), (2, 'Cross-tab context merge', 'Adds a new source and appends a selected passage', 'Add a stable clip record and explicit add-to-thread copy'), (3, 'Up to 20 URL-deduplicated sources', 'Tracks distinct pages with a stable primary source', 'Separate page identity from repeated clip provenance'), (4, 'Recent editing and stashed-draft return', 'Reopens local/remote notes without losing the active draft', 'Use it for deliberate resume and finish flows'), (5, 'Revision and remote-conflict protection', 'Prevents stale cross-tab and destructive remote edits', 'Extend fingerprints and migrations to clip-level state'), (6, 'Durable queue and recovery export', 'Reconciles ambiguous saves and preserves recoverable records', 'Verify clip/source counts through atomic enqueue and delivery'), (7, 'Reviewed on-device AI', 'Suggests titles and to-dos without cloud fallback', 'Add optional chunked thread synthesis after the manual MVP')) SELECT \"order\", primitive, current_support, thread_work FROM architecture ORDER BY \"order\" ASC;",
+        "description": "Summarizes repository capabilities inspected in README.md, src/capture-store.js, src/capture-record-repository.js, src/notion.js, and src/ai-note-actions.js.",
+        "executed_at": "2026-07-19T18:00:00Z",
+        "tables_used": [
+          "README.md",
+          "src/capture-store.js",
+          "src/capture-record-repository.js",
+          "src/notion.js",
+          "src/ai-note-actions.js"
+        ]
+      }
+    }
+  ]
+}

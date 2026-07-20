@@ -147,12 +147,22 @@ input:focus { border-color: var(--nqn-focus); box-shadow: 0 0 0 2px color-mix(in
 .ready-stage { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 12px; }
 .success-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: var(--nqn-radius-control); background: var(--nqn-success-bg); color: var(--nqn-success); animation: nqn-mark-pop var(--nqn-duration-slow) var(--nqn-ease-spring); }
 .ready-outcome { margin: 9px 0 0; color: var(--nqn-success); font-size: 11px; line-height: 1.45; }
-.shortcut-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 20px; padding: 14px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-control); background: var(--nqn-surface-secondary); }
-.shortcut-card small, .shortcut-card b { display: block; }
-.shortcut-card small { color: var(--nqn-text-secondary); font-size: 10px; }
-.shortcut-card b { margin-top: 2px; font-size: 13px; font-weight: 500; }
-kbd { padding: 6px 9px; border: 1px solid var(--nqn-border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--nqn-surface); font: 500 12px/1 var(--nqn-font); white-space: nowrap; }
 .ready-actions { display: flex; gap: 8px; margin-top: 20px; }
+.shortcut-settings { display: grid; grid-template-columns: minmax(180px, .75fr) minmax(0, 1.6fr); gap: 10px 32px; margin-bottom: 18px; padding: 22px 24px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-panel); background: var(--nqn-surface); }
+.shortcut-settings-heading h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; }
+.shortcut-settings-heading > p:last-child { margin: 7px 0 0; color: var(--nqn-text-secondary); font-size: 11px; line-height: 1.45; }
+.shortcut-control { min-width: 0; }
+.shortcut-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 34px; }
+.shortcut-status { color: var(--nqn-text-secondary); font-size: 11px; font-weight: 500; }
+.shortcut-status[data-state="assigned"] { color: var(--nqn-success); }
+.shortcut-status[data-state="unassigned"], .shortcut-status[data-state="error"] { color: var(--nqn-danger); }
+.shortcut-keycaps { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; }
+.shortcut-keycaps kbd { padding: 6px 9px; border: 1px solid var(--nqn-border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--nqn-surface-secondary); font: 500 12px/1 var(--nqn-font); white-space: nowrap; }
+.shortcut-unassigned { color: var(--nqn-text-secondary); font-size: 11px; }
+.shortcut-warning { margin: 9px 0 0; color: var(--nqn-danger); font-size: 11px; line-height: 1.45; }
+.shortcut-control > .button { margin-top: 13px; }
+.shortcut-manual-instructions { margin: 10px 0 0; color: var(--nqn-text-secondary); font-size: 10px; line-height: 1.5; }
+.shortcut-manual-instructions code { color: var(--nqn-text); font: 500 10px/1.4 var(--nqn-font-mono, monospace); overflow-wrap: anywhere; }
 .preferences { display: grid; grid-template-columns: minmax(180px, .75fr) minmax(0, 1.6fr); gap: 10px 32px; margin-top: 18px; padding: 22px 24px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-panel); background: var(--nqn-surface); }
 .preferences-heading h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; }
 .preferences-heading > p:last-child { margin: 7px 0 0; color: var(--nqn-text-secondary); font-size: 11px; line-height: 1.45; }
@@ -182,6 +192,10 @@ kbd { padding: 6px 9px; border: 1px solid var(--nqn-border-strong); border-botto
   .field-grid { grid-template-columns: 1fr; }
   .ready-stage { grid-template-columns: 1fr; }
   .ready-actions { flex-direction: column; align-items: stretch; }
+  .shortcut-settings { grid-template-columns: 1fr; padding: 18px; }
+  .shortcut-summary { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .shortcut-keycaps { justify-content: flex-start; }
+  .shortcut-control > .button { width: 100%; }
   .preferences { grid-template-columns: 1fr; padding: 18px; }
   .data-practices { grid-template-columns: 1fr; padding: 18px; }
   .data-practices li { grid-template-columns: 1fr; gap: 2px; }

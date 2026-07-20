@@ -14,16 +14,15 @@
   ],
   "host_permissions": ["https://api.notion.com/*"],
   "background": {
-    "service_worker": "src/background.js",
+    "service_worker": "dist/mv3-worker-harness.js",
     "type": "module"
   },
   "action": {
     "default_title": "Notion Quick Note MV3 Failure Fixture"
   },
   "commands": {
-    "toggle-quick-note": {
-      "suggested_key": { "default": "Ctrl+Shift+Space", "mac": "MacCtrl+Shift+Space" },
-      "description": "Open or close Quick Note"
+    "_execute_action": {
+      "suggested_key": { "default": "Ctrl+Shift+Space", "mac": "Command+Shift+Space" }
     }
   },
   "options_page": "control.html"

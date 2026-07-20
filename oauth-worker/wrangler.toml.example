@@ -1,11 +1,30 @@
 name = "notion-quick-note-oauth"
-main = "src/index.js"
+main = "src/index.ts"
 compatibility_date = "2026-07-01"
 
 [vars]
 ALLOWED_EXTENSION_IDS = "your_chrome_extension_id"
 ALLOWED_ORIGINS = "chrome-extension://your_chrome_extension_id"
 
+[[durable_objects.bindings]]
+name = "OAUTH_SESSIONS"
+class_name = "OAuthSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OAuthSession"]
+
+[[ratelimits]]
+name = "OAUTH_RATE_LIMITER"
+# Replace this with a positive integer that is unique within your Cloudflare account.
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
 # Set secrets separately:
 # npx wrangler secret put NOTION_CLIENT_ID
 # npx wrangler secret put NOTION_CLIENT_SECRET
+# Generate with: openssl rand -base64 32
+# npx wrangler secret put TOKEN_ENCRYPTION_KEY

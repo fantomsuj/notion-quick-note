@@ -1,0 +1,172 @@
+const DATABASE_NAME = "notionQuickNoteOAuthDeviceV1";
+const DATABASE_VERSION = 1;
+const STORE_NAME = "keys";
+const KEY_ID = "device";
+
+export interface OAuthDeviceKeyStore {
+  getOrCreateKeyPair(): Promise<CryptoKeyPair>;
+}
+
+interface OAuthDeviceKeyStoreOptions {
+  indexedDBImpl?: IDBFactory;
+  cryptoImpl?: Crypto;
+  allowKeyCreation?: boolean;
+}
+
+export class OAuthDeviceUnavailableError extends Error {
+  readonly code = "oauth_device_unavailable";
+}
+
+let defaultKeyStore: OAuthDeviceKeyStore | undefined;
+
+export function getDefaultOAuthDeviceKeyStore() {
+  if (!defaultKeyStore) {
+    defaultKeyStore = createOAuthDeviceKeyStore({
+      indexedDBImpl: globalThis.indexedDB,
+      cryptoImpl: globalThis.crypto,
+      allowKeyCreation: !Boolean(globalThis.chrome?.extension?.inIncognitoContext)
+    });
+  }
+  return defaultKeyStore;
+}
+
+export function createOAuthDeviceKeyStore({
+  indexedDBImpl = globalThis.indexedDB,
+  cryptoImpl = globalThis.crypto,
+  allowKeyCreation = true
+}: OAuthDeviceKeyStoreOptions = {}): OAuthDeviceKeyStore {
+  if (!indexedDBImpl) throw deviceUnavailable("Secure device storage is unavailable in this browser.");
+  try {
+    assertWebCrypto(cryptoImpl);
+  } catch (error) {
+    throw deviceUnavailable(errorMessage(error), error);
+  }
+
+  let activeLoad: Promise<CryptoKeyPair> | undefined;
+  return {
+    getOrCreateKeyPair() {
+      if (!activeLoad) {
+        activeLoad = loadOrCreateKeyPair({ indexedDBImpl, cryptoImpl, allowKeyCreation }).catch((error) => {
+          activeLoad = undefined;
+          throw error instanceof OAuthDeviceUnavailableError
+            ? error
+            : deviceUnavailable("The OAuth device key is unavailable. Reconnect Notion in a regular window.", error);
+        });
+      }
+      return activeLoad;
+    }
+  };
+}
+
+export async function generateOAuthDeviceKeyPair(cryptoImpl: Crypto = globalThis.crypto): Promise<CryptoKeyPair> {
+  assertWebCrypto(cryptoImpl);
+  const keyPair = await cryptoImpl.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign", "verify"]
+  );
+  if (keyPair.privateKey.extractable) {
+    throw new Error("The OAuth device key was not created securely.");
+  }
+  return keyPair;
+}
+
+async function loadOrCreateKeyPair({
+  indexedDBImpl,
+  cryptoImpl,
+  allowKeyCreation
+}: Required<OAuthDeviceKeyStoreOptions>): Promise<CryptoKeyPair> {
+  const database = await openDatabase(indexedDBImpl);
+  try {
+    const saved = await readKeyPair(database);
+    if (isUsableKeyPair(saved)) return saved;
+    if (!allowKeyCreation) {
+      throw deviceUnavailable("Refresh is unavailable in a private window. Reconnect Notion in a regular window.");
+    }
+
+    const keyPair = await generateOAuthDeviceKeyPair(cryptoImpl);
+    await writeKeyPair(database, keyPair);
+    return keyPair;
+  } finally {
+    database.close();
+  }
+}
+
+function openDatabase(indexedDBImpl: IDBFactory): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDBImpl.open(DATABASE_NAME, DATABASE_VERSION);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
+        request.result.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onerror = () => reject(request.error || new Error("Could not open secure device storage."));
+    request.onblocked = () => reject(new Error("Secure device storage is temporarily unavailable."));
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+function readKeyPair(database: IDBDatabase): Promise<unknown> {
+  return transactionRequest<unknown>(database, "readonly", (store) => store.get(KEY_ID));
+}
+
+async function writeKeyPair(database: IDBDatabase, keyPair: CryptoKeyPair): Promise<void> {
+  await transactionRequest<IDBValidKey>(database, "readwrite", (store) => store.put(keyPair, KEY_ID));
+}
+
+function transactionRequest<T>(
+  database: IDBDatabase,
+  mode: IDBTransactionMode,
+  createRequest: (store: IDBObjectStore) => IDBRequest<T>
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, mode);
+    const request = createRequest(transaction.objectStore(STORE_NAME));
+    let result: T;
+    request.onsuccess = () => {
+      result = request.result;
+    };
+    request.onerror = () => reject(request.error || new Error("Secure device storage failed."));
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error || new Error("Secure device storage failed."));
+    transaction.onabort = () => reject(transaction.error || new Error("Secure device storage was interrupted."));
+  });
+}
+
+function isUsableKeyPair(value: unknown): value is CryptoKeyPair {
+  if (!isRecord(value)) return false;
+  const privateKey = value.privateKey;
+  const publicKey = value.publicKey;
+  return privateKey instanceof CryptoKey
+    && publicKey instanceof CryptoKey
+    && privateKey.type === "private"
+    && isP256Algorithm(privateKey.algorithm)
+    && privateKey.usages.includes("sign")
+    && privateKey.extractable === false
+    && publicKey.type === "public"
+    && isP256Algorithm(publicKey.algorithm);
+}
+
+function assertWebCrypto(cryptoImpl: Crypto | undefined): asserts cryptoImpl is Crypto {
+  if (!cryptoImpl?.subtle || typeof cryptoImpl.getRandomValues !== "function") {
+    throw new Error("Secure device cryptography is unavailable in this browser.");
+  }
+}
+
+function deviceUnavailable(message: string, cause?: unknown): OAuthDeviceUnavailableError {
+  return new OAuthDeviceUnavailableError(message, cause === undefined ? undefined : { cause });
+}
+
+function isP256Algorithm(algorithm: KeyAlgorithm): boolean {
+  return algorithm.name === "ECDSA"
+    && "namedCurve" in algorithm
+    && algorithm.namedCurve === "P-256";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Secure device cryptography is unavailable in this browser.";
+}
