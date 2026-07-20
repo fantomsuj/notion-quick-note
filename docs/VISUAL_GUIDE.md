@@ -135,13 +135,13 @@ This suggests the next reliability improvements naturally: validate configuratio
 
 | If you want to change… | Start here | Keep this contract intact |
 |---|---|---|
-| The floating card's layout, styling, copy, or keyboard behavior | `src/content.js` | It must communicate through runtime messages and must not receive the token |
-| Toolbar, shortcut, or context-menu behavior | `src/background.js` | Opening must follow a user gesture; restricted Chrome pages need a fallback |
-| What gets written into Notion | `src/notion.js` | Keep request construction testable without Chrome APIs |
-| Page-versus-database settings | `options/options.html`, `.css`, and `.js` | Stored keys must remain compatible or be migrated |
+| The floating card's layout, styling, copy, or keyboard behavior | `src/content.ts` | It must communicate through runtime messages and must not receive the token |
+| Toolbar, shortcut, or context-menu behavior | `src/background.ts` | Opening must follow a user gesture; restricted Chrome pages need a fallback |
+| What gets written into Notion | `src/notion.ts` | Keep request construction testable without Chrome APIs |
+| Page-versus-database settings | `options/options.html`, `.css`, and `.ts` | Stored keys must remain compatible or be migrated |
 | Manifest permissions or extension metadata | `manifest.json` | Request the smallest permission set possible |
-| OAuth exchange behavior | `oauth-worker/src/index.js` | Secrets stay server-side; redirects and origins remain allowlisted |
-| Request-shape regression coverage | `tests/notion.test.js` | Tests should remain Node-only and dependency-free where practical |
+| OAuth exchange behavior | `oauth-worker/src/index.ts` | Secrets stay server-side; redirects and origins remain allowlisted |
+| Request-shape regression coverage | `tests/notion.test.ts` | Tests should remain Node-only and dependency-free where practical |
 | Product intent and release gates | `docs/PRODUCT.md` | Update it when a decision changes, not just when code changes |
 
 ### Dependency direction

@@ -14,7 +14,7 @@
   ],
   "host_permissions": ["https://api.notion.com/*"],
   "background": {
-    "service_worker": "src/background.js",
+    "service_worker": "dist/mv3-worker-harness.js",
     "type": "module"
   },
   "action": {
@@ -22,7 +22,7 @@
   },
   "commands": {
     "toggle-quick-note": {
-      "suggested_key": { "default": "Ctrl+Shift+Space", "mac": "MacCtrl+Shift+Space" },
+      "suggested_key": { "default": "Ctrl+Shift+Space", "mac": "Option+Z" },
       "description": "Open or close Quick Note"
     }
   },

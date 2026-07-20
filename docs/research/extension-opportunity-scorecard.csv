@@ -1,0 +1,9 @@
+rank,opportunity,demand_signal,product_fit,differentiation,feasibility,privacy_trust,weighted_score,recommendation
+1,Evidence threads,4.5,5.0,4.5,4.5,5.0,4.68,Prototype now
+2,Source-aware return paths,3.5,4.5,4.5,3.0,4.5,3.98,Follow evidence threads
+3,Local capture digest,2.5,4.5,4.5,4.0,5.0,3.88,Explore after thread data exists
+4,Database property mapping,5.0,3.5,2.0,3.5,4.0,3.70,Add narrowly after core workflow proof
+5,Reusable capture flows,4.5,3.5,2.5,3.0,4.0,3.58,Defer broad builder UI
+6,Rich media and screenshots,4.0,3.0,2.5,2.0,3.0,3.05,Defer until attachment reliability is proven
+7,Full-article extraction,4.0,3.0,2.0,2.0,3.0,2.95,Do not lead with it
+8,Account and workspace switcher,3.0,3.0,3.0,2.0,3.0,2.85,Solve only with direct user evidence

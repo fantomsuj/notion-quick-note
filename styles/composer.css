@@ -116,18 +116,24 @@ button { -webkit-tap-highlight-color: transparent; }
 .safe-close:hover { background: var(--nqn-hover); color: var(--nqn-text); }
 
 .setup {
+  width: auto;
   margin: 10px 20px 0;
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
   gap: 2px;
   flex: none;
+  border: 0;
   border-radius: var(--nqn-radius-control);
   background: var(--nqn-warning-bg);
   color: var(--nqn-warning);
+  cursor: pointer;
+  font-family: inherit;
   font-size: 11px;
   line-height: 1.45;
+  text-align: left;
 }
+.setup:hover { filter: brightness(.98); }
 .setup strong { font-size: 12px; font-weight: 600; }
 
 .page {

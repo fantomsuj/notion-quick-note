@@ -36,11 +36,11 @@ Recommended category: **Productivity**.
 | `scripting` | Injects the locally packaged Quick Note composer and collects the user-invoked active-page context. No script is injected continuously. |
 | `contextMenus` | Adds “Save selection to Notion Quick Note” to the selection context menu. |
 | `identity` | Opens Notion's OAuth authorization flow and receives its callback through Chrome's identity redirect. |
-| `storage` | Stores settings, credentials, and a small capture index in extension-scoped storage; Incognito drafts and queue records use memory-backed session keys. Regular capture records use the extension's local IndexedDB database. |
+| `storage` | Stores the current Notion access token, an opaque broker connection handle, settings, and a small capture index in extension-scoped storage. A non-exportable signing key used to prove refresh, revoke, and replaced-connection cleanup requests is kept in the extension's local IndexedDB database, alongside regular capture records. Incognito drafts and queue records use memory-backed session keys. |
 | `alarms` | Wakes the service worker for scheduled retry of captures that could not be delivered immediately. |
 | `sidePanel` | Opens a Chrome side-panel fallback when the in-page composer cannot run, such as on restricted pages or PDFs. |
 | `https://api.notion.com/*` | Sends user-approved captures to Notion and searches, validates, creates, or updates the user's chosen Notion destination. |
-| Production OAuth broker origin (optional) | Requested only when the user chooses Connect Notion; used for OAuth code exchange, token refresh, and revocation. The release packager narrows this to the exact production origin. |
+| Production OAuth broker origin (optional) | Requested only when the user chooses Connect Notion; used to create a one-time authorization transaction, exchange the authorization code, and make device-signed refresh and revocation requests. The broker stores the rotating refresh credential encrypted at rest and returns only an opaque connection handle. The release packager narrows access to the exact production origin. |
 
 The `<all_urls>` match appears only on three web-accessible packaged design resources used by the gesture-injected composer: its two CSS files and local font files. It is not a host permission and does not grant page access.
 
@@ -48,11 +48,13 @@ The `<all_urls>` match appears only on three web-accessible packaged design reso
 
 Confirm the dashboard's current wording before submission. Based on current behavior, disclose:
 
-- **Authentication information:** Notion OAuth access and refresh tokens.
+- **Authentication information:** the current Notion OAuth access token and opaque connection handle stored by the extension; a non-exportable device signing key stored only in extension-local IndexedDB; and the rotating Notion refresh credential stored encrypted by the OAuth broker.
 - **Website content:** selected text and the page title/URL attached to a capture.
 - **Web history / browsing activity:** the active page title and URL, accessed only when the user invokes Quick Note and used only for the capture feature.
 
 Do not select advertising, analytics, personalization, or sale/transfer uses. Certify that data is used only for the extension's single purpose, is not sold, is not used for credit or lending, and is not used for personalized advertising. Supply the public URL hosting [`PRIVACY.md`](../PRIVACY.md), after replacing its contact placeholder.
+
+The broker deletes its encrypted refresh record when a signed disconnect or replacement request reaches it, or after 180 days without a refresh. It attempts Notion revocation during disconnect even though local broker custody is deleted if Notion is temporarily unavailable. Uninstalling without disconnecting cannot notify the broker, so that encrypted record remains until the inactivity limit expires.
 
 The optional Prompt API flow processes note content locally through Chrome's on-device model. It does not add a remote AI host permission or send prompt content to the extension developer.
 
@@ -65,4 +67,4 @@ Reviewer notes should include:
 - A test Notion account or clear steps for completing OAuth.
 - The exact user gesture needed to see active-page capture.
 - How to test toolbar, shortcut, selection context menu, side-panel fallback, disconnect/revocation, and Incognito.
-- A statement that the OAuth broker contains the client secret and the submitted ZIP contains no remote executable code.
+- A statement that the OAuth broker contains the client secret, holds rotating refresh credentials encrypted for at most 180 days of inactivity, and returns only an opaque handle; the submitted ZIP contains no remote executable code.

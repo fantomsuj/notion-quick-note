@@ -25,7 +25,7 @@
     "https://api.notion.com/*"
   ],
   "background": {
-    "service_worker": "src/background.js",
+    "service_worker": "dist/background.js",
     "type": "module"
   },
   "action": {
@@ -59,7 +59,7 @@
     "toggle-quick-note": {
       "suggested_key": {
         "default": "Ctrl+Shift+Space",
-        "mac": "MacCtrl+Shift+Space"
+        "mac": "Option+Z"
       },
       "description": "Open or close Quick Note"
     }
