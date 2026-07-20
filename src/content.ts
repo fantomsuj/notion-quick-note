@@ -87,9 +87,14 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     if (popup) close(popup);
     open(page || { title: "Quick Note", url: "", selection: "" }, draftId, tabId, sessionId, revision);
   };
+  const updateContext = ({ page, tabId, explicit = false } = {}) => {
+    if (!popup || !page) return;
+    updatePageContext(popup, page, tabId, explicit);
+  };
   const runtime = { protocol: PROTOCOL, dispose };
   chrome.runtime.onMessage.addListener(onMessage);
   window.__notionQuickNoteOpen = openFromPage;
+  window.__notionQuickNoteUpdateContext = updateContext;
   window.__notionQuickNoteRuntime = runtime;
 
   function dispose() {
@@ -97,6 +102,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     disposed = true;
     globalThis.chrome?.runtime?.onMessage?.removeListener?.(onMessage);
     if (window.__notionQuickNoteOpen === openFromPage) delete window.__notionQuickNoteOpen;
+    if (window.__notionQuickNoteUpdateContext === updateContext) delete window.__notionQuickNoteUpdateContext;
     if (window.__notionQuickNoteRuntime === runtime) delete window.__notionQuickNoteRuntime;
     for (const instance of [...instances]) disposePopup(instance);
     document.querySelectorAll("[data-notion-quick-note-owned='true']").forEach((element) => element.remove());
@@ -136,6 +142,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       targetRecordId: null,
       returnDraftId: null,
       sources: [],
+      dismissedSourceUrls: [],
       remote: null,
       baseFingerprint: null,
       conflict: false,
@@ -425,6 +432,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
         version: DRAFT_VERSION,
         mode: value.mode === "edit" ? "edit" : "new",
         sources: normalizeSources(value.sources || (value.context?.url ? [value.context] : [])),
+        dismissedSourceUrls: normalizeDismissedSourceUrls(value.dismissedSourceUrls),
         revision: Number(value.revision) || 0,
         sessionId: value.sessionId || instance?.sessionId || crypto.randomUUID()
       };
@@ -471,6 +479,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     instance.targetRecordId = draft.targetRecordId || null;
     instance.returnDraftId = draft.returnDraftId || null;
     instance.sources = normalizeSources(draft.sources || sourceFromPage(draft.context || instance.page));
+    instance.dismissedSourceUrls = normalizeDismissedSourceUrls(draft.dismissedSourceUrls);
     instance.remote = draft.remote || null;
     instance.baseFingerprint = draft.baseFingerprint || null;
     instance.conflict = Boolean(draft.conflict);
@@ -491,6 +500,21 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
     return page.url ? [{ title: page.title || hostname(page.url), url: page.url, capturedAt: Date.now() }] : [];
   }
 
+  function normalizePageUrl(value = "") {
+    try {
+      const url = new URL(String(value));
+      if (!/^https?:$/.test(url.protocol)) return "";
+      url.hash = "";
+      return url.href;
+    } catch {
+      return "";
+    }
+  }
+
+  function normalizeDismissedSourceUrls(values = []) {
+    return [...new Set((Array.isArray(values) ? values : []).map(normalizePageUrl).filter(Boolean))].slice(0, 100);
+  }
+
   function normalizeSources(sources = []) {
     const seen = new Set();
     return sources.flatMap((source) => {
@@ -505,8 +529,45 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       }
       if (seen.has(key)) return [];
       seen.add(key);
-      return [{ title: source.title || hostname(source.url), url: source.url, capturedAt: source.capturedAt || Date.now() }];
+      return [{
+        title: source.title || hostname(key),
+        url: key,
+        selection: source.selection || "",
+        capturedAt: source.capturedAt || Date.now()
+      }];
     }).slice(0, 20);
+  }
+
+  function updatePageContext(instance, page, tabId, explicit) {
+    const url = normalizePageUrl(page.url);
+    if (!url) return;
+    instance.page = { ...instance.page, ...page, url, selection: explicit ? page.selection || "" : "" };
+    if (typeof tabId === "number") instance.tabId = tabId;
+
+    const dismissed = new Set(normalizeDismissedSourceUrls(instance.dismissedSourceUrls));
+    if (!explicit && dismissed.has(url)) {
+      renderSources(instance.root, instance);
+      return;
+    }
+    if (explicit) dismissed.delete(url);
+    instance.dismissedSourceUrls = [...dismissed];
+
+    const sources = normalizeSources(instance.sources);
+    const index = sources.findIndex((source) => source.url === url);
+    const title = page.title || hostname(url);
+    let changed = false;
+    if (index >= 0) {
+      if (sources[index].title !== title) {
+        sources[index] = { ...sources[index], title };
+        changed = true;
+      }
+    } else if (sources.length < 20) {
+      sources.push({ title, url, selection: "", capturedAt: Date.now() });
+      changed = true;
+    }
+    instance.sources = sources;
+    renderSources(instance.root, instance);
+    if (changed || explicit) scheduleDraft(instance);
   }
 
   function paragraphDocument(text) {
@@ -680,10 +741,8 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       menuButton.focus();
     });
     root.querySelector(".add-current-source").addEventListener("click", () => {
-      instance.sources = normalizeSources([...instance.sources, ...sourceFromPage(instance.page)]);
+      updatePageContext(instance, instance.page, instance.tabId, true);
       instance.userEdited = true;
-      renderSources(root, instance);
-      scheduleDraft(instance);
     });
     root.querySelector(".open-settings").addEventListener("click", () => {
       void sendRuntimeMessage({ type: "OPEN_SETTINGS" }, instance);
@@ -1052,6 +1111,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       remove.innerHTML = icon("close");
       remove.addEventListener("click", () => {
         instance.sources = sources.filter((_, sourceIndex) => sourceIndex !== index);
+        instance.dismissedSourceUrls = normalizeDismissedSourceUrls([...instance.dismissedSourceUrls, source.url]);
         instance.userEdited = true;
         renderSources(root, instance);
         scheduleDraft(instance);
@@ -1358,6 +1418,7 @@ import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailabil
       context: instance.page,
       title: root.querySelector(".page-title").value,
       sources: structuredClone(instance.sources),
+      dismissedSourceUrls: structuredClone(instance.dismissedSourceUrls),
       includeSource: instance.sources.length > 0,
       doc: instance.editor.getJSON()
     };

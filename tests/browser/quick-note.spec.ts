@@ -101,6 +101,36 @@ test("setup status refreshes while the composer remains open", async ({ page }) 
   await expect(setup).toBeHidden();
 });
 
+test("mounted composer tracks active page context and keeps dismissed pages suppressed", async ({ page }) => {
+  await openQuickNote(page, { title: "First page", url: "https://first.example/article", selection: "" });
+  const root = page.locator("#notion-quick-note-root");
+  await root.locator(".more").click();
+  await root.locator(".manage-sources").click();
+  await expect(root.locator(".source-row")).toHaveCount(1);
+
+  await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
+    page: { title: "Second page", url: "https://second.example/path", selection: "" },
+    tabId: 2,
+    explicit: false
+  }));
+  await expect(root.locator(".source-row")).toHaveCount(2);
+  await expect(root.locator(".source-list")).toContainText("Second page");
+
+  await root.locator(".source-row").filter({ hasText: "First page" }).locator(".source-remove").click();
+  await expect(root.locator(".source-list")).not.toContainText("First page");
+
+  await page.evaluate(() => window.__notionQuickNoteUpdateContext?.({
+    page: { title: "First page revisited", url: "https://first.example/article#section", selection: "" },
+    tabId: 1,
+    explicit: false
+  }));
+  await expect(root.locator(".source-list")).not.toContainText("First page revisited");
+
+  await root.locator(".add-current-source").click();
+  await expect(root.locator(".source-row")).toHaveCount(2);
+  await expect(root.locator(".source-list")).toContainText("First page revisited");
+});
+
 test("on-device AI keeps title and to-dos in editable previews until explicitly applied", async ({ page }) => {
   await installLanguageModel(page);
   await openQuickNote(page, { title: "Launch source", url: "https://example.com/launch", selection: "" });
