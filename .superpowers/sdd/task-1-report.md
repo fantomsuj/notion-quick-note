@@ -48,6 +48,6 @@ Results:
 - No manifest or background-worker files were modified.
 - `git diff --check -- src/unavailable-notice.ts tests/unavailable-notice.test.ts` completed without whitespace errors.
 
-## Commit
+## Implementation commit
 
-Pending commit hash; updated immediately after creating the task-only commit.
+`bb81772` — `Add unavailable notification helper`
