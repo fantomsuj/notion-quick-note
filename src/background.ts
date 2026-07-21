@@ -1143,7 +1143,8 @@ async function openQuickNote(tab: chrome.tabs.Tab | undefined, forcedSelection =
 }
 
 async function openQuickNoteSurface(tab: chrome.tabs.Tab & { id: number }, context: CaptureContext) {
-  const activeSurface = await activeComposerSurface();
+  const surfaces = await composerSurfaces();
+  const activeSurface = surfaces[String(tab.id)];
   if (activeSurface?.tabId === tab.id) {
     const surface = await chrome.tabs.sendMessage(tab.id, { type: "QUICK_NOTE_PING" }).catch(() => null) as { open?: boolean; sessionId?: string } | null;
     if (surface?.open && surface.sessionId === activeSurface.sessionId) {
@@ -1156,25 +1157,23 @@ async function openQuickNoteSurface(tab: chrome.tabs.Tab & { id: number }, conte
       });
       return { ok: true, surface: "overlay" };
     }
-    await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
+    delete surfaces[String(tab.id)];
+    await saveComposerSurfaces(surfaces);
   }
 
   try {
-    if (activeSurface && activeSurface.tabId !== tab.id) await flushActiveSurface(activeSurface);
-    const previousDraft = activeSurface ? await captureRepository.getDraft(activeSurface.draftId) : null;
-    const resumedContext = previousDraft?.context || activeSurface?.context || context;
     const sessionId = crypto.randomUUID();
     const draft = await captureRepository.getOrCreateDraft({
       tabId: tab.id,
-      context: resumedContext,
+      context,
       includeSource: (await getSettings()).includeSource,
-      sessionId,
-      ...(activeSurface ? { draftId: activeSurface.draftId } : {})
+      sessionId
     });
-    await chrome.storage.session.set({ [ACTIVE_SURFACE_KEY]: { tabId: tab.id, draftId: draft.id, sessionId, context: resumedContext } });
+    surfaces[String(tab.id)] = { tabId: tab.id, draftId: draft.id, sessionId, context };
+    await saveComposerSurfaces(surfaces);
     await chrome.tabs.sendMessage(tab.id, {
       type: "TOGGLE_QUICK_NOTE",
-      page: resumedContext,
+      page: context,
       draftId: draft.id,
       tabId: tab.id,
       sessionId,
@@ -1195,8 +1194,7 @@ interface ActiveComposerSurface {
   context?: CaptureContext;
 }
 
-async function activeComposerSurface(): Promise<ActiveComposerSurface | null> {
-  const value: unknown = (await chrome.storage.session.get(ACTIVE_SURFACE_KEY))[ACTIVE_SURFACE_KEY];
+function storedComposerSurface(value: unknown): ActiveComposerSurface | null {
   if (!isRecord(value) || !Number.isInteger(value.tabId) || typeof value.draftId !== "string" || typeof value.sessionId !== "string") return null;
   return {
     tabId: Number(value.tabId),
@@ -1204,6 +1202,21 @@ async function activeComposerSurface(): Promise<ActiveComposerSurface | null> {
     sessionId: value.sessionId,
     ...(isStoredCaptureContext(value.context) ? { context: value.context } : {})
   };
+}
+
+async function composerSurfaces(): Promise<Record<string, ActiveComposerSurface>> {
+  const value: unknown = (await chrome.storage.session.get(ACTIVE_SURFACE_KEY))[ACTIVE_SURFACE_KEY];
+  const legacy = storedComposerSurface(value);
+  if (legacy) return { [String(legacy.tabId)]: legacy };
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .map(([tabId, surface]) => [tabId, storedComposerSurface(surface)] as const)
+    .filter((entry): entry is [string, ActiveComposerSurface] => entry[1] !== null));
+}
+
+async function saveComposerSurfaces(surfaces: Record<string, ActiveComposerSurface>): Promise<void> {
+  if (Object.keys(surfaces).length) await chrome.storage.session.set({ [ACTIVE_SURFACE_KEY]: surfaces });
+  else await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
 }
 
 function isStoredCaptureContext(value: unknown): value is CaptureContext {
@@ -1216,25 +1229,16 @@ function isStoredCaptureContext(value: unknown): value is CaptureContext {
     && (value.frameUrl === undefined || typeof value.frameUrl === "string");
 }
 
-async function flushActiveSurface(surface: ActiveComposerSurface): Promise<void> {
-  const runtime = await chrome.tabs.sendMessage(surface.tabId, { type: "QUICK_NOTE_PING" }).catch(() => null) as { open?: boolean; sessionId?: string } | null;
-  if (!runtime?.open || runtime.sessionId !== surface.sessionId) {
-    await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
-    return;
-  }
-  const response = await chrome.tabs.sendMessage(surface.tabId, {
-    type: "FLUSH_AND_CLOSE_QUICK_NOTE",
-    sessionId: surface.sessionId
-  }) as { ok?: boolean; closed?: boolean; error?: string };
-  if (response?.ok !== true || response.closed !== true) throw new Error(response?.error || "Quick Note could not save the active draft before switching tabs.");
-}
-
 async function releaseComposerSurface(sessionId: string, tabId?: number): Promise<{ ok: true }> {
-  const current = await activeComposerSurface();
-  if (current && current.sessionId === sessionId && (tabId === undefined || current.tabId === tabId)) {
-    await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
-  }
-  return { ok: true };
+  return enqueueComposerOperation(async () => {
+    const surfaces = await composerSurfaces();
+    const matching = Object.entries(surfaces).find(([, surface]) => surface.sessionId === sessionId && (tabId === undefined || surface.tabId === tabId));
+    if (matching) {
+      delete surfaces[matching[0]];
+      await saveComposerSurfaces(surfaces);
+    }
+    return { ok: true };
+  });
 }
 
 async function collectCaptureContext(tab: chrome.tabs.Tab, forcedSelection = ""): Promise<CaptureContext> {

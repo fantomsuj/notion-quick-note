@@ -39,6 +39,11 @@ test("title overrides the global blue focus ring with a neutral focus treatment"
   assert.match(composer.slice(titleFocus), /\.page-title:focus-visible\s*\{[^}]*outline:\s*(?:0|none)[^}]*box-shadow:\s*[^;}]*var\(--nqn-border-strong\)/);
 });
 
+test("composer has a deterministic system-font fallback", async () => {
+  const composer = await read("styles/composer.css");
+  assert.match(composer, /:host\(\.font-fallback\)\s*\{[^}]*font-family:\s*-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif/);
+});
+
 test("all NotionInter weights are bundled and declared locally", async () => {
   const css = await read("styles/tokens.css");
   for (const [name, weight] of [["Regular", 400], ["Medium", 500], ["SemiBold", 600], ["Bold", 700]]) {
@@ -123,8 +128,11 @@ test("Quick Note injects its composer after a user gesture without a persistent 
 test("composer visibility recovers when its stylesheet was already loaded", async () => {
   const content = await read("src/content.ts");
 
-  assert.match(content, /const revealComposerSheet = \(\) => \{/);
-  assert.match(content, /if \(stylesheet\.sheet\) revealComposerSheet\(\);/);
+  assert.match(content, /const revealComposerSheet = async \(\) => \{/);
+  assert.match(content, /await document\.fonts\.load\(COMPOSER_FONT\)/);
+  assert.match(content, /document\.fonts\.check\(COMPOSER_FONT\)/);
+  assert.match(content, /host\.dataset\.fontStatus = "fallback"/);
+  assert.match(content, /if \(stylesheet\.sheet\) void revealComposerSheet\(\);/);
 });
 
 test("the build and release checks contain no Side Panel artifacts", async () => {
@@ -144,7 +152,7 @@ test("the build and release checks contain no Side Panel artifacts", async () =>
   await assert.rejects(read("src/panel-lifecycle.ts"), { code: "ENOENT" });
 });
 
-test("both surfaces consume shared tokens and keep the resizable compact Notion page geometry", async () => {
+test("both surfaces consume shared tokens and keep the non-modal, resizable compact Notion page geometry", async () => {
   const options = await read("options/options.html");
   const content = await read("src/content.ts");
   const composer = await read("styles/composer.css");

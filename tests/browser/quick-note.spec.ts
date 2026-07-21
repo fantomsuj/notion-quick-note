@@ -26,44 +26,51 @@ async function openQuickNote(page: Page, overrides: Parameters<Window["openQuick
   await expect(page.locator("#notion-quick-note-root .ProseMirror")).toBeFocused();
 }
 
-test("composer is a non-modal manual popover that leaves the page interactive", async ({ page }) => {
+test("composer leaves the page clickable while containing its focused keyboard events", async ({ page }) => {
   await openQuickNote(page);
   const root = page.locator("#notion-quick-note-root");
   await expect.poll(() => root.evaluate((host) => ({
-    popover: host.getAttribute("popover"),
+    tagName: host.tagName,
     role: host.getAttribute("role"),
     ariaModal: host.getAttribute("aria-modal"),
     open: host.matches(":popover-open"),
-    inert: document.body.inert
-  }))).toEqual({ popover: "manual", role: "dialog", ariaModal: null, open: true, inert: false });
+    focused: host.shadowRoot?.activeElement?.classList.contains("ProseMirror") === true
+  }))).toEqual({ tagName: "DIV", role: "dialog", ariaModal: null, open: true, focused: true });
 
-  const input = page.locator("#underlying-input");
-  await input.fill("Page remains usable");
-  await expect(input).toHaveValue("Page remains usable");
-  await page.locator("#page-scroll").hover();
-  await page.mouse.wheel(0, 180);
-  await expect.poll(() => page.locator("#page-scroll").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  await page.locator("#player-focus").click();
-  await expect.poll(() => page.evaluate(() => window.pagePointerEvents)).toBeGreaterThan(0);
-  await page.keyboard.press("Escape");
-  await expect.poll(() => page.evaluate(() => window.pageEscapeEvents)).toBeGreaterThan(0);
-  await expect(root).toHaveAttribute("popover", "manual");
-  await expect.poll(() => root.evaluate((host) => host.matches(":popover-open"))).toBe(true);
+  const pageButton = page.locator("#player-focus");
+  const box = await pageButton.boundingBox();
+  if (!box) throw new Error("Expected the underlying page button.");
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect.poll(() => page.evaluate(() => window.underlyingPointerEvents)).toBe(1);
+  await expect(pageButton).toBeFocused();
+  await root.locator(".ProseMirror").focus();
+  await page.keyboard.press("k");
+  await expect.poll(() => page.evaluate(() => window.mediaEvents)).toEqual([]);
+  await page.locator("#underlying-input").focus();
+  await page.keyboard.press("k");
+  await expect.poll(() => page.evaluate(() => window.mediaEvents)).toEqual([{ type: "keydown", key: "k" }, { type: "keyup", key: "k" }]);
 });
 
 test.describe("on a touch page", () => {
   test.use({ hasTouch: true });
 
-  test("the underlying page receives touch interaction while the composer stays open", async ({ page }) => {
+  test("the underlying page receives touch interaction while the composer is open", async ({ page }) => {
     await openQuickNote(page);
     const input = page.locator("#underlying-input");
     const box = await input.boundingBox();
     if (!box) throw new Error("Expected the underlying page input.");
     await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
-    await expect.poll(() => page.evaluate(() => window.pageTouchEvents)).toBeGreaterThan(0);
-    await expect(page.locator("#notion-quick-note-root")).toHaveAttribute("popover", "manual");
+    await expect.poll(() => page.evaluate(() => window.underlyingTouchEvents)).toBe(1);
     await expect.poll(() => page.locator("#notion-quick-note-root").evaluate((host) => host.matches(":popover-open"))).toBe(true);
   });
+});
+
+test("composer verifies the bundled NotionInter face before it becomes visible", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await expect(root).toHaveAttribute("data-font-status", "loaded");
+  await expect.poll(() => page.evaluate(() => document.fonts.check('15px "NotionInter"'))).toBe(true);
+  await expect(root.locator(".sheet")).toHaveCSS("opacity", "1");
 });
 
 async function composerBounds(page: Page) {
@@ -485,7 +492,7 @@ test("Activity suspension and resume preserve the mounted composer node and cont
   await root.evaluate((host) => { window.rememberedQuickNoteHost = host; });
 
   await page.evaluate(() => window.__notionQuickNoteSuspend?.());
-  await expect.poll(() => root.evaluate((host) => host.matches(":popover-open"))).toBe(false);
+  await expect.poll(() => root.evaluate((host) => !host.matches(":popover-open"))).toBe(true);
   await expect.poll(() => root.evaluate((element: HTMLElement) => element.hidden)).toBe(true);
   await page.locator("#player-focus").click();
   await expect(page.locator("#player-focus")).toBeFocused();

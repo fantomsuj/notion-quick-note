@@ -27,6 +27,8 @@
       window.mediaEvents = [];
       window.pagePointerEvents = 0;
       window.pageTouchEvents = 0;
+      window.underlyingPointerEvents = 0;
+      window.underlyingTouchEvents = 0;
       window.pageEscapeEvents = 0;
       window.runtimeMessages = [];
       window.savedSession = {};
@@ -159,6 +161,8 @@
 
       document.addEventListener("pointerdown", () => { window.pagePointerEvents += 1; });
       document.addEventListener("touchstart", () => { window.pageTouchEvents += 1; });
+      document.querySelector("#player").addEventListener("pointerdown", () => { window.underlyingPointerEvents += 1; });
+      document.querySelector("#player").addEventListener("touchstart", () => { window.underlyingTouchEvents += 1; });
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") window.pageEscapeEvents += 1;
       });
