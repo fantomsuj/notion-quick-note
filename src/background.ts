@@ -56,6 +56,7 @@ import {
 } from "./contracts.js";
 import { createContentRuntimeLoader } from "./content-loader.js";
 import { createSerializedOperationQueue } from "./serialized-operation-queue.js";
+import { assertSupportedListDepth } from "./editor-document-limits.js";
 import { quickSettingsResponse, requiredCaptureRecordResponse, validatedRuntimeResponse } from "./background-dispatch.js";
 import { logDiagnostic, logDiagnosticError } from "./diagnostics.js";
 import { createUnavailableNotice } from "./unavailable-notice.js";
@@ -454,6 +455,7 @@ interface ValidatedCapture {
 function validateCapture(capture: CaptureRequestPayload): ValidatedCapture {
   const doc = capture.document?.doc;
   if (!doc || doc.type !== "doc") throw new Error("Quick Note received an invalid document.");
+  assertSupportedListDepth(doc);
   notionBlocksFromDocument(doc);
   const characters = Array.from(documentText(doc)).length;
   if (!characters) throw new Error("Write something before saving.");
@@ -550,10 +552,24 @@ async function deliverRecord(record: CaptureRecord, connection: Extract<Backgrou
           capture: notionCapture(latest.pendingCapture),
           baseFingerprint: latest.baseFingerprint,
           journal: latest.syncJournal || {},
-          onJournal: async (syncJournal: SyncJournal) => { await captureRepository.updateCapture(record.id, { syncJournal }); }
+          onJournal: async (syncJournal: SyncJournal) => {
+            const persisted = await captureRepository.updateCapture(record.id, { syncJournal });
+            if (!persisted) throw new Error("Quick Note could not persist Notion write progress.");
+          }
         }));
       }
-      const remote = await sendCapture({ token, settings, capture: record.pendingCapture || record.capture });
+      const latest = await captureRepository.getCapture(record.id) || record;
+      const remote = await sendCapture({
+        token,
+        settings,
+        capture: latest.pendingCapture || latest.capture,
+        connectionId: connection.connectionId,
+        journal: latest.syncJournal || {},
+        onJournal: async (syncJournal: SyncJournal) => {
+          const persisted = await captureRepository.updateCapture(record.id, { syncJournal });
+          if (!persisted) throw new Error("Quick Note could not persist Notion write progress.");
+        }
+      });
       if (!isIncognito) {
         await chrome.storage.local.set({
           lastCapture: { savedAt: new Date().toISOString(), destinationName: settings.destinationName }
@@ -600,7 +616,9 @@ async function findExistingRecord(record: CaptureRecord, connection: Extract<Bac
       settings: record.destination,
       captureId: record.id
     });
-    return existing ? normalizeRemoteTarget(existing) : null;
+    if (!existing) return null;
+    if (record.syncJournal?.treeWrite && record.syncJournal.treeWrite.phase !== "complete") return null;
+    return normalizeRemoteTarget(existing);
   } catch (error: unknown) {
     if (!isUnauthorized(error) || !connection.connectionHandle) throw error;
     let refreshed;
@@ -617,7 +635,9 @@ async function findExistingRecord(record: CaptureRecord, connection: Extract<Bac
       settings: record.destination,
       captureId: record.id
     });
-    return existing ? normalizeRemoteTarget(existing) : null;
+    if (!existing) return null;
+    if (record.syncJournal?.treeWrite && record.syncJournal.treeWrite.phase !== "complete") return null;
+    return normalizeRemoteTarget(existing);
   }
 }
 
@@ -1463,6 +1483,7 @@ function notionCapture(capture: CapturePayload) {
 
 function notionRecord(record: CaptureRecord) {
   return {
+    connectionId: record.connectionId,
     capture: notionCapture(record.capture),
     ...(record.remote ? { remote: record.remote } : {}),
     ...(record.syncJournal ? { syncJournal: record.syncJournal } : {}),

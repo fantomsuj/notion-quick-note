@@ -56,3 +56,25 @@ Use the bundled Notion cube artwork for Notion identity. UI actions use consiste
 ## Accessibility and compatibility
 
 Both surfaces support light and dark browser preferences, keyboard-only operation, visible focus, reduced motion, and widths below 640px. All fonts and design assets are packaged with the extension; the UI must not issue remote font or asset requests. Styling may change without changing OAuth, storage keys, Notion messages, draft behavior, or save timing.
+
+## Native Notion tree delivery
+
+Quick Note writes native Notion block trees as sequential childless sibling groups. Before the first remote mutation it persists a versioned `treeWrite` journal containing the immutable operation timestamp, destination identity, page identity when known, deterministic group-path-to-block-ID mappings, and archived root IDs. Only a tree's root group receives an insertion position; descendant groups append to the parent IDs returned by Notion.
+
+```text
+initializing
+    |
+    +-- database --> creating_page --> writing
+    |
+    +-- shared page ----------------> writing
+                                       |
+                            all groups journaled
+                                       |
+                         update only: archiving
+                                       |
+                                    complete
+                                       |
+                            queue marks delivered
+```
+
+The queue never treats page existence alone as proof of delivery for a tree write. On interruption, journaled groups are skipped and an unjournaled ambiguous group is adopted only when one contiguous shallow-fingerprint match exists at the expected parent and root position. Zero or multiple matches require review. Recent-note updates materialize every replacement tree before archiving any old editable root, preserve top-level locked Notion placeholders in their original order, and continue the legacy `insertedSegments` path for operations started before this journal version.

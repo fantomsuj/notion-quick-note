@@ -20,6 +20,7 @@ Make capturing a thought into Notion take one gesture, focus immediately, requir
 | Capture persistence | One IndexedDB row per regular draft/capture; one session key per Incognito record | Keeps autosaves proportional to the note being edited and preserves atomic draft-to-queue transitions |
 | Recovery | Notes diagnostics plus JSON and Markdown export | Makes local storage health visible and gives users a credential-free escape hatch |
 | AI assist | Explicit on-device title and to-do actions with editable previews | Adds focused help without putting generation in the capture or Save path |
+| Lists | Native bullet, numbered, task, and mixed lists through ten list-item levels | Preserves editable Notion structure while keeping request and recovery behavior deterministic |
 
 ## What research changed
 
@@ -40,6 +41,12 @@ Flylighter's differentiation is not just clipping. Its flows, formatted highligh
 5. **Permission proportionality.** Read only the invoking page's title and URL after the user opens Quick Note; never read page bodies automatically.
 6. **Preserve before mutation.** Remote edits stop on fingerprint conflicts, keep unsupported blocks locked in place, and journal every replacement step locally.
 7. **AI is optional and reviewable.** Prompt features run only after an explicit gesture, degrade away when unsupported or disabled, and keep output separate until the user applies it.
+
+## List behavior
+
+Quick Note preserves bullet, numbered, task, and mixed list types when saving, reopening, editing, and resaving. The outer list is level 1; levels 1 through 10 are supported. At level 10, Tab is consumed without changing the document, Shift+Tab still outdents, and the composer shows: “Quick Note supports up to 10 list levels. Outdent the deepest items before saving.”
+
+Pasted, restored, or programmatically supplied documents deeper than ten levels remain editable and are still saved locally as drafts. Remote enqueue is blocked with the same message until the deepest items are outdented to level 10 or less.
 
 ## Release gates
 

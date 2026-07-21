@@ -1,7 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import type { CaptureDraft } from "../../src/contracts.js";
+import type { CaptureDraft, EditorNode } from "../../src/contracts.js";
+import { LIST_DEPTH_LIMIT_MESSAGE } from "../../src/constants.js";
 
 interface LanguageModelCreateOptions {
   monitor?: (monitor: { addEventListener(type: string, listener: EventListener): void }) => void;
@@ -24,6 +25,35 @@ test.beforeEach(async ({ page }) => {
 async function openQuickNote(page: Page, overrides: Parameters<Window["openQuickNote"]>[0] = {}) {
   await page.evaluate((pageOverrides) => window.openQuickNote(pageOverrides), overrides);
   await expect(page.locator("#notion-quick-note-root .ProseMirror")).toBeFocused();
+}
+
+function nestedBulletDocument(depth: number): EditorNode {
+  const nested = (level: number): EditorNode => ({
+    type: "bulletList",
+    content: [{
+      type: "listItem",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: `Level ${level}` }] },
+        ...(level < depth ? [nested(level + 1)] : [])
+      ]
+    }]
+  });
+  return { type: "doc", content: [nested(1)] };
+}
+
+function nestedBulletHtml(depth: number): string {
+  let html = "";
+  for (let level = depth; level >= 1; level -= 1) {
+    html = `<ul><li><p>Level ${level}</p>${html}</li></ul>`;
+  }
+  return html;
+}
+
+async function restoreDocument(page: Page, doc: EditorNode): Promise<void> {
+  await page.evaluate((serialized: string) => {
+    window.currentDraft = null;
+    window.savedSession[`draft:${location.href}`] = { title: "Nested list", includeSource: false, doc: JSON.parse(serialized) };
+  }, JSON.stringify(doc));
 }
 
 test("composer leaves the page clickable while containing its focused keyboard events", async ({ page }) => {
@@ -1597,5 +1627,61 @@ test("Control+Enter checks a to-do without saving; Control+Shift+Enter saves", a
   expect(await page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(false);
 
   await editor.press("Control+Shift+Enter");
+  await expect.poll(() => page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(true);
+});
+
+test("list level 10 consumes Tab with feedback while Shift+Tab still outdents", async ({ page }) => {
+  await restoreDocument(page, nestedBulletDocument(10));
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await expect(editor.locator("ul")).toHaveCount(10);
+  await editor.locator("li p").last().click();
+  await editor.press("End");
+  await editor.press("Tab");
+  await expect(editor.locator("ul")).toHaveCount(10);
+  await expect(root.locator(".toast")).toHaveText(LIST_DEPTH_LIMIT_MESSAGE);
+  await editor.press("Shift+Tab");
+  await expect(editor.locator("ul")).toHaveCount(9);
+});
+
+test("over-limit restored drafts stay editable and do not enqueue until corrected", async ({ page }) => {
+  await restoreDocument(page, nestedBulletDocument(11));
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await expect(root.locator(".toast")).toHaveText(LIST_DEPTH_LIMIT_MESSAGE);
+  await root.locator(".save").click();
+  expect(await page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(false);
+  await expect(editor).toBeEditable();
+  await editor.locator("li p").last().click();
+  await editor.press("End");
+  await editor.press("Shift+Tab");
+  await expect(editor.locator("ul")).toHaveCount(10);
+  await root.locator(".save").click();
+  await expect.poll(() => page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(true);
+});
+
+test("pasting an eleven-level list shows feedback and remains recoverable by outdent", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await page.evaluate(async (html) => {
+    await navigator.clipboard.write([new ClipboardItem({
+      "text/html": new Blob([html], { type: "text/html" }),
+      "text/plain": new Blob(["Level 1"], { type: "text/plain" })
+    })]);
+  }, nestedBulletHtml(11));
+  await editor.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
+  await expect(editor.locator("ul")).toHaveCount(11);
+  await expect(root.locator(".toast")).toHaveText(LIST_DEPTH_LIMIT_MESSAGE);
+  await root.locator(".save").click();
+  expect(await page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(false);
+  await editor.locator("li p").last().click();
+  await editor.press("End");
+  await editor.press("Shift+Tab");
+  await expect(editor.locator("ul")).toHaveCount(10);
+  await root.locator(".save").click();
   await expect.poll(() => page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(true);
 });
