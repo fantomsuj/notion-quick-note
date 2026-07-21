@@ -22,6 +22,7 @@ import Text from "@tiptap/extension-text";
 import Underline from "@tiptap/extension-underline";
 import { TrailingNode, UndoRedo } from "@tiptap/extensions";
 import { MAX_CAPTURE_CHARACTERS, MAX_CAPTURE_TITLE_CHARACTERS } from "./constants.js";
+import { clampComposerBounds, defaultComposerBounds, normalizeStoredComposerBounds, type ComposerBounds } from "./composer-bounds.js";
 import { enqueueWithReconciliation, isContentRuntimeResponse, withRuntimeMessageDeadline, type ContentRuntimeRequest } from "./runtime-message.js";
 import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailability, suggestNoteTitle } from "./ai-note-actions.js";
 import { isEditorNode, isRecord, type CaptureContext, type CaptureDraft, type CaptureDraftInput, type CaptureSource, type CaptureStatusRecord, type EditorNode, type NotionColorName, type QuickSettings, type RecentItem, type RemoteTarget, type RuntimeRequest, type RuntimeResponse } from "./contracts.js";
@@ -147,7 +148,7 @@ class ComposerRoot {
 }
 type AiAvailability = Awaited<ReturnType<typeof languageModelAvailability>> | "checking";
 interface PopupInstance {
-  host: HTMLDialogElement; surface: HTMLDivElement; root: ComposerRoot; page: CaptureContext; previousFocus: Element | null;
+  host: HTMLElement; root: ComposerRoot; page: CaptureContext; previousFocus: Element | null;
   editor: Editor | null; settings: Partial<QuickSettings> | null; settingsPromise: Promise<Partial<QuickSettings>> | null;
   draftId: string; tabId: number | null; sessionId: string; revision: number; mode: "new" | "edit";
   targetRecordId: string; returnDraftId: string; sources: CaptureSource[]; dismissedSourceUrls: string[];
@@ -156,8 +157,9 @@ interface PopupInstance {
   draftDirty: boolean; draftWritePromise: Promise<CaptureDraftInput | null> | null; toastTimer: ReturnType<typeof setTimeout> | null;
   timers: Set<ReturnType<typeof setTimeout>>; userEdited: boolean; hasStoredDraft: boolean; saving: boolean; accepted: boolean;
   captureId: string; deliveryStartedAt: number; safeToClose: boolean; closed: boolean; contextLost: boolean; handoff: boolean;
-  onFullscreenChange: () => void; removalCount: number; removalObserver: MutationObserver | null;
+  onFullscreenChange: () => void; onViewportResize: () => void; removalCount: number; removalObserver: MutationObserver | null;
   aiController: AbortController | null; aiAvailability: AiAvailability; aiBusy: boolean;
+  bounds: ComposerBounds;
 }
 interface DraftView extends Partial<CaptureDraftInput> {
   version: 2; title: string; includeSource: boolean; sources: CaptureSource[]; doc: EditorNode; conflict?: boolean;
@@ -265,8 +267,10 @@ function currentEditor(editor: Editor | undefined): Editor {
 (() => {
   const PROTOCOL = 1;
   const DRAFT_VERSION = 2;
+  const COMPOSER_BOUNDS_STORAGE_KEY = "quickNoteComposerBounds";
   const KEYBOARD_EVENTS = ["keydown", "keypress", "keyup"];
   const handledKeyboardEvents = new WeakSet();
+  const composerKeyboardEvents = new WeakSet<KeyboardEvent>();
   const slashCommands: SlashCommand[] = [
     { id: "text", label: "Text", hint: "Plain paragraph", keys: "", run: (editor) => editor.chain().focus().setParagraph().run() },
     { id: "h1", label: "Heading 1", hint: "Large section heading", keys: "#", run: (editor) => editor.chain().focus().toggleHeading({ level: 1 }).run() },
@@ -379,13 +383,13 @@ function currentEditor(editor: Editor | undefined): Editor {
   };
   const suspendComposer = () => {
     if (!popup || popup.closed) return;
-    if (popup.host.open) popup.host.close();
+    if (popup.host.matches(":popover-open")) popup.host.hidePopover();
     popup.host.hidden = true;
   };
   const resumeComposer = () => {
     if (!popup || popup.closed) return;
     popup.host.hidden = false;
-    if (popup.host.isConnected && !popup.host.open) popup.host.showModal();
+    if (popup.host.isConnected && !popup.host.matches(":popover-open")) popup.host.showPopover();
   };
   const prepareDiscard = async (draftId: string): Promise<boolean> => {
     const current = popup;
@@ -405,7 +409,6 @@ function currentEditor(editor: Editor | undefined): Editor {
       scheduleDraft(current);
       return;
     }
-    emitTerminal(current, "discarded");
     disposePopup(current);
   };
   const runtime = { protocol: PROTOCOL, dispose };
@@ -435,25 +438,21 @@ function currentEditor(editor: Editor | undefined): Editor {
 
   function open(page: CaptureContext, draftId = "", tabId: number | null = null, sessionId: string = crypto.randomUUID(), revision = 0, providedDraft: CaptureDraft | null = null): void {
     const previousFocus = document.activeElement;
-    const dialog = document.createElement("dialog");
-    dialog.id = document.getElementById("notion-quick-note-root")
+    const host = document.createElement("div");
+    host.id = document.getElementById("notion-quick-note-root")
       ? `notion-quick-note-root-${crypto.randomUUID()}`
       : "notion-quick-note-root";
-    dialog.dataset.notionQuickNoteOwned = "true";
-    dialog.setAttribute("aria-label", "Notion Quick Note");
-    dialog.setAttribute("aria-modal", "true");
-    dialog.style.cssText = "all:initial;display:block;position:fixed;inset:auto clamp(12px,2vw,24px) clamp(12px,2vw,24px) auto;width:auto;height:auto;max-width:none;max-height:none;margin:0;padding:0;border:0;background:transparent;overflow:visible";
-    const backdropStyle = document.createElement("style");
-    backdropStyle.textContent = `#${CSS.escape(dialog.id)}::backdrop{background:transparent}`;
-    const surface = document.createElement("div");
-    const shadowRoot = surface.attachShadow({ mode: "open" });
+    host.dataset.notionQuickNoteOwned = "true";
+    host.setAttribute("popover", "manual");
+    host.setAttribute("role", "dialog");
+    host.setAttribute("aria-label", "Notion Quick Note");
+    host.style.cssText = "all:initial;position:fixed;margin:0;padding:0;border:0;background:transparent;overflow:visible";
+    const shadowRoot = host.attachShadow({ mode: "open" });
     shadowRoot.innerHTML = template();
     const root = asComposerRoot(shadowRoot);
-    dialog.append(backdropStyle, surface);
 
     const instance: PopupInstance = {
-      host: dialog,
-      surface,
+      host,
       root,
       page,
       previousFocus,
@@ -489,39 +488,44 @@ function currentEditor(editor: Editor | undefined): Editor {
       contextLost: false,
       handoff: false,
       onFullscreenChange: () => undefined,
+      onViewportResize: () => undefined,
       removalCount: 0,
       removalObserver: null,
       aiController: null,
       aiAvailability: "checking",
-      aiBusy: false
+      aiBusy: false,
+      bounds: defaultComposerBounds(composerViewport())
     };
     instances.add(instance);
     popup = instance;
+    const stylesheet = root.querySelector("link[rel=stylesheet]");
+    const sheet = root.querySelector(".sheet");
+    const revealComposerSheet = () => {
+      sheet.style.removeProperty("display");
+      requestAnimationFrame(() => {
+        if (popup === instance && !instance.closed) sheet.classList.add("visible");
+      });
+    };
+    stylesheet.addEventListener("load", revealComposerSheet, { once: true });
+    if (stylesheet.sheet) revealComposerSheet();
 
-    dialog.addEventListener("cancel", (event) => {
-      event.preventDefault();
-      close(instance);
-    });
     containKeyboard(instance);
     const initialDraft = normalizeDraft(providedDraft, instance);
     hydrateShell(root, initialDraft, instance);
-    (document.fullscreenElement || document.documentElement).append(dialog);
-    dialog.showModal();
+    applyComposerBounds(instance, instance.bounds);
+    (document.fullscreenElement || document.documentElement).append(host);
+    host.showPopover();
     createEditor(root, initialDraft, instance);
     wire(root, instance);
+    wireComposerGeometry(root, instance);
     if (providedDraft) applyDraftToInstance(root, instance, providedDraft);
     requireEditor(instance).commands.focus("end");
 
     instance.onFullscreenChange = () => promoteAfterFullscreenChange(instance);
     document.addEventListener("fullscreenchange", instance.onFullscreenChange);
-    const stylesheet = root.querySelector("link[rel=stylesheet]");
-    stylesheet.addEventListener("load", () => {
-      const sheet = root.querySelector(".sheet");
-      sheet.style.removeProperty("display");
-      requestAnimationFrame(() => {
-        if (popup === instance && !instance.closed) sheet.classList.add("visible");
-      });
-    }, { once: true });
+    instance.onViewportResize = () => clampAndPersistComposerBounds(instance);
+    window.addEventListener("resize", instance.onViewportResize);
+    void restoreComposerBounds(instance);
     stylesheet.addEventListener("error", () => fallbackFromOverlay(instance), { once: true });
     instance.removalObserver = new MutationObserver(() => recoverRemovedOverlay(instance));
     instance.removalObserver.observe(document, { childList: true, subtree: true });
@@ -551,11 +555,112 @@ function currentEditor(editor: Editor | undefined): Editor {
   function containKeyboard(instance: PopupInstance): void {
     for (const type of KEYBOARD_EVENTS) {
       instance.root.shadow.addEventListener(type, (event) => {
-        if (type === "keydown" && event instanceof KeyboardEvent) handleRootKeyDown(instance.root, event, instance);
+        if (type === "keydown" && event instanceof KeyboardEvent) {
+          composerKeyboardEvents.add(event);
+          handleRootKeyDown(instance.root, event, instance);
+        }
         event.stopPropagation();
       });
-      instance.host.addEventListener(type, (event) => event.stopPropagation());
+      instance.host.addEventListener(type, (event) => {
+        if (type === "keydown" && event instanceof KeyboardEvent && !composerKeyboardEvents.has(event)) {
+          composerKeyboardEvents.add(event);
+          handleRootKeyDown(instance.root, event, instance);
+        }
+        event.stopPropagation();
+      });
     }
+  }
+
+  function composerViewport(): { width: number; height: number } {
+    return { width: window.innerWidth, height: window.innerHeight };
+  }
+
+  function sameComposerBounds(left: ComposerBounds, right: ComposerBounds): boolean {
+    return left.left === right.left && left.top === right.top && left.width === right.width && left.height === right.height;
+  }
+
+  function applyComposerBounds(instance: PopupInstance, bounds: ComposerBounds): void {
+    instance.bounds = clampComposerBounds(bounds, composerViewport());
+    const { host } = instance;
+    host.style.left = `${instance.bounds.left}px`;
+    host.style.top = `${instance.bounds.top}px`;
+    host.style.width = `${instance.bounds.width}px`;
+    host.style.height = `${instance.bounds.height}px`;
+  }
+
+  function persistComposerBounds(instance: PopupInstance): void {
+    if (instance.closed) return;
+    void chrome.storage.local.set({ [COMPOSER_BOUNDS_STORAGE_KEY]: instance.bounds }).catch(() => undefined);
+  }
+
+  function clampAndPersistComposerBounds(instance: PopupInstance): void {
+    const before = instance.bounds;
+    applyComposerBounds(instance, before);
+    if (!sameComposerBounds(before, instance.bounds)) persistComposerBounds(instance);
+  }
+
+  async function restoreComposerBounds(instance: PopupInstance): Promise<void> {
+    try {
+      const values = await chrome.storage.local.get(COMPOSER_BOUNDS_STORAGE_KEY);
+      if (instance.closed || popup !== instance) return;
+      const stored = values[COMPOSER_BOUNDS_STORAGE_KEY];
+      const restored = normalizeStoredComposerBounds(stored, composerViewport());
+      if (restored) {
+        applyComposerBounds(instance, restored);
+        if (!sameComposerBounds(stored as ComposerBounds, restored)) persistComposerBounds(instance);
+      } else if (stored !== undefined) {
+        applyComposerBounds(instance, defaultComposerBounds(composerViewport()));
+        persistComposerBounds(instance);
+      }
+    } catch {
+      // Geometry must never interfere with editing when extension storage is unavailable.
+    }
+  }
+
+  function wireComposerGeometry(root: ComposerRoot, instance: PopupInstance): void {
+    const dragRegion = root.optional("[data-composer-drag-region]", HTMLElement);
+    const resizeHandle = root.optional("[data-composer-resize-handle]", HTMLElement);
+    const wirePointerOperation = (
+      target: HTMLElement | null,
+      update: (start: ComposerBounds, deltaX: number, deltaY: number) => ComposerBounds
+    ): void => {
+      target?.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0 || instance.closed) return;
+        event.preventDefault();
+        const start = instance.bounds;
+        const startX = event.clientX;
+        const startY = event.clientY;
+        target.setPointerCapture(event.pointerId);
+        let frame = 0;
+        let pendingX = startX;
+        let pendingY = startY;
+        const render = () => {
+          frame = 0;
+          applyComposerBounds(instance, update(start, pendingX - startX, pendingY - startY));
+        };
+        const move = (moveEvent: PointerEvent) => {
+          pendingX = moveEvent.clientX;
+          pendingY = moveEvent.clientY;
+          if (!frame) frame = requestAnimationFrame(render);
+        };
+        const finish = () => {
+          if (frame) {
+            cancelAnimationFrame(frame);
+            frame = 0;
+            applyComposerBounds(instance, update(start, pendingX - startX, pendingY - startY));
+          }
+          target.removeEventListener("pointermove", move);
+          target.removeEventListener("pointerup", finish);
+          target.removeEventListener("pointercancel", finish);
+          persistComposerBounds(instance);
+        };
+        target.addEventListener("pointermove", move);
+        target.addEventListener("pointerup", finish, { once: true });
+        target.addEventListener("pointercancel", finish, { once: true });
+      });
+    };
+    wirePointerOperation(dragRegion, (start, deltaX, deltaY) => ({ ...start, left: start.left + deltaX, top: start.top + deltaY }));
+    wirePointerOperation(resizeHandle, (start, deltaX, deltaY) => ({ ...start, width: start.width + deltaX, height: start.height + deltaY }));
   }
 
   function promoteAfterFullscreenChange(instance: PopupInstance): void {
@@ -565,10 +670,11 @@ function currentEditor(editor: Editor | undefined): Editor {
       const active = menuButton.getAttribute("aria-expanded") === "true"
         ? menuButton
         : instance.root.activeElement || instance.root.optional(".ProseMirror", HTMLElement);
-      if (instance.host.open) instance.host.close();
+      if (instance.host.matches(":popover-open")) instance.host.hidePopover();
       const fullscreenContainer = document.fullscreenElement || document.documentElement;
       if (instance.host.parentElement !== fullscreenContainer) fullscreenContainer.append(instance.host);
-      instance.host.showModal();
+      clampAndPersistComposerBounds(instance);
+      instance.host.showPopover();
       if (active instanceof HTMLElement) active.focus({ preventScroll: true });
       requestAnimationFrame(() => {
         if (popup === instance && !instance.closed && active instanceof HTMLElement) active.focus({ preventScroll: true });
@@ -588,10 +694,10 @@ function currentEditor(editor: Editor | undefined): Editor {
 
   function fallbackFromOverlay(instance: PopupInstance): void {
     if (instance.closed) return;
+    instance.handoff = true;
     void persistDraft(instance)
       .catch(() => undefined)
-      .finally(() => sendRuntimeMessage({ type: "OPEN_COMPOSER_FALLBACK", draftId: instance.draftId }, instance));
-    close(instance, true);
+      .finally(() => close(instance, true));
   }
 
   function close(instance: PopupInstance | undefined = popup, force = false): void {
@@ -606,16 +712,17 @@ function currentEditor(editor: Editor | undefined): Editor {
 
     stopTimers(instance);
     document.removeEventListener("fullscreenchange", instance.onFullscreenChange);
+    window.removeEventListener("resize", instance.onViewportResize);
     instance.removalObserver?.disconnect();
     if (!instance.accepted && !instance.handoff) void persistDraft(instance).catch(() => undefined);
     void sendRuntimeMessage({ type: "RELEASE_COMPOSER_SURFACE", sessionId: instance.sessionId }, instance).catch(() => undefined);
 
     const sheet = instance.root.querySelector(".sheet");
     sheet.classList.remove("visible");
-    instance.surface.classList.add("closing");
+    instance.host.classList.add("closing");
     instance.host.removeAttribute("id");
     instance.host.style.pointerEvents = "none";
-    if (instance.host.open) instance.host.close();
+    if (instance.host.matches(":popover-open")) instance.host.hidePopover();
     restoreFocus(instance.previousFocus);
 
     const delay = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 150;
@@ -634,8 +741,9 @@ function currentEditor(editor: Editor | undefined): Editor {
     if (!instance.accepted && !instance.handoff && !instance.contextLost) void persistDraft(instance).catch(() => undefined);
     stopTimers(instance);
     document.removeEventListener("fullscreenchange", instance.onFullscreenChange);
+    window.removeEventListener("resize", instance.onViewportResize);
     instance.removalObserver?.disconnect();
-    if (instance.host.open) instance.host.close();
+    if (instance.host.matches(":popover-open")) instance.host.hidePopover();
     instance.editor?.destroy();
     instance.host.remove();
     instances.delete(instance);
@@ -652,14 +760,6 @@ function currentEditor(editor: Editor | undefined): Editor {
     instance.aiController = null;
     for (const timer of instance.timers) clearTimeout(timer);
     instance.timers.clear();
-  }
-
-  function emitTerminal(instance: PopupInstance, reason: "saved" | "discarded"): void {
-    try {
-      window.__notionQuickNoteOnTerminal?.({ draftId: instance.draftId, reason });
-    } catch {
-      // Panel cache notifications must never interrupt durable save or discard completion.
-    }
   }
 
   function reportAsyncFailure(instance: PopupInstance, error: unknown, fallback: string): void {
@@ -1040,9 +1140,7 @@ function currentEditor(editor: Editor | undefined): Editor {
       if (!response.discarded) throw new Error("Couldn’t discard this draft.");
       discarded = true;
     } catch (error) {
-      const check = await sendRuntimeMessage({ type: "GET_PANEL_DRAFT", draftId }, instance).catch(() => null);
-      discarded = check?.ok === false && check.code === "draft_not_found";
-      if (!discarded) throw error;
+      throw error;
     } finally {
       finishDiscard(draftId, discarded);
       if (!discarded && !instance.closed && !instance.contextLost) setStatus(root, "Draft preserved");
@@ -1686,7 +1784,7 @@ function currentEditor(editor: Editor | undefined): Editor {
       if (!response?.ok) throw new Error(response?.error || "Couldn’t load this note.");
       applyDraftToInstance(root, instance, { ...response.draft, conflict: response.conflict });
       closeTransientUi(root);
-      setStatus(root, "Editing recent note");
+      setStatus(root, "");
     } catch (error: unknown) {
       setStatus(root, "Draft preserved");
       showToast(root, errorMessage(error, "Couldn’t load this note."), "error", instance);
@@ -1945,7 +2043,6 @@ function currentEditor(editor: Editor | undefined): Editor {
     if (response?.ok && response.accepted) {
       if (popup !== instance || instance.closed) return;
       instance.accepted = true;
-      emitTerminal(instance, "saved");
       instance.captureId = response.record?.id || "";
       applyDeliveryRecord(root, instance, response.record);
       if (response.record?.status !== "delivered") pollCaptureStatus(root, instance);
@@ -2124,27 +2221,6 @@ function currentEditor(editor: Editor | undefined): Editor {
         instance.editor.chain().focus().updateAttributes("toggleBlock", { open: !open }).run();
         return;
       }
-    }
-    if (event.key === "Tab") trapTab(root, event);
-  }
-
-  function trapTab(root: ComposerRoot, event: KeyboardEvent): void {
-    const focusable = [...root.shadow.querySelectorAll("button, input, [contenteditable=true], [tabindex]")]
-      .filter((element): element is HTMLElement => element instanceof HTMLElement
-        && (!(element instanceof HTMLButtonElement) || !element.disabled)
-        && element.getAttribute("tabindex") !== "-1"
-        && !element.closest("[hidden]"));
-    if (!focusable.length) return;
-    const active = root.activeElement;
-    const first = focusable.at(0);
-    const last = focusable.at(-1);
-    if (!first || !last) return;
-    if (event.shiftKey && (active === first || !focusable.includes(active as HTMLElement))) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
     }
   }
 
@@ -2589,7 +2665,9 @@ function currentEditor(editor: Editor | undefined): Editor {
       <link rel="stylesheet" href="${chrome.runtime.getURL("styles/composer.css")}">
       <section class="sheet" role="document" aria-label="Quick note editor">
         <header class="topbar">
-          <span class="status" role="status" aria-live="polite" aria-atomic="true"></span>
+          <div class="drag-region" data-composer-drag-region aria-label="Drag Quick Note">
+            <span class="status" role="status" aria-live="polite" aria-atomic="true"></span>
+          </div>
           <div class="top-actions">
             <button class="top-button more" type="button" aria-label="Note options" aria-haspopup="menu" aria-expanded="false">${icon("more")}</button>
             <button class="top-button recent" type="button" aria-label="Recent notes" aria-haspopup="dialog" aria-expanded="false">${icon("recent")}</button>
@@ -2670,6 +2748,7 @@ function currentEditor(editor: Editor | undefined): Editor {
         <div class="link-editor" hidden><input class="link-input" type="url" aria-label="Link URL" placeholder="Paste a link"><button class="apply-link" type="button">Apply</button></div>
         <div class="slash-menu" role="listbox" aria-label="Block commands" hidden></div>
         <div class="toast" role="alert" hidden></div>
+        <div class="resize-handle" data-composer-resize-handle aria-hidden="true"></div>
       </section>`;
   }
 

@@ -1,31 +1,52 @@
-### Task 2: Strict Notion, settings, provisioning, and AI boundaries
+### Task 2: Wire the notification into the MV3 worker and declare the permission
 
 **Files:**
-- Modify: `src/notion.ts`
-- Modify: `src/settings.ts`
-- Modify: `src/provisioning.ts`
-- Modify: `src/ai-note-actions.ts`
-- Test: `tests/notion.test.ts`
-- Test: `tests/settings.test.ts`
-- Test: `tests/provisioning.test.ts`
-- Test: `tests/ai-note-actions.test.ts`
+
+- Modify: `src/background.ts:56-60, 1279-1285`
+- Modify: `manifest.json:11-18`
+- Modify: `scripts/check-release.ts:45-47`
+- Modify: `tests/design.test.ts` restricted-page/injected-composer assertions
 
 **Interfaces:**
-- Consumes: strict domain contracts and fetch/storage ports from Task 1.
-- Produces: validated Notion response subsets, typed API errors, typed settings normalization, provisioning results, and Prompt API ports.
 
-- [ ] **Step 1: Expose boundary diagnostics**
+- Consumes: `createUnavailableNotice(chrome.notifications)` from Task 1.
+- Produces: Every `markOverlayUnavailable(tabId, detail)` call displays the native notice and retains its current badge/title behavior.
 
-Remove the four suppression directives and run `npx tsc -b --force --pretty false`. Expected: failures localized to this task and downstream consumers.
+- [ ] **Step 1: Write the failing manifest/design expectation**
 
-- [ ] **Step 2: Validate consumed external JSON**
+```ts
+assert.ok(manifest.permissions.includes("notifications"));
+assert.match(background, /createUnavailableNotice\(chrome\.notifications\)/);
+```
 
-Parse `response.json()` as `unknown`. Add handwritten guards for the exact fields consumed from pages, databases/data sources, blocks, searches, errors, and Prompt API structured output. Throw the existing typed errors before state changes on incomplete success payloads.
+- [ ] **Step 2: Run the release/design checks and verify failure**
 
-- [ ] **Step 3: Type settings and orchestration**
+Run: `npm run check:release && npm test -- --test-name-pattern='Quick Note injects its composer'`
 
-Give defaults and normalization a stable `Settings` return type, keep historical field migration, and type provisioning dependency injection and error metadata without changing behavior.
+Expected: FAIL because the manifest does not yet grant `notifications` and the worker has no notifier wiring.
 
-- [ ] **Step 4: Verify focused behavior**
+- [ ] **Step 3: Wire the minimum production change**
 
-Run `npx tsc -b --force --pretty false` and the four listed test files through `tsx --test`. Expected: no diagnostics in these modules and all focused tests pass, including malformed Notion success responses.
+```ts
+import { createUnavailableNotice } from "./unavailable-notice.js";
+
+const showUnavailableNotice = createUnavailableNotice(chrome.notifications);
+
+async function markOverlayUnavailable(tabId: number, detail: string): Promise<void> {
+  await Promise.all([
+    chrome.action.setBadgeText({ tabId, text: "!" }),
+    chrome.action.setBadgeBackgroundColor({ tabId, color: "#b3261e" }),
+    chrome.action.setTitle({ tabId, title: `Quick Note unavailable: ${detail}` }),
+    showUnavailableNotice(tabId, detail)
+  ]);
+}
+```
+
+Add `"notifications"` to `manifest.json` permissions and the exact release-check expectation. Add a static design assertion for the worker wiring.
+
+- [ ] **Step 4: Run the focused checks and verify they pass**
+
+Run: `npm run check:release && npm test -- --test-name-pattern='native unavailable notification|Quick Note injects its composer'`
+
+Expected: PASS.
+

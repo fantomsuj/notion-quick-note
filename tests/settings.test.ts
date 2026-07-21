@@ -181,9 +181,43 @@ test("bundled production OAuth hides developer-only setup", async () => {
   assert.equal(hasBundledOAuthConfig({ notionClientId: "client", oauthBrokerUrl: "" }), false);
   const script = await readFile(new URL("../options/options.ts", import.meta.url), "utf8");
   const html = await readFile(new URL("../options/options.html", import.meta.url), "utf8");
-  assert.match(script, /#advanced-setup"\)\.hidden = hasBundledOAuthConfig\(PRODUCT_CONFIG\)/);
+  assert.match(script, /#personal-token-setup"\)\.hidden = hasBundledOAuthConfig\(PRODUCT_CONFIG\)/);
+  assert.match(script, /#oauth-bundled-setup"\)\.hidden = !hasBundledOAuthConfig\(PRODUCT_CONFIG\)/);
+  assert.match(script, /#oauth-test-setup"\)\.hidden = hasBundledOAuthConfig\(PRODUCT_CONFIG\)/);
+  assert.match(html, /id="personal-token-setup"/);
+  assert.match(html, /id="oauth-bundled-setup"/);
+  assert.match(html, /id="oauth-test-setup"/);
+  assert.match(html, /Connect with a personal Notion token/);
+  assert.match(html, /Test OAuth instead/);
+  assert.match(html, /dedicated test workspace or integration/);
+  assert.match(html, /requires a configured test broker/);
   assert.match(html, /id="refresh-permissions"[^>]+hidden/);
   assert.match(script, /settings\.authType !== "oauth" \|\| !hasUsableOAuthConfig\(\)/);
+});
+
+test("Settings provides an Activity & Recovery section for capture queue controls", async () => {
+  const html = await readFile(new URL("../options/options.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../options/options.ts", import.meta.url), "utf8");
+
+  assert.match(html, /id="activity"/);
+  assert.match(html, /Activity &amp; Recovery/);
+  assert.match(html, /data-export="json"/);
+  assert.match(html, /data-export="markdown"/);
+  assert.match(html, /clear-delivered-history/);
+  for (const request of [
+    "LIST_CAPTURE_ACTIVITY",
+    "RETRY_CAPTURE",
+    "RETARGET_CAPTURE",
+    "MARK_CAPTURE_DELIVERED",
+    "DELETE_CAPTURE",
+    "DELETE_DELIVERED_HISTORY",
+    "GET_STORAGE_DIAGNOSTICS",
+    "EXPORT_CAPTURE_RECOVERY"
+  ]) assert.match(script, new RegExp(request));
+  assert.match(script, /location\.hash !== "#activity"/);
+  assert.match(script, /record\.status === "blocked_conflict"/);
+  assert.match(script, /Prepare local edit/);
+  assert.match(script, /LOAD_RECENT_NOTE/, "conflicts must provide a route back to the composer");
 });
 
 test("legacy browser refresh tokens are removed and OAuth must reconnect", async () => {

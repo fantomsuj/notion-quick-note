@@ -62,6 +62,12 @@ button { color: inherit; }
 .notion-button { display: inline-flex; align-items: center; gap: 8px; }
 .notion-button img { width: 18px; height: 18px; border-radius: 2px; }
 .fineprint { margin: 9px 0 0; color: var(--nqn-text-secondary); font-size: 11px; }
+.local-connection { margin-top: 20px; }
+.local-connection h3 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+.local-connection > label { display: block; max-width: 420px; margin-top: 16px; }
+.local-connection > .button { margin-top: 12px; }
+.local-connection .fineprint a { color: inherit; }
+#oauth-test-setup .notion-button { margin-top: 12px; }
 #create-database { margin-top: 20px; }
 
 .advanced { margin-top: 18px; border-top: 1px solid var(--nqn-border); }
@@ -171,6 +177,43 @@ input:focus { border-color: var(--nqn-focus); box-shadow: 0 0 0 2px color-mix(in
 .ai-feature-controls { padding-left: 14px; }
 .ai-feature-controls[data-disabled="true"] { opacity: .5; }
 .ai-feature-controls .toggle:disabled { cursor: default; }
+.activity-recovery { margin-top: 18px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-panel); background: var(--nqn-surface); }
+.activity-recovery > summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px 24px; cursor: pointer; list-style: none; }
+.activity-recovery > summary::-webkit-details-marker { display: none; }
+.activity-recovery > summary > span:first-child { display: grid; gap: 5px; }
+.activity-recovery > summary .kicker { margin: 0; }
+.activity-recovery > summary strong { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+.activity-recovery > summary small { max-width: 470px; color: var(--nqn-text-secondary); font-size: 11px; line-height: 1.45; }
+.activity-summary-count { flex: none; color: var(--nqn-text-secondary); font-size: 11px; white-space: nowrap; }
+.activity-recovery-body { padding: 0 24px 24px; border-top: 1px solid var(--nqn-border); }
+.activity-status { margin: 16px 0 0; color: var(--nqn-text-secondary); font-size: 12px; }
+.activity-incognito-note { margin: 16px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--nqn-warning), transparent 58%); border-radius: var(--nqn-radius-control); color: var(--nqn-warning); background: var(--nqn-warning-bg); font-size: 11px; line-height: 1.45; }
+.activity-group { margin-top: 20px; }
+.activity-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
+.activity-group-heading h2 { margin: 0; color: var(--nqn-text-secondary); font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.activity-group-heading > span { color: var(--nqn-text-secondary); font-size: 11px; }
+.activity-clear-history { position: static; height: auto; margin-left: auto; padding: 4px; }
+.activity-card-list { display: grid; gap: 8px; margin-top: 7px; }
+.activity-empty { margin: 0; padding: 18px 12px; border: 1px dashed var(--nqn-border-strong); border-radius: var(--nqn-radius-panel); color: var(--nqn-text-secondary); text-align: center; font-size: 12px; }
+.activity-card { padding: 12px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-panel); background: var(--nqn-surface-secondary); }
+.activity-card h3 { margin: 0; overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.activity-card-meta, .activity-card-preview, .activity-card-error { margin: 6px 0 0; color: var(--nqn-text-secondary); font-size: 11px; line-height: 1.45; }
+.activity-card-preview { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: pre-wrap; }
+.activity-card-error { color: var(--nqn-danger); }
+.activity-card-actions, .recovery-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.activity-card-actions button { min-height: 28px; padding: 0 9px; border: 1px solid var(--nqn-border-strong); border-radius: var(--nqn-radius-control); color: var(--nqn-text-secondary); background: var(--nqn-surface); cursor: pointer; font-size: 11px; font-weight: 600; }
+.activity-card-actions button:hover { color: var(--nqn-text); background: var(--nqn-hover); }
+.storage-recovery { margin-top: 20px; padding: 12px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-panel); background: var(--nqn-surface-secondary); font-size: 11px; }
+.storage-recovery > summary { color: var(--nqn-text-secondary); cursor: pointer; font-weight: 600; }
+.storage-recovery > summary:hover { color: var(--nqn-text); }
+.diagnostics-status { margin-top: 12px; color: var(--nqn-text-secondary); }
+.diagnostics-status[data-tone="error"], .diagnostics-note[data-tone="error"] { color: var(--nqn-danger); }
+.diagnostics-grid { display: grid; gap: 8px; margin: 12px 0 0; }
+.diagnostics-grid > div { display: flex; justify-content: space-between; gap: 12px; }
+.diagnostics-grid dt { color: var(--nqn-text-tertiary); }
+.diagnostics-grid dd { margin: 0; color: var(--nqn-text); text-align: right; }
+.diagnostics-note { margin: 10px 0 0; color: var(--nqn-text-secondary); line-height: 1.45; }
+.recovery-actions .button { min-height: 30px; font-size: 11px; }
 .data-practices { display: grid; grid-template-columns: minmax(180px, .75fr) minmax(0, 1.6fr); gap: 10px 32px; margin-top: 18px; padding: 22px 24px; border: 1px solid var(--nqn-border); border-radius: var(--nqn-radius-panel); background: var(--nqn-surface); }
 .data-practices-heading h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; }
 .data-practices ul { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
@@ -197,6 +240,8 @@ input:focus { border-color: var(--nqn-focus); box-shadow: 0 0 0 2px color-mix(in
   .shortcut-keycaps { justify-content: flex-start; }
   .shortcut-control > .button { width: 100%; }
   .preferences { grid-template-columns: 1fr; padding: 18px; }
+  .activity-recovery > summary { padding: 18px; }
+  .activity-recovery-body { padding: 0 18px 18px; }
   .data-practices { grid-template-columns: 1fr; padding: 18px; }
   .data-practices li { grid-template-columns: 1fr; gap: 2px; }
   .data-practices > p { grid-column: 1; }

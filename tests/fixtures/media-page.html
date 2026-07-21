@@ -9,6 +9,8 @@
       #player:fullscreen { width: 100%; height: 100%; }
       .controls { display: flex; gap: 12px; }
       button { padding: 10px 16px; }
+      #page-scroll { position: fixed; left: 16px; bottom: 16px; width: 220px; height: 90px; overflow: auto; background: #282828; }
+      #page-scroll > div { height: 360px; padding: 12px; }
     </style>
   </head>
   <body>
@@ -16,11 +18,16 @@
       <div class="controls">
         <button id="player-focus">Player controls</button>
         <button id="enter-fullscreen">Enter fullscreen</button>
+        <input id="underlying-input" aria-label="Underlying page input">
       </div>
+      <div id="page-scroll"><div>Underlying scrollable page content</div></div>
     </main>
     <script>
       const shortcutKeys = new Set([" ", "arrowleft", "arrowright", "arrowup", "arrowdown", "j", "k", "l", "f", "m"]);
       window.mediaEvents = [];
+      window.pagePointerEvents = 0;
+      window.pageTouchEvents = 0;
+      window.pageEscapeEvents = 0;
       window.runtimeMessages = [];
       window.savedSession = {};
       window.settingsDelay = 0;
@@ -149,6 +156,12 @@
           }
         });
       }
+
+      document.addEventListener("pointerdown", () => { window.pagePointerEvents += 1; });
+      document.addEventListener("touchstart", () => { window.pageTouchEvents += 1; });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") window.pageEscapeEvents += 1;
+      });
 
       document.querySelector("#enter-fullscreen").addEventListener("click", () => {
         document.querySelector("#player").requestFullscreen();
@@ -304,10 +317,6 @@
                 delete window.savedSession[`draft:${location.href}`];
                 return { ok: true, discarded: true };
               }
-              if (message.type === "GET_PANEL_DRAFT") {
-                if (window.currentDraft?.id === message.draftId) return { ok: true, draft: completeDraft(window.currentDraft) };
-                return { ok: false, error: "That draft is no longer available.", code: "draft_not_found" };
-              }
               if (message.type === "ENQUEUE_CAPTURE") {
                 await new Promise((resolve) => setTimeout(resolve, window.saveDelay));
                 const record = completeCaptureStatus({
@@ -328,6 +337,18 @@
             }
           },
           storage: {
+            local: {
+              async get(key) {
+                if (window.storageError) throw window.storageError;
+                if (typeof key === "string") return { [key]: window.savedSession[key] };
+                if (Array.isArray(key)) return Object.fromEntries(key.map((item) => [item, window.savedSession[item]]));
+                return { ...window.savedSession };
+              },
+              async set(value) {
+                if (window.storageError) throw window.storageError;
+                Object.assign(window.savedSession, value);
+              }
+            },
             session: {
               async get(key) {
                 if (window.storageError) throw window.storageError;

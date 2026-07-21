@@ -22,7 +22,6 @@ declare global {
   var __notionQuickNoteResume: (() => void) | undefined;
   var __notionQuickNotePrepareDiscard: ((draftId: string) => Promise<boolean>) | undefined;
   var __notionQuickNoteFinishDiscard: ((draftId: string, discarded: boolean) => void) | undefined;
-  var __notionQuickNoteOnTerminal: ((event: { draftId: string; reason: "saved" | "discarded" }) => void) | undefined;
   var __notionQuickNoteInstalled: boolean | undefined;
   var __notionQuickNoteRuntime: { protocol: number; dispose(): void } | undefined;
 }

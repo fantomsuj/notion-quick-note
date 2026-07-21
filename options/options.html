@@ -59,31 +59,42 @@
             <li><span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.25 2.75 2.75 6.25-6.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg></span><div><b>Saved notes go only where you choose</b><small>Quick Note sends them to your selected workspace and destination when you choose Save.</small></div></li>
           </ul>
 
-          <button id="oauth-connect" class="button primary notion-button" type="button">
-            <img src="../assets/brand/notion-mark.svg" alt="" aria-hidden="true">
-            <span>Connect Notion</span>
-          </button>
-          <p class="fineprint">A Notion window will open so you can choose a workspace. Quick Note then finishes setup automatically.</p>
+          <section id="oauth-bundled-setup" hidden>
+            <button id="oauth-connect" class="button primary notion-button" type="button">
+              <img src="../assets/brand/notion-mark.svg" alt="" aria-hidden="true">
+              <span>Connect Notion</span>
+            </button>
+            <p class="fineprint">A Notion window will open so you can choose a workspace. Quick Note then finishes setup automatically.</p>
+          </section>
 
-          <details id="advanced-setup" class="advanced" hidden>
-            <summary>Advanced setup</summary>
+          <section id="personal-token-setup" class="local-connection" hidden>
+            <p class="kicker">Local beta setup</p>
+            <h3>Connect with a personal Notion token</h3>
+            <p class="stage-copy">Create an internal integration in Notion, then paste its token below. Use a dedicated test workspace or integration: this powerful token is stored locally in Chrome.</p>
+            <label>
+              <span>Personal access token</span>
+              <div class="secret-wrap">
+                <input id="token" type="password" autocomplete="off" placeholder="ntn_••••••••••••••••">
+                <button id="reveal-token" class="text-button" type="button">Show</button>
+              </div>
+            </label>
+            <button id="use-token" class="button primary" type="button">Connect with personal token</button>
+            <p class="fineprint">Create a token from Notion’s <a href="https://www.notion.so/profile/integrations/internal" target="_blank" rel="noreferrer">internal integrations</a> page.</p>
+          </section>
+
+          <details id="oauth-test-setup" class="advanced" hidden>
+            <summary>Test OAuth instead</summary>
             <div class="advanced-body">
-              <p class="advanced-copy">Local builds can supply OAuth configuration or use a personal token. Store releases should bundle OAuth configuration.</p>
+              <p class="advanced-copy">OAuth testing requires a configured test broker and public connection client ID. Use this only when your test environment has both values.</p>
               <div class="field-grid">
                 <label><span>Public connection client ID</span><input id="oauth-client-id" autocomplete="off" placeholder="Notion client ID"></label>
                 <label><span>OAuth broker URL</span><input id="oauth-broker-url" type="url" autocomplete="off" placeholder="https://your-worker.workers.dev"></label>
               </div>
               <button id="save-developer-config" class="button secondary" type="button">Save OAuth configuration</button>
-
-              <div class="advanced-divider"><span>or use a local token</span></div>
-              <label>
-                <span>Personal access token</span>
-                <div class="secret-wrap">
-                  <input id="token" type="password" autocomplete="off" placeholder="ntn_••••••••••••••••">
-                  <button id="reveal-token" class="text-button" type="button">Show</button>
-                </div>
-              </label>
-              <button id="use-token" class="button secondary" type="button">Use personal token</button>
+              <button id="oauth-connect-local" class="button secondary notion-button" type="button">
+                <img src="../assets/brand/notion-mark.svg" alt="" aria-hidden="true">
+                <span>Test OAuth</span>
+              </button>
             </div>
           </details>
         </div>
@@ -192,6 +203,53 @@
           </div>
         </div>
       </section>
+
+      <details id="activity" class="activity-recovery" tabindex="-1">
+        <summary>
+          <span>
+            <span class="kicker">Local delivery</span>
+            <strong>Activity &amp; Recovery</strong>
+            <small>Review captures waiting for Notion, delivered history, and local recovery tools.</small>
+          </span>
+          <span class="activity-summary-count" aria-live="polite"></span>
+        </summary>
+        <div class="activity-recovery-body">
+          <p id="activity-status" class="activity-status" role="status" aria-live="polite">Loading delivery activity…</p>
+          <div id="activity-content" hidden>
+            <p id="activity-incognito-note" class="activity-incognito-note" hidden>In Incognito, local delivery records last only for this browser session. Saving still sends captures to Notion.</p>
+            <section class="activity-group" aria-labelledby="queued-captures-heading">
+              <div class="activity-group-heading"><h2 id="queued-captures-heading">Needs delivery</h2><span id="queue-count"></span></div>
+              <div id="queue-list" class="activity-card-list"></div>
+            </section>
+            <section id="delivered-group" class="activity-group" hidden aria-labelledby="delivered-captures-heading">
+              <div class="activity-group-heading">
+                <h2 id="delivered-captures-heading">Saved to Notion</h2>
+                <button id="clear-delivered-history" class="text-link activity-clear-history" type="button">Clear delivered history</button>
+              </div>
+              <div id="delivered-list" class="activity-card-list"></div>
+            </section>
+          </div>
+
+          <details id="storage-recovery" class="storage-recovery">
+            <summary>Storage diagnostics &amp; recovery export</summary>
+            <div id="diagnostics-status" class="diagnostics-status" role="status">Open to check local storage.</div>
+            <dl id="diagnostics-grid" class="diagnostics-grid" hidden>
+              <div><dt>Capture data</dt><dd id="capture-bytes"></dd></div>
+              <div><dt>Chrome storage</dt><dd id="chrome-bytes"></dd></div>
+              <div><dt>Origin storage</dt><dd id="origin-bytes"></dd></div>
+              <div><dt>Local records</dt><dd id="record-counts"></dd></div>
+              <div><dt>Storage health</dt><dd id="storage-health"></dd></div>
+              <div><dt>Persistence</dt><dd id="persistence-state"></dd></div>
+              <div><dt>Last maintenance</dt><dd id="maintenance-time"></dd></div>
+            </dl>
+            <p id="diagnostics-note" class="diagnostics-note"></p>
+            <div class="recovery-actions">
+              <button type="button" class="button secondary" data-export="json">Export JSON</button>
+              <button type="button" class="button secondary" data-export="markdown">Export Markdown</button>
+            </div>
+          </details>
+        </div>
+      </details>
 
       <section class="data-practices" aria-labelledby="data-practices-heading">
         <div class="data-practices-heading">

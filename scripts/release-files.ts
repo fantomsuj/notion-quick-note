@@ -12,8 +12,6 @@ export const STATIC_RELEASE_FILES = Object.freeze([
   "assets/fonts/NotionInter-Bold.woff2",
   "options/options.html",
   "options/options.css",
-  "sidepanel/index.html",
-  "sidepanel/sidepanel.css",
   "styles/tokens.css",
   "styles/composer.css"
 ]);
@@ -22,8 +20,7 @@ export const GENERATED_RELEASE_FILES = Object.freeze([
   "dist/background.js",
   "dist/content.js",
   "dist/options.js",
-  "dist/product-config.js",
-  "dist/sidepanel.js"
+  "dist/product-config.js"
 ]);
 
 export const RELEASE_FILES = Object.freeze([...STATIC_RELEASE_FILES, ...GENERATED_RELEASE_FILES]);

@@ -23,10 +23,8 @@ export type ContentRuntimeRequest = Extract<RuntimeRequest, {
     | "CONVERT_EDIT_TO_NEW_DRAFT"
     | "ACTIVATE_DRAFT"
     | "RELEASE_COMPOSER_SURFACE"
-    | "GET_PANEL_DRAFT"
     | "OPEN_CAPTURE_RESULT"
     | "OPEN_ACTIVITY"
-    | "OPEN_COMPOSER_FALLBACK"
     | "OPEN_SETTINGS"
 }>;
 
@@ -42,7 +40,6 @@ export function isContentRuntimeResponse<T extends ContentRuntimeRequest>(reques
     case "GET_OR_CREATE_DRAFT":
     case "CONVERT_EDIT_TO_NEW_DRAFT":
     case "ACTIVATE_DRAFT":
-    case "GET_PANEL_DRAFT":
       return isCompleteCaptureDraft(value.draft);
     case "UPSERT_DRAFT":
       return (value.draft === null || isCompleteCaptureDraft(value.draft)) && typeof value.discarded === "boolean";
@@ -63,7 +60,6 @@ export function isContentRuntimeResponse<T extends ContentRuntimeRequest>(reques
     case "RELEASE_COMPOSER_SURFACE":
     case "OPEN_CAPTURE_RESULT":
     case "OPEN_ACTIVITY":
-    case "OPEN_COMPOSER_FALLBACK":
     case "OPEN_SETTINGS":
       return true;
     default: {

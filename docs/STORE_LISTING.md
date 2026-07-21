@@ -4,13 +4,13 @@
 
 **Name:** Notion Quick Note
 
-**Single purpose:** Keep a reviewed note beside your tabs and save it with removable source-page context to a user-selected Notion page or database.
+**Single purpose:** Open a reviewed note on the current page and save it with explicit source-page context to a user-selected Notion page or database.
 
 **Short description:** Capture a thought into Notion without leaving the page you're on.
 
 **Detailed description:**
 
-> Open a compact Quick Note side panel from the toolbar, a customizable browser-scoped keyboard shortcut, or the selected-text context menu. The fresh-install shortcut is `Command+Shift+Space` on macOS and `Ctrl+Shift+Space` elsewhere; Settings displays the live browser assignment and links to `chrome://extensions/shortcuts`. The panel remains open as you switch tabs, automatically attaching each active page's title and URL. Remove an unwanted source with one click and it stays dismissed for that draft.
+> Open a compact Quick Note composer injected into the current eligible page from the toolbar, a customizable browser-scoped keyboard shortcut, or the selected-text context menu. The fresh-install shortcut is `Command+Shift+Space` on macOS and `Ctrl+Shift+Space` elsewhere; Settings displays the live browser assignment and links to `chrome://extensions/shortcuts`. Quick Note captures the invoking page's title, URL, and focused-frame selection only when you invoke it. The selection menu overrides the focused-frame selection.
 >
 > On supported Chrome desktop devices, optional AI actions can suggest a title or extract editable to-dos using Chrome's on-device language model. These actions run only when you choose them, have no cloud AI fallback, and never change or save a note until you review and apply the preview. A master setting and separate feature toggles let you turn them off.
 >
@@ -18,11 +18,11 @@
 >
 > Queued notes stay on your device until delivery succeeds or you delete them. Inactive drafts and delivered history are removed after 30 days. Quick Note retries temporary failures and shows recent delivery status.
 >
-> The Notes view shows local storage diagnostics and can export drafts and capture history as JSON or Markdown without including Notion credentials or extension settings.
+> Settings includes Activity & Recovery with local storage diagnostics and JSON or Markdown recovery exports for queued and delivered captures, without including Notion credentials or extension settings. The composer’s Recent picker remains the place to resume drafts and notes.
 >
 > If you explicitly enable the extension in Incognito, Incognito drafts, queued notes, and local history remain session-only. Saving still sends the capture to your selected Notion workspace.
 >
-> Quick Note reads the active tab's title and URL while the Quick Note side panel is open, and stops when the panel closes. It does not automatically read page bodies, selected text, background tabs, or browsing history. It uses Notion's OAuth flow for production connections and does not run analytics, show ads, or load remote program code.
+> Quick Note reads the invoking tab's title, URL, and focused-frame selection only when you invoke it. It does not track tab changes or automatically read page bodies, background tabs, or browsing history. A selection from the context menu overrides the focused-frame selection. It uses Notion's OAuth flow for production connections and does not run analytics, show ads, or load remote program code.
 >
 > Notion Quick Note is an independent product and is not endorsed by Notion Labs, Inc.
 
@@ -36,8 +36,8 @@ Recommended category: **Productivity**.
 | `identity` | Opens Notion's OAuth authorization flow and receives its callback through Chrome's identity redirect. |
 | `storage` | Stores the current Notion access token, an opaque broker connection handle, settings, and a small capture index in extension-scoped storage. A non-exportable signing key used to prove refresh, revoke, and replaced-connection cleanup requests is kept in the extension's local IndexedDB database, alongside regular capture records. Incognito drafts and queue records use memory-backed session keys. |
 | `alarms` | Wakes the service worker for scheduled retry of captures that could not be delivered immediately. |
-| `sidePanel` | Opens the persistent Quick Note composer beside webpages so it remains available while the user switches tabs. |
-| `tabs` | Reads only the active tab's title and URL while the Quick Note side panel is open so those visible page references can be attached to the draft and removed by the user. It does not grant access to page bodies. |
+| `activeTab` | Temporarily accesses the current page after the toolbar, shortcut, or selection command is invoked, so Quick Note can capture its title and URL and open the composer. |
+| `scripting` | Injects the locally bundled composer only into the current eligible page after an explicit user gesture. |
 | `https://api.notion.com/*` | Sends user-approved captures to Notion and searches, validates, creates, or updates the user's chosen Notion destination. |
 | Production OAuth broker origin (optional) | Requested only when the user chooses Connect Notion; used to create a one-time authorization transaction, exchange the authorization code, and make device-signed refresh and revocation requests. The broker stores the rotating refresh credential encrypted at rest and returns only an opaque connection handle. The release packager narrows access to the exact production origin. |
 
@@ -49,7 +49,7 @@ Confirm the dashboard's current wording before submission. Based on current beha
 
 - **Authentication information:** the current Notion OAuth access token and opaque connection handle stored by the extension; a non-exportable device signing key stored only in extension-local IndexedDB; and the rotating Notion refresh credential stored encrypted by the OAuth broker.
 - **Website content:** selected text and the page title/URL attached to a capture.
-- **Web history / browsing activity:** the active tab's title and URL while the Quick Note side panel is open, used only to show removable source references in the current draft. Background tabs and prior browsing history are not read.
+- **Web history / browsing activity:** the invoking tab's title and URL, read only when Quick Note is invoked and used as visible source context for that draft. Background tabs, later tab changes, and prior browsing history are not read.
 
 Do not select advertising, analytics, personalization, or sale/transfer uses. Certify that data is used only for the extension's single purpose, is not sold, is not used for credit or lending, and is not used for personalized advertising. Supply the public URL hosting [`PRIVACY.md`](../PRIVACY.md), after replacing its contact placeholder.
 
@@ -65,5 +65,5 @@ Reviewer notes should include:
 
 - A test Notion account or clear steps for completing OAuth.
 - The exact user gesture needed to see active-page capture.
-- How to test the toolbar, customizable browser-scoped shortcut (including an unassigned conflict), selection context menu, persistent side panel, automatic source removal/dismissal, extension-tab fallback, disconnect/revocation, and Incognito.
+- How to test the toolbar, customizable browser-scoped shortcut (including an unassigned conflict), selection context menu, in-page injection, same-tab toggle, cross-tab draft handoff, restricted-page error feedback, Activity & Recovery actions, disconnect/revocation, and Incognito.
 - A statement that the OAuth broker contains the client secret, holds rotating refresh credentials encrypted for at most 180 days of inactivity, and returns only an opaque handle; the submitted ZIP contains no remote executable code.

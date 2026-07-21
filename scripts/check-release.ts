@@ -42,7 +42,7 @@ assert.equal(
   "extension pages must use the reviewed MV3 CSP"
 );
 
-const requiredPermissions = ["alarms", "contextMenus", "identity", "sidePanel", "storage", "tabs"];
+const requiredPermissions = ["activeTab", "alarms", "contextMenus", "identity", "notifications", "scripting", "storage"];
 assert.deepEqual([...manifest.permissions].sort(), requiredPermissions.sort(), "manifest permissions changed; update the release review intentionally");
 assert.deepEqual(manifest.host_permissions, ["https://api.notion.com/*"], "only the Notion API may be a required host permission");
 assert.ok(!(manifest.optional_host_permissions || []).includes("<all_urls>"), "optional host permissions must not use <all_urls>");
@@ -90,11 +90,10 @@ assert.ok(!manifest.permissions.includes("unlimitedStorage"), "capture retention
 
 const productConfig = await readText("dist/product-config.js");
 const optionsHtml = await readText("options/options.html");
-const sidepanelHtml = await readText("sidepanel/index.html");
 assert.match(optionsHtml, /src=["']\.\.\/dist\/options\.js["']/, "options must load its generated bundle");
-assert.match(sidepanelHtml, /src=["']\.\.\/dist\/content\.js["']/, "side panel must load the generated content bundle");
-assert.match(sidepanelHtml, /src=["']\.\.\/dist\/sidepanel\.js["']/, "side panel must load its generated module bundle");
-assert.match(optionsHtml, /<details[^>]+id=["']advanced-setup["'][^>]+hidden/, "Advanced setup must be hidden until local-build configuration explicitly enables it");
+assert.match(optionsHtml, /id=["']oauth-bundled-setup["'][^>]+hidden/, "OAuth setup must wait for its bundled configuration check");
+assert.match(optionsHtml, /id=["']personal-token-setup["'][^>]+hidden/, "Personal-token setup must stay hidden in configured releases");
+assert.match(optionsHtml, /id=["']oauth-test-setup["'][^>]+hidden/, "Local OAuth testing setup must stay hidden in configured releases");
 const clientId = productConfig.match(/["']?notionClientId["']?\s*:\s*(["'])(.*?)\1/)?.[2] || "";
 const brokerUrl = productConfig.match(/["']?oauthBrokerUrl["']?\s*:\s*(["'])(.*?)\1/)?.[2] || "";
 if (strictPackage) {

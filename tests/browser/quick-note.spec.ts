@@ -23,8 +23,118 @@ test.beforeEach(async ({ page }) => {
 
 async function openQuickNote(page: Page, overrides: Parameters<Window["openQuickNote"]>[0] = {}) {
   await page.evaluate((pageOverrides) => window.openQuickNote(pageOverrides), overrides);
-  await expect(page.locator("#notion-quick-note-root[open] .ProseMirror")).toBeFocused();
+  await expect(page.locator("#notion-quick-note-root .ProseMirror")).toBeFocused();
 }
+
+test("composer is a non-modal manual popover that leaves the page interactive", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  await expect.poll(() => root.evaluate((host) => ({
+    popover: host.getAttribute("popover"),
+    role: host.getAttribute("role"),
+    ariaModal: host.getAttribute("aria-modal"),
+    open: host.matches(":popover-open"),
+    inert: document.body.inert
+  }))).toEqual({ popover: "manual", role: "dialog", ariaModal: null, open: true, inert: false });
+
+  const input = page.locator("#underlying-input");
+  await input.fill("Page remains usable");
+  await expect(input).toHaveValue("Page remains usable");
+  await page.locator("#page-scroll").hover();
+  await page.mouse.wheel(0, 180);
+  await expect.poll(() => page.locator("#page-scroll").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.locator("#player-focus").click();
+  await expect.poll(() => page.evaluate(() => window.pagePointerEvents)).toBeGreaterThan(0);
+  await page.keyboard.press("Escape");
+  await expect.poll(() => page.evaluate(() => window.pageEscapeEvents)).toBeGreaterThan(0);
+  await expect(root).toHaveAttribute("popover", "manual");
+  await expect.poll(() => root.evaluate((host) => host.matches(":popover-open"))).toBe(true);
+});
+
+test.describe("on a touch page", () => {
+  test.use({ hasTouch: true });
+
+  test("the underlying page receives touch interaction while the composer stays open", async ({ page }) => {
+    await openQuickNote(page);
+    const input = page.locator("#underlying-input");
+    const box = await input.boundingBox();
+    if (!box) throw new Error("Expected the underlying page input.");
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    await expect.poll(() => page.evaluate(() => window.pageTouchEvents)).toBeGreaterThan(0);
+    await expect(page.locator("#notion-quick-note-root")).toHaveAttribute("popover", "manual");
+    await expect.poll(() => page.locator("#notion-quick-note-root").evaluate((host) => host.matches(":popover-open"))).toBe(true);
+  });
+});
+
+async function composerBounds(page: Page) {
+  return page.locator("#notion-quick-note-root").evaluate((host) => {
+    const { left, top, width, height, right, bottom } = host.getBoundingClientRect();
+    return { left, top, width, height, right, bottom, viewportWidth: innerWidth, viewportHeight: innerHeight };
+  });
+}
+
+test("dragging moves the composer while keeping it inside the viewport margin", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const dragRegion = root.locator("[data-composer-drag-region]");
+  const before = await composerBounds(page);
+  const dragBox = await dragRegion.boundingBox();
+  if (!dragBox) throw new Error("Expected the composer drag region.");
+  await page.mouse.move(dragBox.x + dragBox.width / 2, dragBox.y + dragBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(dragBox.x - 120, dragBox.y - 90, { steps: 5 });
+  await page.mouse.up();
+  const moved = await composerBounds(page);
+  expect(moved.left).toBeLessThan(before.left);
+  expect(moved.top).toBeLessThan(before.top);
+
+  const movedDragBox = await dragRegion.boundingBox();
+  if (!movedDragBox) throw new Error("Expected the moved composer drag region.");
+  await page.mouse.move(movedDragBox.x + 10, movedDragBox.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(-1000, -1000, { steps: 4 });
+  await page.mouse.up();
+  const clamped = await composerBounds(page);
+  expect(clamped.left).toBeGreaterThanOrEqual(16);
+  expect(clamped.top).toBeGreaterThanOrEqual(16);
+  expect(clamped.right).toBeLessThanOrEqual(clamped.viewportWidth - 16);
+  expect(clamped.bottom).toBeLessThanOrEqual(clamped.viewportHeight - 16);
+});
+
+test("resizing persists bounds and safely clamps them after the viewport shrinks", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const handle = root.locator("[data-composer-resize-handle]");
+  const handleBox = await handle.boundingBox();
+  if (!handleBox) throw new Error("Expected the composer resize handle.");
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + 1000, handleBox.y + 1000, { steps: 6 });
+  await page.mouse.up();
+  const expanded = await composerBounds(page);
+  expect(expanded.width).toBeLessThanOrEqual(720);
+  expect(expanded.height).toBeLessThanOrEqual(720);
+
+  const expandedHandle = await handle.boundingBox();
+  if (!expandedHandle) throw new Error("Expected the resized composer handle.");
+  await page.mouse.move(expandedHandle.x + 8, expandedHandle.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(expandedHandle.x - 1000, expandedHandle.y - 1000, { steps: 6 });
+  await page.mouse.up();
+  const minimized = await composerBounds(page);
+  expect(minimized.width).toBeGreaterThanOrEqual(320);
+  expect(minimized.height).toBeGreaterThanOrEqual(260);
+
+  await root.locator(".close").click();
+  await expect(root).toHaveCount(0);
+  await openQuickNote(page);
+  await expect.poll(() => composerBounds(page)).toMatchObject({ width: minimized.width, height: minimized.height });
+
+  await page.setViewportSize({ width: 420, height: 340 });
+  await expect.poll(() => composerBounds(page)).toMatchObject({ left: 84, top: 16, width: 320, height: 260 });
+  const stored = await page.evaluate(() => chrome.storage.local.get("quickNoteComposerBounds"));
+  expect(stored.quickNoteComposerBounds).toEqual({ left: 84, top: 16, width: 320, height: 260 });
+});
 
 async function rememberEditorNode(page: Page) {
   await page.locator("#notion-quick-note-root .ProseMirror").evaluate((node) => {
@@ -57,6 +167,31 @@ async function corruptRequiredTemplateElement(page: Page, selector: string): Pro
     });
   }, selector);
 }
+
+test("composer reveals when its stylesheet finishes during host attachment", async ({ page }) => {
+  await page.evaluate(() => {
+    const append = Element.prototype.append;
+    Element.prototype.append = function (...nodes: (Node | string)[]) {
+      append.call(this, ...nodes);
+      for (const node of nodes) {
+        if (!(node instanceof HTMLElement) || node.dataset.notionQuickNoteOwned !== "true") continue;
+        const stylesheet = node.shadowRoot?.querySelector<HTMLLinkElement>('link[rel="stylesheet"]');
+        if (!stylesheet) continue;
+        stylesheet.dispatchEvent(new Event("load"));
+        const addEventListener = stylesheet.addEventListener.bind(stylesheet);
+        stylesheet.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+          if (type !== "load") addEventListener(type, listener, options);
+        }) as typeof stylesheet.addEventListener;
+      }
+    };
+  });
+
+  await page.evaluate(() => window.openQuickNote());
+  await expect.poll(() => page.locator("#notion-quick-note-root").evaluate((host) => {
+    const sheet = host.shadowRoot?.querySelector<HTMLElement>(".sheet");
+    return sheet ? { visible: sheet.classList.contains("visible"), opacity: getComputedStyle(sheet).opacity } : null;
+  })).toEqual({ visible: true, opacity: "1" });
+});
 
 function draftFixture(id: string, body: string): CaptureDraft {
   return {
@@ -350,13 +485,13 @@ test("Activity suspension and resume preserve the mounted composer node and cont
   await root.evaluate((host) => { window.rememberedQuickNoteHost = host; });
 
   await page.evaluate(() => window.__notionQuickNoteSuspend?.());
-  await expect.poll(() => root.evaluate((dialog: HTMLDialogElement) => dialog.open)).toBe(false);
+  await expect.poll(() => root.evaluate((host) => host.matches(":popover-open"))).toBe(false);
   await expect.poll(() => root.evaluate((element: HTMLElement) => element.hidden)).toBe(true);
   await page.locator("#player-focus").click();
   await expect(page.locator("#player-focus")).toBeFocused();
   await page.evaluate(() => window.__notionQuickNoteResume?.());
 
-  await expect.poll(() => root.evaluate((dialog: HTMLDialogElement) => dialog.open)).toBe(true);
+  await expect.poll(() => root.evaluate((host) => host.matches(":popover-open"))).toBe(true);
   await expect.poll(() => root.evaluate((element: HTMLElement) => element.hidden)).toBe(false);
   await expect.poll(() => root.evaluate((host) => host === window.rememberedQuickNoteHost)).toBe(true);
   await expectRememberedEditorNode(page);
@@ -429,7 +564,7 @@ test("discard runtime rejection reconciles a retained draft and restores autosav
   expect(pageErrors).toEqual([]);
 });
 
-test("discard runtime rejection disposes the composer when reconciliation confirms deletion", async ({ page }) => {
+test("discard runtime rejection preserves the composer when the extension cannot verify deletion", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await openQuickNote(page);
@@ -444,7 +579,8 @@ test("discard runtime rejection disposes the composer when reconciliation confir
   await root.locator(".more").click();
   await root.locator(".discard-draft").click();
 
-  await expect(root).toHaveCount(0);
+  await expect(root).toHaveCount(1);
+  await expect(root.locator(".toast")).toHaveText("Discard response channel failed after deletion");
   expect(await page.evaluate(() => window.currentDraft)).toBeNull();
   expect(pageErrors).toEqual([]);
 });
@@ -618,6 +754,7 @@ test("AI preferences hide individual actions or the complete sparkle menu", asyn
   await expect(root.locator(".toast")).toHaveText("This AI action is turned off in Settings.");
   expect(await page.evaluate(() => window.aiPrompts.length)).toBe(0);
 
+  await root.locator(".more").focus();
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
   await expect(root).toHaveCount(0);
@@ -708,12 +845,13 @@ test("dismissing the AI panel aborts hidden model work", async ({ page }) => {
   await expect(root.locator(".ai-status")).toHaveText("Ready on this device.");
   await root.locator('[data-ai-action="title"]').click();
   await expect(root.locator(".ai-status")).toHaveText("Suggesting a title…");
+  await root.locator(".more").focus();
   await page.keyboard.press("Escape");
   await expect(root.locator(".ai-panel")).toBeHidden();
   await expect.poll(() => page.evaluate(() => window.aiDestroyed)).toBe(1);
 });
 
-test("editing, composition, Tab trapping, Escape, and save shortcuts still work", async ({ page }) => {
+test("editing, composition, Escape, and save shortcuts still work", async ({ page }) => {
   await openQuickNote(page);
   const editor = page.locator("#notion-quick-note-root .ProseMirror");
   await editor.fill("ac");
@@ -729,20 +867,14 @@ test("editing, composition, Tab trapping, Escape, and save shortcuts still work"
       isComposing: true
     }));
   });
-  await expect(page.locator("#notion-quick-note-root")).toHaveAttribute("open", "");
-
-  await editor.focus();
-  await editor.press("Tab");
-  await expect(page.locator("#notion-quick-note-root .more")).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(editor).toBeFocused();
+  await expect(page.locator("#notion-quick-note-root")).toHaveAttribute("popover", "manual");
 
   await editor.focus();
   await editor.press("Control+Shift+Enter");
   await expect.poll(() => page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(true);
 
   await editor.press("Escape");
-  await expect(page.locator("#notion-quick-note-root[open]")).toHaveCount(0);
+  await expect.poll(() => page.locator("#notion-quick-note-root").count()).toBe(0);
 });
 
 test("focus is immediate and delayed draft hydration cannot overwrite early typing", async ({ page }) => {
@@ -811,6 +943,7 @@ test("Recent stashes the current draft, loads a saved note, and exposes attached
   await expect(root.locator(".page-title")).toHaveValue("Recently saved");
   await expect(root.locator(".ProseMirror")).toHaveText("Live Notion content");
   await expect(root.locator(".edit-banner")).toContainText("draft is stashed");
+  await expect(root.locator(".status")).toHaveText("");
 
   await root.locator(".more").click();
   await expect(root.locator(".source-count")).toHaveText("2 attached");
@@ -915,25 +1048,25 @@ test("Quick Note remains topmost when opened before or after fullscreen", async 
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
   await openQuickNote(page);
   await expect.poll(() => page.evaluate(() => {
-    const dialog = document.querySelector<HTMLDialogElement>("#notion-quick-note-root");
-    if (!dialog) return false;
-    const rect = dialog.getBoundingClientRect();
-    return dialog.open && document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === dialog;
+    const host = document.querySelector<HTMLElement>("#notion-quick-note-root");
+    if (!host) return false;
+    const rect = host.getBoundingClientRect();
+    const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return host.matches(":popover-open") && Boolean(target && host.contains(target));
   })).toBe(true);
 
   // Browsers reserve Escape while native fullscreen is active, so close through
   // the visible control here; keyboard close is covered in the test above.
-  await page.locator("#notion-quick-note-root[open] .close").click();
+  await page.locator("#notion-quick-note-root .close").click();
   await page.evaluate(() => document.exitFullscreen());
   await openQuickNote(page);
   await page.evaluate(() => { window.fullscreenOnNextClick = true; });
-  await page.locator("#notion-quick-note-root[open] .more").click();
+  await page.locator("#notion-quick-note-root .more").click();
   await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
-  await expect(page.locator("#notion-quick-note-root[open]")).toHaveCount(1);
+  await expect.poll(() => page.locator("#notion-quick-note-root").evaluate((host) => host.matches(":popover-open"))).toBe(true);
   await expect.poll(() => page.evaluate(() => {
-    const dialog = document.querySelector("#notion-quick-note-root[open]");
-    const surface = dialog?.querySelector("div");
-    return Boolean(dialog?.contains(document.activeElement) && surface?.shadowRoot?.activeElement);
+    const host = document.querySelector<HTMLElement>("#notion-quick-note-root");
+    return Boolean(host?.matches(":popover-open") && host.contains(document.activeElement) && host.shadowRoot?.activeElement);
   })).toBe(true);
 });
 
@@ -944,7 +1077,7 @@ test("rapid close and reopen cannot remove the newest popup", async ({ page }) =
   await page.waitForTimeout(220);
 
   await expect(page.locator("#notion-quick-note-root")).toHaveCount(1);
-  await expect(page.locator("#notion-quick-note-root")).toHaveAttribute("open", "");
+  await expect(page.locator("#notion-quick-note-root")).toHaveAttribute("popover", "manual");
   await expect(page.locator("#notion-quick-note-root .ProseMirror")).toBeFocused();
 });
 
@@ -967,7 +1100,7 @@ test("reinjection disposes the stale runtime and restores the last autosaved dra
   await expect(page.locator("#notion-quick-note-root")).toHaveCount(1);
 
   await page.evaluate(() => window.openQuickNote());
-  const restored = page.locator("[data-notion-quick-note-owned='true'][open]");
+  const restored = page.locator("[data-notion-quick-note-owned='true'][popover='manual']");
   await expect(restored.locator(".ProseMirror")).toBeFocused();
   await expect(restored.locator(".ProseMirror")).toHaveText("Survives extension reload");
   await expect(restored).toHaveCount(1);
@@ -1048,25 +1181,6 @@ test("Save waits for the single-flight autosave drain and sends its latest snaps
   });
   expect(capturedText).toBe("Final save payload");
   expect(await page.evaluate(() => window.maxConcurrentDraftWrites)).toBe(1);
-});
-
-test("successful save publishes a terminal draft event for the panel cache", async ({ page }) => {
-  await page.evaluate(() => {
-    window.terminalDraftEvents = [];
-    window.__notionQuickNoteOnTerminal = (event) => window.terminalDraftEvents.push(event);
-  });
-  await openQuickNote(page);
-  const draftId = await page.evaluate(() => {
-    if (!window.currentDraft) throw new Error("Expected a current draft before save.");
-    return window.currentDraft.id;
-  });
-  const editor = page.locator("#notion-quick-note-root .ProseMirror");
-  await editor.fill("Save and clear the cached composer draft");
-  await editor.press("Control+Shift+Enter");
-
-  await expect.poll(() => page.evaluate(() => window.terminalDraftEvents)).toEqual([
-    { draftId, reason: "saved" }
-  ]);
 });
 
 test("invalidated runtime stops autosaving without an unhandled rejection", async ({ page }) => {
@@ -1158,7 +1272,7 @@ test("slow delivery offers Close safely after ten seconds and retains the local 
   const closeSafely = page.locator("#notion-quick-note-root .save");
   await expect(closeSafely).toHaveText("Close safely");
   await closeSafely.click();
-  await expect(page.locator("#notion-quick-note-root[open]")).toHaveCount(0);
+  await expect.poll(() => page.locator("#notion-quick-note-root").count()).toBe(0);
   expect(await page.evaluate(() => window.runtimeMessages.some((message) => message.type === "ENQUEUE_CAPTURE"))).toBe(true);
 });
 
