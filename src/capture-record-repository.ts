@@ -213,9 +213,10 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         const meta = await metaIn(tx);
         const requestedId = String(draftId || "");
         const requested = requestedId ? await tx.getDraft(requestedId) : null;
-        const active = !requested && meta.activeDraftId ? await tx.getDraft(meta.activeDraftId) : null;
-        if (requested || active) {
-          const existing = requested || active;
+        const active = !requested && !requestedId && meta.activeDraftId ? await tx.getDraft(meta.activeDraftId) : null;
+        const tabScopedActive = tabId !== undefined && tabId !== null && active?.tabId !== tabId ? null : active;
+        if (requested || tabScopedActive) {
+          const existing = requested || tabScopedActive;
           const next = addContextToDraft(existing, context, now());
           const sessionChanged = Boolean(sessionId && sessionId !== next.sessionId);
           next.tabId = tabId ?? next.tabId ?? null;

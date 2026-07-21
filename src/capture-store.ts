@@ -218,7 +218,12 @@ export function createCaptureRepository({
     async getOrCreateDraft({ tabId, context, includeSource = true, sessionId = "", draftId = "" }: DraftRequest) {
       return mutate((state) => {
         const requestedId = String(draftId || "");
-        const activeId = state.drafts[requestedId] ? requestedId : state.activeDraftId;
+        const active = state.drafts[state.activeDraftId];
+        const activeId = state.drafts[requestedId]
+          ? requestedId
+          : requestedId
+            ? ""
+            : (tabId !== undefined && tabId !== null && active?.tabId !== tabId ? "" : state.activeDraftId);
         if (activeId && state.drafts[activeId]) {
           const existing = state.drafts[activeId];
           const next = addContextToDraft(existing, context, now());

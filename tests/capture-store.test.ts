@@ -103,17 +103,18 @@ function memoryStorage(): KeyValueStoragePort & { values: Record<string, unknown
   };
 }
 
-test("one active draft follows explicit invocations across tabs and enqueue atomically replaces it", async () => {
+test("each tab receives an independent draft while its composer remains open", async () => {
   const storage = memoryStorage();
   let id = 0;
   const repository = createCaptureRepository({ storage, uuid: () => `id-${++id}`, now: () => 100 });
   const context = { title: "Article", url: "https://example.com", selection: "Selected" };
   const first = await repository.getOrCreateDraft({ tabId: 7, context });
-  const resumed = await repository.getOrCreateDraft({ tabId: 9, context: { title: "Changed", url: "https://second.example/path" } });
-  assert.equal(resumed.id, first.id);
-  assert.equal(resumed.context.title, "Article");
-  assert.equal(resumed.tabId, 9);
-  assert.deepEqual(resumed.sources.map((source) => source.url), ["https://example.com/", "https://second.example/path"]);
+  const second = await repository.getOrCreateDraft({ tabId: 9, context: { title: "Changed", url: "https://second.example/path", selection: "Second draft" } });
+  assert.notEqual(second.id, first.id);
+  assert.equal(first.tabId, 7);
+  assert.equal(second.tabId, 9);
+  assert.deepEqual(first.sources.map((source) => source.url), ["https://example.com/"]);
+  assert.deepEqual(second.sources.map((source) => source.url), ["https://second.example/path"]);
 
   const record = await repository.enqueue({
     draftId: first.id,
@@ -125,7 +126,7 @@ test("one active draft follows explicit invocations across tabs and enqueue atom
   });
   const state = await repository.load();
   assert.equal(state.drafts[first.id], undefined);
-  assert.equal(state.activeDraftId, "");
+  assert.equal(state.drafts[second.id]?.tabId, 9);
   assert.equal(must(state.captures[record.id], "enqueued capture").capture.captureId, record.id);
 
   const repeated = await repository.enqueue({
@@ -240,7 +241,7 @@ test("v1 migration chooses the newest non-empty active draft and keeps every oth
 test("stale revisions cannot overwrite a newer cross-tab autosave", async () => {
   const repository = createCaptureRepository({ storage: memoryStorage(), uuid: () => "draft", now: () => 100 });
   const draft = await repository.getOrCreateDraft({ tabId: 1, context: { url: "https://one.example", selection: "Body" }, sessionId: "one" });
-  const handedOff = await repository.getOrCreateDraft({ tabId: 2, context: { url: "https://two.example" }, sessionId: "two" });
+  const handedOff = await repository.getOrCreateDraft({ tabId: 2, context: { url: "https://two.example" }, sessionId: "two", draftId: draft.id });
   const saved = await repository.upsertDraft({ ...handedOff, title: "Newer" }, handedOff.revision);
   await assert.rejects(
     repository.upsertDraft({ ...draft, title: "Stale" }, draft.revision),
@@ -288,7 +289,7 @@ test("clearing an active edit reactivates its stashed draft", async () => {
 test("a new composer session advances the revision even when the source URL is unchanged", async () => {
   const repository = createCaptureRepository({ storage: memoryStorage(), uuid: () => "draft", now: () => 100 });
   const first = await repository.getOrCreateDraft({ tabId: 1, context: { url: "https://same.example", selection: "Body" }, sessionId: "old" });
-  const handedOff = await repository.getOrCreateDraft({ tabId: 2, context: { url: "https://same.example", selection: "Body" }, sessionId: "new" });
+  const handedOff = await repository.getOrCreateDraft({ tabId: 2, context: { url: "https://same.example", selection: "Body" }, sessionId: "new", draftId: first.id });
   assert.ok(handedOff.revision > first.revision);
   await assert.rejects(
     repository.upsertDraft({ ...first, title: "Old surface" }, first.revision),

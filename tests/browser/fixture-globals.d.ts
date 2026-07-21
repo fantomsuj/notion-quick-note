@@ -53,6 +53,8 @@ declare global {
     mediaEvents: Array<{ type: string; key: string }>;
     pagePointerEvents: number;
     pageTouchEvents: number;
+    underlyingPointerEvents: number;
+    underlyingTouchEvents: number;
     pageEscapeEvents: number;
     settingsResponse: Record<string, unknown>;
     currentDraft: CaptureDraft | null;

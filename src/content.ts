@@ -268,6 +268,7 @@ function currentEditor(editor: Editor | undefined): Editor {
   const PROTOCOL = 1;
   const DRAFT_VERSION = 2;
   const COMPOSER_BOUNDS_STORAGE_KEY = "quickNoteComposerBounds";
+  const COMPOSER_FONT = '15px "NotionInter"';
   const KEYBOARD_EVENTS = ["keydown", "keypress", "keyup"];
   const handledKeyboardEvents = new WeakSet();
   const composerKeyboardEvents = new WeakSet<KeyboardEvent>();
@@ -443,9 +444,9 @@ function currentEditor(editor: Editor | undefined): Editor {
       ? `notion-quick-note-root-${crypto.randomUUID()}`
       : "notion-quick-note-root";
     host.dataset.notionQuickNoteOwned = "true";
+    host.setAttribute("aria-label", "Notion Quick Note");
     host.setAttribute("popover", "manual");
     host.setAttribute("role", "dialog");
-    host.setAttribute("aria-label", "Notion Quick Note");
     host.style.cssText = "all:initial;position:fixed;margin:0;padding:0;border:0;background:transparent;overflow:visible";
     const shadowRoot = host.attachShadow({ mode: "open" });
     shadowRoot.innerHTML = template();
@@ -500,14 +501,26 @@ function currentEditor(editor: Editor | undefined): Editor {
     popup = instance;
     const stylesheet = root.querySelector("link[rel=stylesheet]");
     const sheet = root.querySelector(".sheet");
-    const revealComposerSheet = () => {
+    let fontVerificationStarted = false;
+    const revealComposerSheet = async () => {
+      if (fontVerificationStarted) return;
+      fontVerificationStarted = true;
+      try {
+        await document.fonts.load(COMPOSER_FONT);
+        if (!document.fonts.check(COMPOSER_FONT)) throw new Error("NotionInter did not load.");
+        host.dataset.fontStatus = "loaded";
+      } catch {
+        host.dataset.fontStatus = "fallback";
+        host.classList.add("font-fallback");
+      }
+      if (instance.closed) return;
       sheet.style.removeProperty("display");
       requestAnimationFrame(() => {
         if (popup === instance && !instance.closed) sheet.classList.add("visible");
       });
     };
-    stylesheet.addEventListener("load", revealComposerSheet, { once: true });
-    if (stylesheet.sheet) revealComposerSheet();
+    stylesheet.addEventListener("load", () => void revealComposerSheet(), { once: true });
+    if (stylesheet.sheet) void revealComposerSheet();
 
     containKeyboard(instance);
     const initialDraft = normalizeDraft(providedDraft, instance);
