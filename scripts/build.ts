@@ -62,8 +62,7 @@ export async function buildExtension({
       ...shared,
       entryPoints: {
         background: path.join(projectRoot, "src/background.ts"),
-        options: path.join(projectRoot, "options/options.ts"),
-        sidepanel: path.join(projectRoot, "sidepanel/sidepanel.ts")
+        options: path.join(projectRoot, "options/options.ts")
       },
       outdir,
       format: "esm",

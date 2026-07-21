@@ -43,9 +43,9 @@ Load `release/chrome-extension/` in a clean Chrome profile and verify:
 - Advanced setup is not shown in the packaged build; only source/local builds expose client configuration and personal-token controls.
 - **Grant access to more pages** reruns OAuth. Reauthorizing the same Notion `bot_id` preserves the current destination and resumes matching blocked captures; choosing another workspace resets destination setup.
 - Revoking access in Notion or presenting an obsolete pre-handle OAuth connection produces a clear reconnect path without sending a legacy browser-stored refresh token.
-- Toolbar, keyboard shortcut, selection context menu, formatted capture, source on/off, retry/restart recovery, recent-note editing, and side-panel/tab fallbacks.
+- Toolbar, keyboard shortcut, selection context menu, formatted capture, source on/off, retry/restart recovery, recent-note editing, in-page injection, and restricted-page error handling.
 - Legacy `captureStateV1` migration, per-record IndexedDB persistence, Notes storage diagnostics, and JSON/Markdown recovery downloads.
-- Restricted pages and PDFs fail over without losing the draft.
+- Restricted pages and PDFs do not create a draft or open another surface; they show a temporary action error badge and tooltip instead.
 - With “Allow in Incognito” off, no Incognito access is available. With it explicitly on, Incognito capture data is absent after all Incognito windows close, regular capture history is unchanged, and the user understands that saved captures go to the shared Notion connection.
 - No console errors, failed local asset loads, remotely hosted code, or unexpected network origins.
 

@@ -58,6 +58,31 @@ async function corruptRequiredTemplateElement(page: Page, selector: string): Pro
   }, selector);
 }
 
+test("composer reveals when its stylesheet finishes during host attachment", async ({ page }) => {
+  await page.evaluate(() => {
+    const append = Element.prototype.append;
+    Element.prototype.append = function (...nodes: (Node | string)[]) {
+      append.call(this, ...nodes);
+      for (const node of nodes) {
+        if (!(node instanceof HTMLDialogElement) || node.dataset.notionQuickNoteOwned !== "true") continue;
+        const stylesheet = node.querySelector("div")?.shadowRoot?.querySelector<HTMLLinkElement>('link[rel="stylesheet"]');
+        if (!stylesheet) continue;
+        stylesheet.dispatchEvent(new Event("load"));
+        const addEventListener = stylesheet.addEventListener.bind(stylesheet);
+        stylesheet.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+          if (type !== "load") addEventListener(type, listener, options);
+        }) as typeof stylesheet.addEventListener;
+      }
+    };
+  });
+
+  await page.evaluate(() => window.openQuickNote());
+  await expect.poll(() => page.locator("#notion-quick-note-root").evaluate((dialog) => {
+    const sheet = dialog.querySelector("div")?.shadowRoot?.querySelector<HTMLElement>(".sheet");
+    return sheet ? { visible: sheet.classList.contains("visible"), opacity: getComputedStyle(sheet).opacity } : null;
+  })).toEqual({ visible: true, opacity: "1" });
+});
+
 function draftFixture(id: string, body: string): CaptureDraft {
   return {
     version: 2,
@@ -429,7 +454,7 @@ test("discard runtime rejection reconciles a retained draft and restores autosav
   expect(pageErrors).toEqual([]);
 });
 
-test("discard runtime rejection disposes the composer when reconciliation confirms deletion", async ({ page }) => {
+test("discard runtime rejection preserves the composer when the extension cannot verify deletion", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await openQuickNote(page);
@@ -444,7 +469,8 @@ test("discard runtime rejection disposes the composer when reconciliation confir
   await root.locator(".more").click();
   await root.locator(".discard-draft").click();
 
-  await expect(root).toHaveCount(0);
+  await expect(root).toHaveCount(1);
+  await expect(root.locator(".toast")).toHaveText("Discard response channel failed after deletion");
   expect(await page.evaluate(() => window.currentDraft)).toBeNull();
   expect(pageErrors).toEqual([]);
 });
@@ -1048,25 +1074,6 @@ test("Save waits for the single-flight autosave drain and sends its latest snaps
   });
   expect(capturedText).toBe("Final save payload");
   expect(await page.evaluate(() => window.maxConcurrentDraftWrites)).toBe(1);
-});
-
-test("successful save publishes a terminal draft event for the panel cache", async ({ page }) => {
-  await page.evaluate(() => {
-    window.terminalDraftEvents = [];
-    window.__notionQuickNoteOnTerminal = (event) => window.terminalDraftEvents.push(event);
-  });
-  await openQuickNote(page);
-  const draftId = await page.evaluate(() => {
-    if (!window.currentDraft) throw new Error("Expected a current draft before save.");
-    return window.currentDraft.id;
-  });
-  const editor = page.locator("#notion-quick-note-root .ProseMirror");
-  await editor.fill("Save and clear the cached composer draft");
-  await editor.press("Control+Shift+Enter");
-
-  await expect.poll(() => page.evaluate(() => window.terminalDraftEvents)).toEqual([
-    { draftId, reason: "saved" }
-  ]);
 });
 
 test("invalidated runtime stops autosaving without an unhandled rejection", async ({ page }) => {

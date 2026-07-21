@@ -28,7 +28,7 @@ flowchart TD
 
   subgraph Extension["Chrome extension — trusted"]
     Trigger["Toolbar · shortcut · selection"]
-    Panel["Persistent side panel\nmounted Tiptap composer"]
+    Composer["Page-injected\nTiptap composer"]
     Worker["Service worker\ncoordination + secrets"]
     Store["Chrome storage\nsettings + small index"]
     CaptureDB["IndexedDB\nper-record drafts + captures"]
@@ -42,9 +42,9 @@ flowchart TD
   end
 
   Trigger --> Worker
-  Worker -->|"typed navigation + context"| Panel
-  Panel -->|"validated messages"| Worker
-  Context -. "tabs metadata only" .-> Worker
+  Worker -->|"inject after user gesture"| Composer
+  Composer -->|"validated messages"| Worker
+  Context -. "invocation-time metadata" .-> Worker
   Worker <--> Store
   Worker <--> CaptureDB
   Settings <--> Store
@@ -54,7 +54,7 @@ flowchart TD
 
 ### The most important boundary
 
-The webpage never gets the composer or the Notion token. Chrome hosts one mounted composer in the window-scoped side panel; the panel sends plain capture data to the service worker, where credentials and Notion transport remain isolated. While the panel is connected, the worker forwards only supported active-tab title and URL metadata. Selected text enters a draft only through the explicit selection command.
+The webpage gets a locally bundled composer only after the user invokes Quick Note, and it never receives the Notion token. The composer sends plain capture data to the service worker, where credentials and Notion transport remain isolated. The worker collects the invoking page's title, URL, and focused-frame selection once, before injection; a context-menu selection overrides the focused-frame selection.
 
 ## 3. The capture lifecycle
 
@@ -62,15 +62,15 @@ The webpage never gets the composer or the Notion token. Chrome hosts one mounte
 sequenceDiagram
   actor U as User
   participant C as Chrome
-  participant Q as Quick Note side panel
+  participant Q as Quick Note in-page composer
   participant W as Service worker
   participant N as Notion API
 
   U->>C: Toolbar, shortcut, or context menu
-  C->>Q: Open the window-scoped panel
+  C->>Q: Inject the composer into the eligible page
   C->>C: Read active title and URL
-  C->>Q: Forward typed draft and page context
-  Q->>Q: Resume the mounted draft and attach this page
+  C->>Q: Forward the active draft and invocation context
+  Q->>Q: Mount or resume the draft
   U->>Q: Write note and save
   Q->>W: SAVE_CAPTURE message
   W->>N: Append block or create page
@@ -140,7 +140,7 @@ This suggests the next reliability improvements naturally: validate configuratio
 | If you want to change… | Start here | Keep this contract intact |
 |---|---|---|
 | The floating card's layout, styling, copy, or keyboard behavior | `src/content.ts` | It must communicate through runtime messages and must not receive the token |
-| Toolbar, shortcut, or context-menu behavior | `src/background.ts` | Opening must follow a user gesture; restricted Chrome pages need a fallback |
+| Toolbar, shortcut, or context-menu behavior | `src/background.ts` | Opening must follow a user gesture; restricted pages show a temporary action error instead of another surface |
 | What gets written into Notion | `src/notion.ts` | Keep request construction testable without Chrome APIs |
 | Page-versus-database settings | `options/options.html`, `.css`, and `.ts` | Stored keys must remain compatible or be migrated |
 | Manifest permissions or extension metadata | `manifest.json` | Request the smallest permission set possible |
@@ -179,7 +179,7 @@ This is a qualitative product comparison, not a claim that one tool is universal
 
 | Option | Best at | Interaction center | Complexity | Ownership |
 |---|---|---|---|---|
-| **Notion Quick Note** | Capturing the thought caused by the current page | Persistent side-panel composer | Low today | Fully user-owned and editable |
+| **Notion Quick Note** | Capturing the thought caused by the current page | In-page composer | Low today | Fully user-owned and editable |
 | **Notion Web Clipper** | Saving a webpage into a chosen Notion destination | One-click page clipper | Low | Official closed product |
 | **Flylighter** | Multi-highlight research and configurable capture flows | Power-user editor/sidebar | High capability | Third-party product |
 | **Save to Notion** | Rich web clipping, database fields, screenshots, and images | Configurable clip form | Medium–high | Third-party product |
@@ -269,7 +269,7 @@ Users will tolerate an API error; they will not tolerate losing the thought. Loc
 
 ### 6. The browser is both the advantage and the constraint
 
-The `tabs` permission lets the connected panel follow active HTTP(S) page titles and URLs without injecting code into those pages. Chrome internal pages, browser PDF surfaces, and other unsupported schemes are ignored as context, while the mounted composer remains usable. If Chrome cannot open the side panel, Quick Note falls back to its existing extension tab.
+The `activeTab` and `scripting` permissions let Quick Note collect the invoking page's title and URL and inject its locally bundled composer after an explicit user gesture. Chrome internal pages, browser PDF surfaces, the Web Store, inaccessible frames, and other unsupported targets do not create a draft or another composer surface; Quick Note shows a temporary action error instead.
 
 ## 12. The five takeaways to remember
 

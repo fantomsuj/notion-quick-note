@@ -11,11 +11,12 @@ new vm.Script(bundle, { filename: "dist/content.js" });
 assert.doesNotMatch(bundle, /^\s*import(?:\s|\{|\*)/m, "dist/content.js must not contain top-level imports");
 
 const background = await readFile(new URL("../src/background.ts", import.meta.url), "utf8");
-assert.doesNotMatch(
-  background,
-  /(?:chrome\.)?scripting\s*\.\s*executeScript|content(?:Runtime)?Loader|files:\s*\[\s*["']dist\/content\.js["']/,
-  "the background must not inject the composer into webpages"
-);
+const contentLoader = await readFile(new URL("../src/content-loader.ts", import.meta.url), "utf8");
+const removedSurfacePattern = new RegExp(["chrome\\.side", "Panel", "|panel", "Coordinator", "|side", "panel\\/"].join(""));
+assert.doesNotMatch(background, removedSurfacePattern, "the background must not retain Side Panel architecture");
+assert.match(background, /content(?:Runtime)?Loader|ensureContentRuntime/, "the background must use the content runtime loader");
+assert.match(background, /(?:chrome\.)?scripting\s*\.\s*executeScript/, "the background must inject the composer after a user gesture");
+assert.match(contentLoader, /files:\s*\[\s*["']dist\/content\.js["']/, "the loader must inject the packaged content bundle");
 
 if (size > budgetBytes) {
   throw new Error(`dist/content.js is ${size.toLocaleString()} bytes; the production budget is ${budgetBytes.toLocaleString()} bytes.`);

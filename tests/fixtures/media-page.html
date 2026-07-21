@@ -304,10 +304,6 @@
                 delete window.savedSession[`draft:${location.href}`];
                 return { ok: true, discarded: true };
               }
-              if (message.type === "GET_PANEL_DRAFT") {
-                if (window.currentDraft?.id === message.draftId) return { ok: true, draft: completeDraft(window.currentDraft) };
-                return { ok: false, error: "That draft is no longer available.", code: "draft_not_found" };
-              }
               if (message.type === "ENQUEUE_CAPTURE") {
                 await new Promise((resolve) => setTimeout(resolve, window.saveDelay));
                 const record = completeCaptureStatus({

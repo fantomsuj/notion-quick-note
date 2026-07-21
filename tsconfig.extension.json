@@ -6,5 +6,5 @@
     "rootDir": ".",
     "outDir": ".context/types/extension"
   },
-  "include": ["src/**/*.ts", "options/**/*.ts", "sidepanel/**/*.ts", "types/**/*.d.ts"]
+  "include": ["src/**/*.ts", "options/**/*.ts", "types/**/*.d.ts"]
 }

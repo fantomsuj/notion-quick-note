@@ -33,7 +33,6 @@ import { createDeliveryQueue } from "./capture-queue.js";
 import { createRecoveryExport } from "./capture-export.js";
 import {
   assertNever,
-  isPanelRegistrationMessage,
   isRecord,
   isRuntimeRequest,
   type CaptureChangeEvent,
@@ -53,17 +52,18 @@ import {
   type RuntimeRequest,
   type RuntimeResponse,
   type Settings,
-  type SyncJournal,
-  type PanelNavigationMessage
+  type SyncJournal
 } from "./contracts.js";
-import { createPanelCoordinator } from "./panel-coordinator.js";
-import { preparePanelDraft, shouldPublishExplicitContext } from "./panel-lifecycle.js";
+import { createContentRuntimeLoader } from "./content-loader.js";
+import { createSerializedOperationQueue } from "./serialized-operation-queue.js";
 import { quickSettingsResponse, requiredCaptureRecordResponse, validatedRuntimeResponse } from "./background-dispatch.js";
+import { logDiagnostic, logDiagnosticError } from "./diagnostics.js";
+import { createUnavailableNotice } from "./unavailable-notice.js";
 
 const DELIVERY_ALARM = "notion-quick-note-delivery";
 const BROWSER_SESSION_KEY = "notionQuickNoteBrowserSessionV1";
-const PANEL_PORT_NAME = "notion-quick-note-panel";
-const panelCoordinator = createPanelCoordinator();
+const ACTIVE_SURFACE_KEY = "notionQuickNoteActiveSurfaceV2";
+const showUnavailableNotice = createUnavailableNotice(chrome.notifications);
 let activeInitialization: Promise<void> | undefined;
 let initializationComplete = false;
 const isIncognito = Boolean(chrome.extension?.inIncognitoContext);
@@ -120,6 +120,8 @@ const deliveryQueue = createDeliveryQueue({
   },
   onChanged: updateQueueSurfaces
 });
+const ensureContentRuntime = createContentRuntimeLoader({ tabs: chrome.tabs, scripting: chrome.scripting });
+const enqueueComposerOperation = createSerializedOperationQueue();
 void initializeWorker();
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
@@ -152,31 +154,18 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === DELIVERY_ALARM) void deliveryQueue.drain();
 });
 
-chrome.action.onClicked.addListener((tab) => openQuickNote(tab));
-
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== PANEL_PORT_NAME) return;
-  let panelWindowId: number | undefined;
-  port.onMessage.addListener((message: unknown) => {
-    if (!isPanelRegistrationMessage(message)) return;
-    const windowId = message.windowId;
-    panelWindowId = windowId;
-    panelCoordinator.register(windowId, port);
-    void publishActivePage(windowId);
+chrome.action.onClicked.addListener((tab) => {
+  logDiagnostic("worker.toolbar.click", {
+    tabId: tab.id,
+    windowId: tab.windowId
   });
-  port.onDisconnect.addListener(() => {
-    if (panelWindowId !== undefined) panelCoordinator.unregister(panelWindowId, port);
-  });
+  void openQuickNote(tab);
 });
 
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  if (panelCoordinator.has(windowId)) void publishActivePage(windowId, tabId);
-});
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!tab.active || !panelCoordinator.has(tab.windowId)) return;
-  if (changeInfo.status !== "complete" && !changeInfo.url && !changeInfo.title) return;
-  void publishActivePage(tab.windowId, tabId);
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== "toggle-quick-note") return;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  await openQuickNote(tab);
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -231,8 +220,6 @@ async function handleMessage(message: RuntimeRequest, sender: chrome.runtime.Mes
       return { ok: true, draft: await captureRepository.activateDraft(requiredId(message.id), { ...(message.returnDraftId === undefined ? {} : { returnDraftId: message.returnDraftId }) }) };
     case "RELEASE_COMPOSER_SURFACE":
       return releaseComposerSurface(message.sessionId, sender.tab?.id);
-    case "GET_PANEL_DRAFT":
-      return { ok: true, draft: await getPanelDraft(message, sender) };
     case "RETRY_CAPTURE":
       return requiredCaptureRecordResponse(message.type, deliveryQueue.retry(requiredId(message.id), { force: Boolean(message.force) }));
     case "RETARGET_CAPTURE":
@@ -251,8 +238,6 @@ async function handleMessage(message: RuntimeRequest, sender: chrome.runtime.Mes
       return openCaptureResult(message.id, message.url);
     case "OPEN_ACTIVITY":
       return openActivity(sender.tab);
-    case "OPEN_COMPOSER_FALLBACK":
-      return openSavedDraftFallback(message.draftId, sender.tab);
     case "SEARCH_DESTINATIONS":
       return { ok: true, destinations: await findDestinations(message.query || "") };
     case "VALIDATE_DESTINATION":
@@ -547,31 +532,6 @@ async function getOrCreateDraft(message: Extract<RuntimeRequest, { type: "GET_OR
   await chrome.storage.session.remove(legacyKey);
   if (!migrated) throw new Error("Quick Note could not migrate the saved draft.");
   return migrated;
-}
-
-async function getPanelDraft(message: Extract<RuntimeRequest, { type: "GET_PANEL_DRAFT" }>, sender: chrome.runtime.MessageSender): Promise<CaptureDraft> {
-  if (message.draftId) {
-    const requestedDraft = await captureRepository.getDraft(message.draftId);
-    if (!requestedDraft) {
-      const error = new Error("That draft is no longer available.") as Error & { code: string };
-      error.code = "draft_not_found";
-      throw error;
-    }
-    return requestedDraft;
-  }
-  let tab = sender.tab;
-  const requestedTabId = Number(message.tabId);
-  if (Number.isInteger(requestedTabId)) tab = await chrome.tabs.get(requestedTabId).catch(() => tab);
-  if (!tab || tab.url?.startsWith(chrome.runtime.getURL(""))) {
-    const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    tab = activeTab || tab;
-  }
-  const context = panelContextFromTab(tab);
-  return captureRepository.getOrCreateDraft({
-    tabId: tab?.id ?? null,
-    context,
-    includeSource: (await getSettings()).includeSource
-  });
 }
 
 async function deliverRecord(record: CaptureRecord, connection: Extract<BackgroundConnection, { configured: true }>): Promise<RemoteTarget> {
@@ -1164,84 +1124,153 @@ async function disconnectNotion(confirmed: boolean) {
 }
 
 async function openQuickNote(tab: chrome.tabs.Tab | undefined, forcedSelection = "") {
-  const activeTab = tab?.windowId === undefined ? await resolvePanelTab(tab) : tab;
-  if (activeTab?.windowId === undefined) return openComposerTab(null, "compose");
-  const windowId = activeTab.windowId;
-  const panelOpening = chrome.sidePanel.open({ windowId: windowId });
-  let draft: CaptureDraft | null = null;
-  let reusedActiveDraft = false;
-  try {
-    const includeSource = (await getSettings()).includeSource;
-    draft = await preparePanelDraft({
-      connected: panelCoordinator.has(windowId),
-      getActiveDraft: async () => {
-        const activeDraft = await captureRepository.getActiveDraft();
-        reusedActiveDraft = Boolean(activeDraft);
-        return activeDraft;
-      },
-      createDraft: async () => captureRepository.getOrCreateDraft({
-          tabId: activeTab.id ?? null,
-          context: panelContextFromTab(activeTab, forcedSelection),
-          includeSource,
-          sessionId: crypto.randomUUID()
-        })
-    });
-  } catch (error) {
-    console.warn("Quick Note could not prepare the active draft", error);
+  if (tab?.id === undefined || !supportsOverlay(tab.url) || isPdfUrl(tab.url)) {
+    if (tab?.id !== undefined) await markOverlayUnavailable(tab.id, "Quick Note can only open on regular web pages, not browser pages or PDFs.");
+    return { ok: false, surface: "unavailable" };
   }
+  const eligibleTab = tab as chrome.tabs.Tab & { id: number };
+
+  let context: CaptureContext;
   try {
-    await panelOpening;
-    panelCoordinator.navigate(windowId, {
-      type: "SHOW_COMPOSER",
-      ...(draft?.id ? { draftId: draft.id } : {}),
-      ...(activeTab.id === undefined ? {} : { tabId: activeTab.id })
-    });
-    if (shouldPublishExplicitContext(forcedSelection, reusedActiveDraft) && activeTab.id !== undefined) {
-      panelCoordinator.publishContext(windowId, {
-        type: "ACTIVE_PAGE_CONTEXT",
-        tabId: activeTab.id,
-        page: panelContextFromTab(activeTab, forcedSelection)
-      });
-    }
-    return { ok: true, surface: "side_panel" };
+    context = await collectCaptureContext(eligibleTab, forcedSelection);
+    await ensureContentRuntime(eligibleTab.id);
   } catch (error) {
-    console.warn("Quick Note side panel unavailable; opening an extension tab", error);
-    return openComposerTab(draft, "compose");
+    await markOverlayUnavailable(eligibleTab.id, errorMessage(error) || "Quick Note could not open on this page.");
+    return { ok: false, surface: "unavailable" };
+  }
+
+  return enqueueComposerOperation(() => openQuickNoteSurface(eligibleTab, context));
+}
+
+async function openQuickNoteSurface(tab: chrome.tabs.Tab & { id: number }, context: CaptureContext) {
+  const activeSurface = await activeComposerSurface();
+  if (activeSurface?.tabId === tab.id) {
+    const surface = await chrome.tabs.sendMessage(tab.id, { type: "QUICK_NOTE_PING" }).catch(() => null) as { open?: boolean; sessionId?: string } | null;
+    if (surface?.open && surface.sessionId === activeSurface.sessionId) {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "TOGGLE_QUICK_NOTE",
+        page: context,
+        draftId: activeSurface.draftId,
+        tabId: tab.id,
+        sessionId: activeSurface.sessionId
+      });
+      return { ok: true, surface: "overlay" };
+    }
+    await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
+  }
+
+  try {
+    if (activeSurface && activeSurface.tabId !== tab.id) await flushActiveSurface(activeSurface);
+    const previousDraft = activeSurface ? await captureRepository.getDraft(activeSurface.draftId) : null;
+    const resumedContext = previousDraft?.context || activeSurface?.context || context;
+    const sessionId = crypto.randomUUID();
+    const draft = await captureRepository.getOrCreateDraft({
+      tabId: tab.id,
+      context: resumedContext,
+      includeSource: (await getSettings()).includeSource,
+      sessionId,
+      ...(activeSurface ? { draftId: activeSurface.draftId } : {})
+    });
+    await chrome.storage.session.set({ [ACTIVE_SURFACE_KEY]: { tabId: tab.id, draftId: draft.id, sessionId, context: resumedContext } });
+    await chrome.tabs.sendMessage(tab.id, {
+      type: "TOGGLE_QUICK_NOTE",
+      page: resumedContext,
+      draftId: draft.id,
+      tabId: tab.id,
+      sessionId,
+      revision: draft.revision
+    });
+    await clearOverlayUnavailable(tab.id);
+    return { ok: true, surface: "overlay" };
+  } catch (error) {
+    await markOverlayUnavailable(tab.id, errorMessage(error) || "Quick Note could not open on this page.");
+    return { ok: false, surface: "unavailable" };
   }
 }
 
-function panelContextFromTab(tab: chrome.tabs.Tab | null | undefined, selection = ""): CaptureContext {
+interface ActiveComposerSurface {
+  tabId: number;
+  draftId: string;
+  sessionId: string;
+  context?: CaptureContext;
+}
+
+async function activeComposerSurface(): Promise<ActiveComposerSurface | null> {
+  const value: unknown = (await chrome.storage.session.get(ACTIVE_SURFACE_KEY))[ACTIVE_SURFACE_KEY];
+  if (!isRecord(value) || !Number.isInteger(value.tabId) || typeof value.draftId !== "string" || typeof value.sessionId !== "string") return null;
+  return {
+    tabId: Number(value.tabId),
+    draftId: value.draftId,
+    sessionId: value.sessionId,
+    ...(isStoredCaptureContext(value.context) ? { context: value.context } : {})
+  };
+}
+
+function isStoredCaptureContext(value: unknown): value is CaptureContext {
+  return isRecord(value)
+    && value.version === 1
+    && typeof value.title === "string"
+    && typeof value.url === "string"
+    && typeof value.selection === "string"
+    && typeof value.capturedAt === "number"
+    && (value.frameUrl === undefined || typeof value.frameUrl === "string");
+}
+
+async function flushActiveSurface(surface: ActiveComposerSurface): Promise<void> {
+  const runtime = await chrome.tabs.sendMessage(surface.tabId, { type: "QUICK_NOTE_PING" }).catch(() => null) as { open?: boolean; sessionId?: string } | null;
+  if (!runtime?.open || runtime.sessionId !== surface.sessionId) {
+    await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
+    return;
+  }
+  const response = await chrome.tabs.sendMessage(surface.tabId, {
+    type: "FLUSH_AND_CLOSE_QUICK_NOTE",
+    sessionId: surface.sessionId
+  }) as { ok?: boolean; closed?: boolean; error?: string };
+  if (response?.ok !== true || response.closed !== true) throw new Error(response?.error || "Quick Note could not save the active draft before switching tabs.");
+}
+
+async function releaseComposerSurface(sessionId: string, tabId?: number): Promise<{ ok: true }> {
+  const current = await activeComposerSurface();
+  if (current && current.sessionId === sessionId && (tabId === undefined || current.tabId === tabId)) {
+    await chrome.storage.session.remove(ACTIVE_SURFACE_KEY);
+  }
+  return { ok: true };
+}
+
+async function collectCaptureContext(tab: chrome.tabs.Tab, forcedSelection = ""): Promise<CaptureContext> {
+  if (tab.id === undefined) throw new Error("No active page is available for Quick Note.");
+  interface PageProbe { title: string; url: string; frameUrl: string; selection: string; focused: boolean }
+  const frames = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, allFrames: true },
+    func: () => ({
+      title: window.top === window ? document.title : "",
+      url: window.top === window ? location.href : "",
+      frameUrl: location.href,
+      selection: window.getSelection()?.toString().trim() || "",
+      focused: document.hasFocus()
+    })
+  }) as Array<{ frameId: number; result?: PageProbe }>;
+  const top: PageProbe = frames.find((frame) => frame.frameId === 0)?.result || { title: "", url: "", frameUrl: "", selection: "", focused: false };
+  const focused = frames.find((frame) => frame.result?.focused && frame.result?.selection)
+    || frames.find((frame) => frame.result?.selection)
+    || null;
   return validateContext({
-    title: tab?.title || "Current tab",
-    url: tab?.url || "",
-    selection
+    title: top.title || tab.title || "Current tab",
+    url: top.url || tab.url || "",
+    frameUrl: focused?.result?.frameUrl || top.url || tab.url || "",
+    selection: forcedSelection || focused?.result?.selection || top.selection || ""
   });
 }
 
-async function publishActivePage(windowId: number, tabId?: number): Promise<void> {
-  if (!panelCoordinator.has(windowId)) return;
-  const tab = tabId === undefined
-    ? (await chrome.tabs.query({ active: true, windowId }))[0]
-    : await chrome.tabs.get(tabId).catch(() => null);
-  const context = panelContextFromTab(tab);
-  if (!supportsAutomaticContext(context.url) || isPdfUrl(context.url)) return;
-  if (tab?.id === undefined) return;
-  panelCoordinator.publishContext(windowId, { type: "ACTIVE_PAGE_CONTEXT", tabId: tab.id, page: context });
-}
-
-function supportsAutomaticContext(url = ""): boolean {
+function supportsOverlay(url = ""): boolean {
   try {
-    return ["http:", "https:"].includes(new URL(url).protocol);
+    return ["http:", "https:", "file:"].includes(new URL(url).protocol);
   } catch {
     return false;
   }
 }
 
-async function releaseComposerSurface(_sessionId: string, _tabId?: number) {
-  return { ok: true };
-}
-
-function isPdfUrl(url = "") {
+function isPdfUrl(url = ""): boolean {
   try {
     return new URL(url).pathname.toLowerCase().endsWith(".pdf");
   } catch {
@@ -1249,54 +1278,25 @@ function isPdfUrl(url = "") {
   }
 }
 
-type ComposerView = "compose" | "activity";
-
-async function openGlobalPanel(
-  tab: chrome.tabs.Tab | undefined,
-  message: PanelNavigationMessage,
-  draft: CaptureDraft | null,
-  view: ComposerView
-) {
-  const activeTab = tab?.windowId === undefined ? await resolvePanelTab(tab) : tab;
-  if (activeTab?.windowId === undefined) return openComposerTab(draft, view);
-  try {
-    await chrome.sidePanel.open({ windowId: activeTab.windowId });
-    panelCoordinator.navigate(activeTab.windowId, message);
-    return { ok: true, surface: "side_panel" };
-  } catch (error) {
-    console.warn("Quick Note side panel unavailable; opening an extension tab", error);
-    return openComposerTab(draft, view);
-  }
+async function markOverlayUnavailable(tabId: number, detail: string): Promise<void> {
+  await Promise.all([
+    chrome.action.setBadgeText({ tabId, text: "!" }),
+    chrome.action.setBadgeBackgroundColor({ tabId, color: "#b3261e" }),
+    chrome.action.setTitle({ tabId, title: `Quick Note unavailable: ${detail}` }),
+    showUnavailableNotice(tabId, detail)
+  ]);
 }
 
-async function openComposerTab(draft: CaptureDraft | null, view: ComposerView) {
-  await chrome.tabs.create({ url: chrome.runtime.getURL(panelPath({ draftId: draft?.id || "", view })) });
-  return { ok: true, surface: "tab" };
+async function clearOverlayUnavailable(tabId: number): Promise<void> {
+  await Promise.all([
+    chrome.action.setBadgeText({ tabId, text: "" }),
+    chrome.action.setTitle({ tabId, title: "Open Notion Quick Note" })
+  ]);
 }
 
-async function openActivity(tab: chrome.tabs.Tab | undefined) {
-  return openGlobalPanel(tab, { type: "SHOW_ACTIVITY" }, null, "activity");
-}
-
-async function openSavedDraftFallback(draftId: string, tab: chrome.tabs.Tab | undefined) {
-  const draft = await captureRepository.getDraft(String(draftId || ""));
-  return openGlobalPanel(
-    tab,
-    draft ? { type: "SHOW_COMPOSER", draftId: draft.id, ...(draft.tabId === null ? {} : { tabId: draft.tabId }) } : { type: "SHOW_ACTIVITY" },
-    draft || null,
-    draft ? "compose" : "activity"
-  );
-}
-
-async function resolvePanelTab(tab: chrome.tabs.Tab | undefined): Promise<chrome.tabs.Tab | undefined> {
-  if (tab?.windowId !== undefined) return tab;
-  return (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
-}
-
-function panelPath({ draftId = "", view = "compose" }: { draftId?: string; view?: ComposerView } = {}): string {
-  const query = new URLSearchParams({ view });
-  if (draftId) query.set("draft", draftId);
-  return `sidepanel/index.html?${query}`;
+async function openActivity(_tab: chrome.tabs.Tab | undefined) {
+  await chrome.tabs.create({ url: chrome.runtime.getURL("options/options.html#activity") });
+  return { ok: true };
 }
 
 function notionSourceUrl(url: string, includeSource: boolean): string {

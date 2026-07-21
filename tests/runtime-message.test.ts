@@ -118,18 +118,16 @@ const contentResponseCases: Array<{
   { request: { type: "CONVERT_EDIT_TO_NEW_DRAFT", id: "draft" }, valid: { ok: true, draft }, invalid: { ok: true, draft: { ...draft, doc: null } } },
   { request: { type: "ACTIVATE_DRAFT", id: "draft" }, valid: { ok: true, draft }, invalid: { ok: true } },
   { request: { type: "RELEASE_COMPOSER_SURFACE", sessionId: "session" }, valid: { ok: true }, invalid: { ok: "yes" } },
-  { request: { type: "GET_PANEL_DRAFT" }, valid: { ok: true, draft }, invalid: { ok: true, draft: null } },
   { request: { type: "OPEN_CAPTURE_RESULT", id: "capture" }, valid: { ok: true }, invalid: null },
   { request: { type: "OPEN_ACTIVITY" }, valid: { ok: true }, invalid: { ok: false } },
-  { request: { type: "OPEN_COMPOSER_FALLBACK", draftId: "draft" }, valid: { ok: true }, invalid: [] },
   { request: { type: "OPEN_SETTINGS" }, valid: { ok: true }, invalid: { ok: "yes" } }
 ];
 
 test("content runtime response guards validate every correlated content request", () => {
   assert.deepEqual(contentResponseCases.map(({ request }) => request.type).sort(), [
     "ACTIVATE_DRAFT", "CONVERT_EDIT_TO_NEW_DRAFT", "DISCARD_DRAFT", "ENQUEUE_CAPTURE", "GET_CAPTURE_STATUS",
-    "GET_OR_CREATE_DRAFT", "GET_PANEL_DRAFT", "GET_QUICK_SETTINGS", "LIST_RECENT_NOTES", "LOAD_NOTION_PAGE",
-    "LOAD_RECENT_NOTE", "OPEN_ACTIVITY", "OPEN_CAPTURE_RESULT", "OPEN_COMPOSER_FALLBACK", "OPEN_SETTINGS",
+    "GET_OR_CREATE_DRAFT", "GET_QUICK_SETTINGS", "LIST_RECENT_NOTES", "LOAD_NOTION_PAGE",
+    "LOAD_RECENT_NOTE", "OPEN_ACTIVITY", "OPEN_CAPTURE_RESULT", "OPEN_SETTINGS",
     "RELEASE_COMPOSER_SURFACE", "SAVE_CAPTURE", "UPSERT_DRAFT"
   ]);
   for (const { request, valid, invalid } of contentResponseCases) {
@@ -192,7 +190,6 @@ test("runtime request guards reject every missing required payload", () => {
     { label: "delete ID", request: { type: "DELETE_CAPTURE" } },
     { label: "open-result identity", request: { type: "OPEN_CAPTURE_RESULT", id: "" } },
     { label: "recovery format", request: { type: "EXPORT_CAPTURE_RECOVERY" } },
-    { label: "fallback draft", request: { type: "OPEN_COMPOSER_FALLBACK" } },
     { label: "destination", request: { type: "VALIDATE_DESTINATION" } }
   ];
   for (const { label, request } of malformed) assert.equal(isRuntimeRequest(request), false, label);

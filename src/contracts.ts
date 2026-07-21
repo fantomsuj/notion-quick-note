@@ -31,32 +31,6 @@ export interface CaptureContext {
   frameUrl?: string;
 }
 
-export type PanelRegistrationMessage = {
-  type: "REGISTER_PANEL";
-  windowId: number;
-};
-
-export type PanelNavigationMessage =
-  | { type: "SHOW_COMPOSER"; draftId?: string; tabId?: number }
-  | { type: "SHOW_ACTIVITY" };
-
-export type PanelContextMessage = {
-  type: "ACTIVE_PAGE_CONTEXT";
-  tabId: number;
-  page: CaptureContext;
-};
-
-export type PanelToWorkerMessage = PanelRegistrationMessage;
-export type WorkerToPanelMessage = PanelNavigationMessage | PanelContextMessage;
-
-export function isPanelRegistrationMessage(value: unknown): value is PanelRegistrationMessage {
-  return isRecord(value)
-    && value.type === "REGISTER_PANEL"
-    && typeof value.windowId === "number"
-    && Number.isInteger(value.windowId)
-    && value.windowId >= 0;
-}
-
 export interface CaptureSource {
   title: string;
   url: string;
@@ -441,11 +415,9 @@ export type RuntimeRequest =
   | { type: "LOAD_NOTION_PAGE"; pageId: string; title?: string; url?: string; tabId?: number; sessionId?: string; reloadLatest?: boolean }
   | { type: "ACTIVATE_DRAFT"; id: string; returnDraftId?: string; sessionId?: string }
   | { type: "RELEASE_COMPOSER_SURFACE"; sessionId: string }
-  | { type: "GET_PANEL_DRAFT"; draftId?: string; tabId?: number; sessionId?: string }
   | { type: "RETRY_CAPTURE" | "RETARGET_CAPTURE"; id: string; force?: boolean }
   | { type: "MARK_CAPTURE_DELIVERED"; id: string; remote: RemoteTarget }
   | { type: "EXPORT_CAPTURE_RECOVERY"; format: "json" | "markdown" }
-  | { type: "OPEN_COMPOSER_FALLBACK"; draftId: string }
   | { type: "SEARCH_DESTINATIONS"; query?: string }
   | { type: "VALIDATE_DESTINATION"; destination: Destination }
   | { type: "DISCONNECT_NOTION"; confirmed?: boolean };
@@ -485,7 +457,6 @@ export interface RuntimeResponseMap {
   CONVERT_EDIT_TO_NEW_DRAFT: SuccessResponse<{ draft: CaptureDraft }>;
   ACTIVATE_DRAFT: SuccessResponse<{ draft: CaptureDraft }>;
   RELEASE_COMPOSER_SURFACE: SuccessResponse;
-  GET_PANEL_DRAFT: SuccessResponse<{ draft: CaptureDraft }>;
   RETRY_CAPTURE: SuccessResponse<{ record: CaptureRecord }>;
   RETARGET_CAPTURE: SuccessResponse<{ record: CaptureRecord }>;
   MARK_CAPTURE_DELIVERED: SuccessResponse<{ record: CaptureRecord }>;
@@ -495,7 +466,6 @@ export interface RuntimeResponseMap {
   EXPORT_CAPTURE_RECOVERY: SuccessResponse<{ export: RecoveryFile }>;
   OPEN_CAPTURE_RESULT: SuccessResponse;
   OPEN_ACTIVITY: SuccessResponse;
-  OPEN_COMPOSER_FALLBACK: SuccessResponse;
   SEARCH_DESTINATIONS: SuccessResponse<{ destinations: Destination[] }>;
   VALIDATE_DESTINATION: SuccessResponse<{ ready: true }>;
   ENSURE_DEFAULT_DATABASE: SuccessResponse<{ destination: Destination; outcome: string }>;
@@ -510,9 +480,9 @@ export type RuntimeResponse<T extends RuntimeRequest> = RuntimeResponseMap[T["ty
 const MESSAGE_TYPE_VALUES = [
   "GET_QUICK_SETTINGS", "GET_OR_CREATE_DRAFT", "UPSERT_DRAFT", "DISCARD_DRAFT", "ENQUEUE_CAPTURE", "SAVE_CAPTURE",
   "GET_CAPTURE_STATUS", "LIST_CAPTURE_ACTIVITY", "LIST_RECENT_NOTES", "LOAD_RECENT_NOTE", "LOAD_NOTION_PAGE", "CONVERT_EDIT_TO_NEW_DRAFT",
-  "ACTIVATE_DRAFT", "RELEASE_COMPOSER_SURFACE", "GET_PANEL_DRAFT", "RETRY_CAPTURE", "RETARGET_CAPTURE",
+  "ACTIVATE_DRAFT", "RELEASE_COMPOSER_SURFACE", "RETRY_CAPTURE", "RETARGET_CAPTURE",
   "MARK_CAPTURE_DELIVERED", "DELETE_CAPTURE", "DELETE_DELIVERED_HISTORY", "GET_STORAGE_DIAGNOSTICS",
-  "EXPORT_CAPTURE_RECOVERY", "OPEN_CAPTURE_RESULT", "OPEN_ACTIVITY", "OPEN_COMPOSER_FALLBACK", "SEARCH_DESTINATIONS",
+  "EXPORT_CAPTURE_RECOVERY", "OPEN_CAPTURE_RESULT", "OPEN_ACTIVITY", "SEARCH_DESTINATIONS",
   "VALIDATE_DESTINATION", "ENSURE_DEFAULT_DATABASE", "GET_PENDING_COUNT", "DISCONNECT_NOTION", "VALIDATE_CONNECTION", "OPEN_SETTINGS"
 ] as const satisfies readonly RuntimeRequest["type"][];
 
@@ -561,14 +531,10 @@ export function isRuntimeRequest(value: unknown): value is RuntimeRequest {
       return isNonEmptyString(value.id) && isRemoteTarget(value.remote);
     case "RELEASE_COMPOSER_SURFACE":
       return isNonEmptyString(value.sessionId);
-    case "GET_PANEL_DRAFT":
-      return isOptionalString(value.draftId) && isOptionalInteger(value.tabId) && isOptionalString(value.sessionId);
     case "GET_CAPTURE_STATUS":
       return isOptionalString(value.id) && isOptionalString(value.draftId) && Boolean(value.id || value.draftId);
     case "LIST_RECENT_NOTES":
       return isOptionalString(value.query) && isOptionalInteger(value.limit);
-    case "OPEN_COMPOSER_FALLBACK":
-      return isNonEmptyString(value.draftId);
     case "SEARCH_DESTINATIONS":
       return isOptionalString(value.query);
     case "DISCONNECT_NOTION":
@@ -599,7 +565,6 @@ export function isRuntimeResponse<T extends RuntimeRequest>(request: T, value: u
     case "GET_OR_CREATE_DRAFT":
     case "CONVERT_EDIT_TO_NEW_DRAFT":
     case "ACTIVATE_DRAFT":
-    case "GET_PANEL_DRAFT":
       return isCompleteCaptureDraft(value.draft);
     case "UPSERT_DRAFT":
       return (value.draft === null || isCompleteCaptureDraft(value.draft)) && typeof value.discarded === "boolean";
@@ -622,7 +587,6 @@ export function isRuntimeResponse<T extends RuntimeRequest>(request: T, value: u
     case "RELEASE_COMPOSER_SURFACE":
     case "OPEN_CAPTURE_RESULT":
     case "OPEN_ACTIVITY":
-    case "OPEN_COMPOSER_FALLBACK":
     case "DISCONNECT_NOTION":
     case "OPEN_SETTINGS":
       return true;

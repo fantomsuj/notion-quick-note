@@ -405,7 +405,6 @@ function currentEditor(editor: Editor | undefined): Editor {
       scheduleDraft(current);
       return;
     }
-    emitTerminal(current, "discarded");
     disposePopup(current);
   };
   const runtime = { protocol: PROTOCOL, dispose };
@@ -497,6 +496,16 @@ function currentEditor(editor: Editor | undefined): Editor {
     };
     instances.add(instance);
     popup = instance;
+    const stylesheet = root.querySelector("link[rel=stylesheet]");
+    const sheet = root.querySelector(".sheet");
+    const revealComposerSheet = () => {
+      sheet.style.removeProperty("display");
+      requestAnimationFrame(() => {
+        if (popup === instance && !instance.closed) sheet.classList.add("visible");
+      });
+    };
+    stylesheet.addEventListener("load", revealComposerSheet, { once: true });
+    if (stylesheet.sheet) revealComposerSheet();
 
     dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
@@ -514,14 +523,6 @@ function currentEditor(editor: Editor | undefined): Editor {
 
     instance.onFullscreenChange = () => promoteAfterFullscreenChange(instance);
     document.addEventListener("fullscreenchange", instance.onFullscreenChange);
-    const stylesheet = root.querySelector("link[rel=stylesheet]");
-    stylesheet.addEventListener("load", () => {
-      const sheet = root.querySelector(".sheet");
-      sheet.style.removeProperty("display");
-      requestAnimationFrame(() => {
-        if (popup === instance && !instance.closed) sheet.classList.add("visible");
-      });
-    }, { once: true });
     stylesheet.addEventListener("error", () => fallbackFromOverlay(instance), { once: true });
     instance.removalObserver = new MutationObserver(() => recoverRemovedOverlay(instance));
     instance.removalObserver.observe(document, { childList: true, subtree: true });
@@ -588,10 +589,10 @@ function currentEditor(editor: Editor | undefined): Editor {
 
   function fallbackFromOverlay(instance: PopupInstance): void {
     if (instance.closed) return;
+    instance.handoff = true;
     void persistDraft(instance)
       .catch(() => undefined)
-      .finally(() => sendRuntimeMessage({ type: "OPEN_COMPOSER_FALLBACK", draftId: instance.draftId }, instance));
-    close(instance, true);
+      .finally(() => close(instance, true));
   }
 
   function close(instance: PopupInstance | undefined = popup, force = false): void {
@@ -652,14 +653,6 @@ function currentEditor(editor: Editor | undefined): Editor {
     instance.aiController = null;
     for (const timer of instance.timers) clearTimeout(timer);
     instance.timers.clear();
-  }
-
-  function emitTerminal(instance: PopupInstance, reason: "saved" | "discarded"): void {
-    try {
-      window.__notionQuickNoteOnTerminal?.({ draftId: instance.draftId, reason });
-    } catch {
-      // Panel cache notifications must never interrupt durable save or discard completion.
-    }
   }
 
   function reportAsyncFailure(instance: PopupInstance, error: unknown, fallback: string): void {
@@ -1040,9 +1033,7 @@ function currentEditor(editor: Editor | undefined): Editor {
       if (!response.discarded) throw new Error("Couldn’t discard this draft.");
       discarded = true;
     } catch (error) {
-      const check = await sendRuntimeMessage({ type: "GET_PANEL_DRAFT", draftId }, instance).catch(() => null);
-      discarded = check?.ok === false && check.code === "draft_not_found";
-      if (!discarded) throw error;
+      throw error;
     } finally {
       finishDiscard(draftId, discarded);
       if (!discarded && !instance.closed && !instance.contextLost) setStatus(root, "Draft preserved");
@@ -1945,7 +1936,6 @@ function currentEditor(editor: Editor | undefined): Editor {
     if (response?.ok && response.accepted) {
       if (popup !== instance || instance.closed) return;
       instance.accepted = true;
-      emitTerminal(instance, "saved");
       instance.captureId = response.record?.id || "";
       applyDeliveryRecord(root, instance, response.record);
       if (response.record?.status !== "delivered") pollCaptureStatus(root, instance);

@@ -8,15 +8,14 @@ Make capturing a thought into Notion take one gesture, focus immediately, requir
 
 | Decision | MVP choice | Reason |
 |---|---|---|
-| Surface | Window-scoped Chrome side panel | Remains usable while the user switches tabs after one invocation |
-| Alternate surface | Extension tab | Keeps capture available if Chrome cannot open the side panel |
+| Surface | Page-injected composer | Opens in the active eligible page only after an explicit user gesture |
 | Default destination | Recover or create a private Quick Notes database | Delivers a working, searchable capture destination without asking users for IDs or duplicating it after an uncertain request |
 | Structured mode | Create a database item | Better organization and search for users who want it |
 | Local testing auth | Personal access token | Lets one developer test immediately |
 | Public auth | Notion OAuth through a broker | Keeps the mandatory client secret out of extension code |
-| Permissions | `tabs` plus Notion API | Reads active-page title and URL while the panel is open without reading page bodies |
+| Permissions | `activeTab`, `scripting`, plus Notion API | Injects the composer and reads title/URL at invocation time without reading page bodies |
 | Keyboard shortcut | Browser-scoped `Command+Shift+Space` on macOS; `Ctrl+Shift+Space` elsewhere | Uses Chrome's reliable action command, remains customizable through Settings and `chrome://extensions/shortcuts`, and works only while the browser is active |
-| Draft ownership | One active regular-profile draft | A thought and its visible sources follow the persistent panel across tabs |
+| Draft ownership | One active regular-profile draft | A new invocation safely flushes and resumes the draft in the selected tab without changing its original source context |
 | Recent editing | Local drafts first, then five latest saved notes, plus recent Notion pages the integration can see | Makes returning to prior work immediate while still letting users pull in Notion-originating docs |
 | Capture persistence | One IndexedDB row per regular draft/capture; one session key per Incognito record | Keeps autosaves proportional to the note being edited and preserves atomic draft-to-queue transitions |
 | Recovery | Notes diagnostics plus JSON and Markdown export | Makes local storage health visible and gives users a credential-free escape hatch |
@@ -35,10 +34,10 @@ Flylighter's differentiation is not just clipping. Its flows, formatted highligh
 ## Experience principles
 
 1. **Thought first.** The cursor lands in an empty composer immediately.
-2. **Context is optional and visible.** Each active webpage is attached by default while the panel is open, but can be removed with one click and stays dismissed for that draft.
+2. **Context is explicit and visible.** The invoking page's title, URL, and focused-frame selection are captured once, at invocation time; a context-menu selection overrides the focused-frame selection.
 3. **No modal labyrinth.** Destination configuration lives in settings, never in the capture loop.
 4. **Quiet confidence.** Routine local autosaves stay invisible. “Saved to Notion” means confirmed remote delivery; local drafts, acceptance, and background retries remain clearly labeled in Notes.
-5. **Permission proportionality.** Track only the active tab's title and URL while the user keeps Quick Note open; never read page bodies automatically.
+5. **Permission proportionality.** Read only the invoking page's title and URL after the user opens Quick Note; never read page bodies automatically.
 6. **Preserve before mutation.** Remote edits stop on fingerprint conflicts, keep unsupported blocks locked in place, and journal every replacement step locally.
 7. **AI is optional and reviewable.** Prompt features run only after an explicit gesture, degrade away when unsupported or disabled, and keep output separate until the user applies it.
 

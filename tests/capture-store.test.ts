@@ -16,7 +16,6 @@ import {
   pruneCaptureState,
   recoverInterruptedRecords
 } from "../src/capture-store.js";
-import { routeShowComposer } from "../src/panel-lifecycle.js";
 import type { CaptureDraft, CaptureRecord, KeyValueStoragePort } from "../src/contracts.js";
 
 function must<T>(value: T | null | undefined, label: string): T {
@@ -139,69 +138,6 @@ test("one active draft follows explicit invocations across tabs and enqueue atom
   });
   assert.equal(repeated.id, record.id);
   assert.equal(Object.keys((await repository.load()).captures).length, 1);
-});
-
-test("an explicit panel target activates only after its mounted editor switch succeeds", async () => {
-  const repository = createCaptureRepository({ storage: memoryStorage(), now: () => 100 });
-  const active = await repository.getOrCreateDraft({
-    context: { selection: "Keep the old active draft" },
-    draftId: "old-active"
-  });
-  const target = must(await repository.upsertDraft({
-    ...active,
-    id: "target",
-    sessionId: "target-session",
-    revision: 0,
-    doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Target body" }] }] }
-  }, 0), "target draft");
-  assert.equal((await repository.load()).activeDraftId, active.id);
-  let mountedDraftId = active.id;
-
-  await assert.rejects(routeShowComposer({
-    activeDraft: active,
-    message: { type: "SHOW_COMPOSER", draftId: target.id },
-    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
-    async openDraft() { throw new Error("mounted editor refused the switch"); },
-    activateDraft: async (draft) => must(await repository.activateDraft(draft.id), "activated draft")
-  }), /mounted editor refused the switch/);
-  assert.equal((await repository.load()).activeDraftId, active.id);
-  assert.equal(mountedDraftId, active.id);
-
-  await assert.rejects(routeShowComposer({
-    activeDraft: active,
-    message: { type: "SHOW_COMPOSER", draftId: target.id },
-    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
-    async openDraft(draft) { mountedDraftId = draft.id; },
-    async activateDraft() { throw new Error("activation failed"); },
-    async restoreDraft(draft) { mountedDraftId = draft.id; }
-  }), /activation failed/);
-  assert.equal((await repository.load()).activeDraftId, active.id);
-  assert.equal(mountedDraftId, active.id);
-
-  await assert.rejects(routeShowComposer({
-    activeDraft: must(await repository.getDraft(active.id), "active draft"),
-    message: { type: "SHOW_COMPOSER", draftId: target.id },
-    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
-    async openDraft(draft) { mountedDraftId = draft.id; },
-    activateDraft: async (draft) => must(await repository.activateDraft(draft.id), "activated draft"),
-    async syncDraft() { throw new Error("identity sync failed"); },
-    async restoreDraft(draft) { mountedDraftId = draft.id; }
-  }), /identity sync failed/);
-  assert.equal((await repository.load()).activeDraftId, active.id);
-  assert.equal(mountedDraftId, active.id);
-
-  const opened = await routeShowComposer({
-    activeDraft: must(await repository.getDraft(active.id), "active draft"),
-    message: { type: "SHOW_COMPOSER", draftId: target.id },
-    loadDraft: async () => must(await repository.getDraft(target.id), "target draft"),
-    async openDraft(draft) { mountedDraftId = draft.id; },
-    activateDraft: async (draft) => must(await repository.activateDraft(draft.id), "activated draft"),
-    async syncDraft(draft) { mountedDraftId = draft.id; },
-    async restoreDraft(draft) { mountedDraftId = draft.id; }
-  });
-  assert.equal(opened.id, target.id);
-  assert.equal((await repository.load()).activeDraftId, target.id);
-  assert.equal(mountedDraftId, target.id);
 });
 
 test("blank and title-only composers stay transient until their body contains text", async () => {

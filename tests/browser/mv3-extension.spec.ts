@@ -71,10 +71,9 @@ test("real MV3 worker durably recovers a queued capture after termination and pr
     const worker = await serviceWorker(context);
     const extensionId = new URL(worker.url()).host;
     const page = await openActivityPage(context, extensionId);
-    await expect(page.locator(".data-practices summary")).toHaveText("How your captures are handled");
-    await page.locator(".data-practices summary").click();
-    await expect(page.locator(".data-practices")).toContainText("until delivery succeeds or you delete them");
-    await expect(page.locator(".data-practices")).toContainText("selected Notion workspace");
+    await expect(page.locator("#activity")).toHaveAttribute("open", "");
+    await expect(page.locator("#activity")).toBeFocused();
+    await expect(page.locator("#activity")).toContainText("Activity & Recovery");
 
     const captureContext: CaptureContext = { version: 1, title: "MV3 recovery test", url: "https://example.test/source", selection: "", capturedAt: Date.now() };
     const draftResponse = await sendRuntimeRequestFromPage(page, {
@@ -93,9 +92,7 @@ test("real MV3 worker durably recovers a queued capture after termination and pr
       }
     });
     if (!storedDraft.ok) throw new Error(storedDraft.error);
-    await expect(page.locator(".drafts-group")).toContainText("Durable thought");
-    await expect(page.locator(".drafts-group")).toContainText("Saved locally");
-    await expect(page.locator(".note-count")).toHaveText("1");
+    await expect(page.locator("#queue-list")).toContainText("Everything is delivered");
     const accepted = await sendRuntimeRequestFromPage(page, {
       type: "ENQUEUE_CAPTURE",
       draftId: draft.id,
@@ -116,6 +113,8 @@ test("real MV3 worker durably recovers a queued capture after termination and pr
     });
     if (!reconciledByDraft.ok || !reconciledByDraft.record) throw new Error("Queued capture was not found by draft ID.");
     expect(reconciledByDraft.record.id).toBe(queuedId);
+    await expect(page.locator("#queue-list")).toContainText("Durable thought");
+    await expect(page.locator("#queue-list")).toContainText("Connect required");
 
     const [statusBeforeRestart, diagnosticsBeforeRestart] = await Promise.all([
       sendRuntimeRequestFromPage(page, { type: "GET_CAPTURE_STATUS", id: queuedId }),
@@ -128,10 +127,10 @@ test("real MV3 worker durably recovers a queued capture after termination and pr
     expect(persistedBeforeRestart).toEqual({ status: "blocked_setup", backend: "indexeddb" });
 
     await page.locator(".storage-recovery summary").click();
-    await expect(page.locator(".storage-health")).toContainText("indexeddb");
-    await expect(page.locator(".origin-bytes")).not.toBeEmpty();
-    await expect(page.locator(".persistence-state")).not.toBeEmpty();
-    await expect(page.locator(".maintenance-time")).not.toBeEmpty();
+    await expect(page.locator("#storage-health")).toContainText("indexeddb");
+    await expect(page.locator("#origin-bytes")).not.toBeEmpty();
+    await expect(page.locator("#persistence-state")).not.toBeEmpty();
+    await expect(page.locator("#maintenance-time")).not.toBeEmpty();
     const jsonDownload = page.waitForEvent("download");
     await page.locator('[data-export="json"]').click();
     await expect((await jsonDownload).suggestedFilename()).toMatch(/\.json$/);
@@ -463,107 +462,6 @@ for (const scenario of [
   });
 }
 
-test("blank drafts stay transient and adaptive previews disclose only as much body as each surface needs", async () => {
-  test.setTimeout(60_000);
-  const profile = await mkdtemp(path.join(tmpdir(), "notion-quick-note-previews-"));
-  let context: BrowserContext | undefined;
-  try {
-    context = await launchExtension(profile);
-    const worker = await serviceWorker(context);
-    const extensionId = new URL(worker.url()).host;
-    const page = await openActivityPage(context, extensionId);
-    const captureContext: CaptureContext = { version: 1, title: "Preview source", url: "https://example.test/preview", selection: "", capturedAt: Date.now() };
-    const draftResponse = await sendRuntimeRequestFromPage(page, {
-      type: "GET_OR_CREATE_DRAFT",
-      draftId: "preview-draft",
-      tabId: 92,
-      context: captureContext
-    });
-    if (!draftResponse.ok) throw new Error(draftResponse.error);
-    const draft = draftResponse.draft;
-
-    const transientActivity = await sendRuntimeRequestFromPage(page, { type: "LIST_CAPTURE_ACTIVITY" });
-    if (!transientActivity.ok) throw new Error(transientActivity.error);
-    expect(transientActivity.drafts).toHaveLength(0);
-    await expect(page.locator(".draft-list")).toContainText("No local drafts");
-    await expect(page.locator(".note-count")).toBeHidden();
-
-    const titleOnly = await sendRuntimeRequestFromPage(page, {
-      type: "UPSERT_DRAFT",
-      expectedRevision: draft.revision,
-      draft: { ...draft, title: "Title without body" }
-    });
-    expect(titleOnly).toMatchObject({ ok: true, draft: null, discarded: true });
-
-    const paragraphs = Array.from({ length: 9 }, (_, index) => index === 8
-      ? "Final paragraph marker confirms the complete draft is available after expansion."
-      : `Paragraph ${index + 1} contains enough thoughtful note content to make the collapsed preview useful without crowding the Notes view.`);
-    const doc: EditorNode = {
-      type: "doc",
-      content: paragraphs.map((text) => ({ type: "paragraph", content: [{ type: "text", text }] }))
-    };
-    const stored = await sendRuntimeRequestFromPage(page, {
-      type: "UPSERT_DRAFT",
-      expectedRevision: 0,
-      draft: { ...draft, title: "Expandable draft", doc }
-    });
-    expect(stored.ok).toBe(true);
-
-    const draftCard = page.locator(".draft-list .card");
-    await expect(draftCard.locator(".card-title")).toHaveText("Expandable draft");
-    await expect(draftCard.locator(".card-preview")).toContainText("Paragraph 1");
-    await expect(draftCard.locator(".card-preview-toggle")).toBeVisible();
-    await expect(draftCard.locator(".card-preview-toggle")).toHaveAttribute("aria-expanded", "false");
-    await draftCard.locator(".card-preview-toggle").click();
-    await expect(draftCard.locator(".card-preview-toggle")).toHaveAttribute("aria-expanded", "true");
-    await expect(draftCard.locator(".card-preview")).toContainText("Final paragraph marker");
-
-    const accepted = await sendRuntimeRequestFromPage(page, {
-      type: "ENQUEUE_CAPTURE",
-      draftId: draft.id,
-      context: captureContext,
-      capture: {
-        document: { version: 1, title: "Expandable draft", doc },
-        pageTitle: captureContext.title,
-        url: captureContext.url,
-        includeSource: true
-      }
-    });
-    expect(accepted.ok).toBe(true);
-    const queuePreview = page.locator(".queue-list .card-preview");
-    await expect(queuePreview).toContainText("Paragraph 1");
-    expect(await queuePreview.evaluate((element: HTMLElement) => Array.from(element.textContent ?? "").length)).toBeLessThanOrEqual(181);
-    await expect(page.locator(".queue-list .card-preview-toggle")).toHaveCount(0);
-
-    const untitled = await sendRuntimeRequestFromPage(page, {
-      type: "GET_OR_CREATE_DRAFT",
-      draftId: "untitled-draft",
-      tabId: 92,
-      context: captureContext
-    });
-    if (!untitled.ok) throw new Error(untitled.error);
-    const untitledDoc: EditorNode = {
-      type: "doc",
-      content: [
-        { type: "paragraph", content: [{ type: "text", text: "Heading borrowed from the body" }] },
-        { type: "paragraph", content: [{ type: "text", text: "Only this second paragraph belongs in the excerpt." }] }
-      ]
-    };
-    const storedUntitled = await sendRuntimeRequestFromPage(page, {
-      type: "UPSERT_DRAFT",
-      expectedRevision: 0,
-      draft: { ...untitled.draft, title: "", doc: untitledDoc }
-    });
-    if (!storedUntitled.ok) throw new Error(storedUntitled.error);
-    const untitledCard = page.locator(".draft-list .card");
-    await expect(untitledCard.locator(".card-title")).toHaveText("Heading borrowed from the body");
-    await expect(untitledCard.locator(".card-preview")).toHaveText("Only this second paragraph belongs in the excerpt.");
-  } finally {
-    await context?.close().catch(() => undefined);
-    await rm(profile, { recursive: true, force: true });
-  }
-});
-
 function launchExtension(userDataDir: string, extensionRoot = repoRoot): Promise<BrowserContext> {
   return chromium.launchPersistentContext(userDataDir, {
     channel: "chromium",
@@ -608,7 +506,7 @@ async function openActivityPage(context: BrowserContext, extensionId: string): P
   // page used by the durability assertions.
   await new Promise((resolve) => setTimeout(resolve, 300));
   const page = await context.newPage();
-  await page.goto(`chrome-extension://${extensionId}/sidepanel/index.html?view=activity`);
+  await page.goto(`chrome-extension://${extensionId}/options/options.html#activity`);
   return page;
 }
 

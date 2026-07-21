@@ -17,7 +17,7 @@ import {
   createShortcutSettingsController,
   type ShortcutSettingsState
 } from "../src/shortcut-settings.js";
-import type { Destination, FailureResponse, RuntimeRequest, RuntimeResponse, Settings } from "../src/contracts.js";
+import type { CaptureRecord, DeliveryState, Destination, EditorNode, FailureResponse, RuntimeRequest, RuntimeResponse, Settings } from "../src/contracts.js";
 import { sendRuntimeRequest } from "../src/runtime-message.js";
 
 interface OptionsElements {
@@ -32,8 +32,9 @@ interface OptionsElements {
   "#manual-destination-name": HTMLInputElement;
   "#manual-title-property": HTMLInputElement;
   "#destination-search": HTMLInputElement;
-  "#advanced-setup": HTMLDetailsElement;
+  "#oauth-test-setup": HTMLDetailsElement;
   "#oauth-connect": HTMLButtonElement;
+  "#oauth-connect-local": HTMLButtonElement;
   "#save-developer-config": HTMLButtonElement;
   "#use-token": HTMLButtonElement;
   "#reveal-token": HTMLButtonElement;
@@ -48,6 +49,26 @@ interface OptionsElements {
   "#open-destination": HTMLButtonElement;
   "#refresh-permissions": HTMLButtonElement;
   "#change-shortcut": HTMLButtonElement;
+  "#activity": HTMLDetailsElement;
+  "#activity-status": HTMLElement;
+  "#activity-content": HTMLElement;
+  "#activity-incognito-note": HTMLElement;
+  "#queue-count": HTMLElement;
+  "#queue-list": HTMLElement;
+  "#delivered-group": HTMLElement;
+  "#delivered-list": HTMLElement;
+  "#clear-delivered-history": HTMLButtonElement;
+  "#storage-recovery": HTMLDetailsElement;
+  "#diagnostics-status": HTMLElement;
+  "#diagnostics-grid": HTMLElement;
+  "#capture-bytes": HTMLElement;
+  "#chrome-bytes": HTMLElement;
+  "#origin-bytes": HTMLElement;
+  "#record-counts": HTMLElement;
+  "#storage-health": HTMLElement;
+  "#persistence-state": HTMLElement;
+  "#maintenance-time": HTMLElement;
+  "#diagnostics-note": HTMLElement;
 }
 
 function $<S extends keyof OptionsElements>(selector: S): OptionsElements[S];
@@ -64,6 +85,7 @@ let searchSequence = 0;
 type ProvisioningOutcome = "created" | "reused" | "migrated" | "existing";
 let lastProvisioningOutcome: ProvisioningOutcome = "existing";
 let flashTimer: ReturnType<typeof setTimeout> | undefined;
+let activityRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
 setupShortcutSettings();
 init();
@@ -114,9 +136,12 @@ async function init(): Promise<void> {
   settings = normalizeSettings(await chrome.storage.local.get(DEFAULT_SETTINGS));
   const reconnectRequired = migration.requiresReconnect
     || Boolean((await chrome.storage.local.get("oauthReconnectRequired")).oauthReconnectRequired);
-  $("#advanced-setup").hidden = hasBundledOAuthConfig(PRODUCT_CONFIG);
+  $("#personal-token-setup").hidden = hasBundledOAuthConfig(PRODUCT_CONFIG);
+  $("#oauth-bundled-setup").hidden = !hasBundledOAuthConfig(PRODUCT_CONFIG);
+  $("#oauth-test-setup").hidden = hasBundledOAuthConfig(PRODUCT_CONFIG);
   hydrateForm();
   bindEvents();
+  setupActivityRecovery();
   setConnectionState(Boolean(settings.token));
 
   if (!settings.token) {
@@ -154,6 +179,7 @@ function hydrateForm(): void {
 
 function bindEvents(): void {
   $("#oauth-connect").addEventListener("click", () => connectOAuth($("#oauth-connect")));
+  $("#oauth-connect-local").addEventListener("click", () => connectOAuth($("#oauth-connect-local")));
   $("#save-developer-config").addEventListener("click", saveDeveloperConfig);
   $("#use-token").addEventListener("click", connectWithToken);
   $("#reveal-token").addEventListener("click", toggleToken);
@@ -206,6 +232,276 @@ function bindEvents(): void {
   $("#refresh-permissions").addEventListener("click", () => connectOAuth($("#refresh-permissions")));
 }
 
+function setupActivityRecovery(): void {
+  $("#clear-delivered-history").addEventListener("click", clearDeliveredHistory);
+  $("#storage-recovery").addEventListener("toggle", () => {
+    if ($("#storage-recovery").open) void loadDiagnostics();
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-export]").forEach((button) => {
+    button.addEventListener("click", () => exportRecovery(button.dataset.export === "markdown" ? "markdown" : "json"));
+  });
+  chrome.storage.onChanged?.addListener(scheduleActivityRefresh);
+  chrome.runtime.onMessage?.addListener((message: unknown) => {
+    if (message && typeof message === "object" && "type" in message && message.type === "CAPTURE_ACTIVITY_CHANGED") {
+      scheduleActivityRefresh();
+    }
+  });
+  window.addEventListener("hashchange", openActivityFromHash);
+  void loadActivity();
+  openActivityFromHash();
+}
+
+function openActivityFromHash(): void {
+  if (location.hash !== "#activity") return;
+  const section = $("#activity");
+  section.open = true;
+  requestAnimationFrame(() => {
+    section.focus({ preventScroll: true });
+    section.scrollIntoView({ block: "start" });
+  });
+  void loadActivity();
+}
+
+function scheduleActivityRefresh(): void {
+  clearTimeout(activityRefreshTimer);
+  activityRefreshTimer = setTimeout(() => {
+    activityRefreshTimer = undefined;
+    void loadActivity();
+    if ($("#storage-recovery").open) void loadDiagnostics();
+  }, 120);
+}
+
+async function loadActivity(): Promise<void> {
+  const status = $("#activity-status");
+  const content = $("#activity-content");
+  status.hidden = false;
+  status.textContent = "Loading delivery activity…";
+  const response = await send({ type: "LIST_CAPTURE_ACTIVITY" });
+  if (!response.ok) {
+    content.hidden = true;
+    status.textContent = response.error || "Couldn’t load local delivery activity.";
+    return;
+  }
+  status.hidden = true;
+  content.hidden = false;
+  $("#activity-incognito-note").hidden = !response.incognito;
+  $("#queue-count").textContent = String(response.queued.length);
+  document.querySelector<HTMLElement>(".activity-summary-count")!.textContent = response.queued.length
+    ? `${response.queued.length} waiting`
+    : "All delivered";
+  renderActivityList($("#queue-list"), response.queued, "Everything is delivered");
+  $("#delivered-group").hidden = !response.delivered.length;
+  renderActivityList($("#delivered-list"), response.delivered, "No recent deliveries");
+}
+
+function renderActivityList(container: HTMLElement, records: CaptureRecord[], emptyText: string): void {
+  container.replaceChildren();
+  if (!records.length) {
+    const empty = document.createElement("p");
+    empty.className = "activity-empty";
+    empty.textContent = emptyText;
+    container.append(empty);
+    return;
+  }
+  container.append(...records.map(renderActivityCard));
+}
+
+function renderActivityCard(record: CaptureRecord): HTMLElement {
+  const capture = record.pendingCapture || record.syncedCapture || record.capture;
+  const card = document.createElement("article");
+  card.className = "activity-card";
+  const heading = document.createElement("h3");
+  heading.textContent = capture.document.title || documentPreview(capture.document.doc) || "Untitled note";
+  const metadata = document.createElement("p");
+  metadata.className = "activity-card-meta";
+  metadata.textContent = `${deliveryStateLabel(record.status)} · ${record.destination?.destinationName || "Waiting for setup"} · ${relativeTime(record.updatedAt)}`;
+  card.append(heading, metadata);
+  const preview = documentPreview(capture.document.doc);
+  if (preview) {
+    const excerpt = document.createElement("p");
+    excerpt.className = "activity-card-preview";
+    excerpt.textContent = preview;
+    card.append(excerpt);
+  }
+  if (record.lastError?.message) {
+    const error = document.createElement("p");
+    error.className = "activity-card-error";
+    error.textContent = record.lastError.message;
+    card.append(error);
+  }
+  const actions = document.createElement("div");
+  actions.className = "activity-card-actions";
+  addCaptureActions(actions, record);
+  if (actions.childElementCount) card.append(actions);
+  return card;
+}
+
+function addCaptureActions(actions: HTMLElement, record: CaptureRecord): void {
+  const addAction = (label: string, handler: () => Promise<void>) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", () => void handler());
+    actions.append(button);
+  };
+  if (record.status === "delivered") {
+    addAction("Open in Notion", () => runActivityAction({ type: "OPEN_CAPTURE_RESULT", id: record.id }));
+    addAction("Delete local history", () => runActivityAction({ type: "DELETE_CAPTURE", id: record.id }));
+    return;
+  }
+  if (["blocked_destination", "blocked_auth"].includes(record.status)) {
+    addAction("Retarget", () => runActivityAction({ type: "RETARGET_CAPTURE", id: record.id }));
+  }
+  if (record.status === "blocked_conflict") {
+    if (record.remote?.url) addAction("Open in Notion", () => runActivityAction({ type: "OPEN_CAPTURE_RESULT", id: record.id }));
+    addAction("Prepare local edit", () => prepareConflictReview(record.id));
+    return;
+  }
+  if (record.status === "uncertain") {
+    const remote = record.remote;
+    if (remote) addAction("Mark delivered", () => runActivityAction({ type: "MARK_CAPTURE_DELIVERED", id: record.id, remote }));
+    addAction("Retry anyway", async () => {
+      if (!confirm("Notion may already contain this capture. Retry anyway and accept the duplicate risk?")) return;
+      await runActivityAction({ type: "RETRY_CAPTURE", id: record.id, force: true });
+    });
+    return;
+  }
+  if (record.status !== "blocked_setup") {
+    addAction("Retry", () => runActivityAction({ type: "RETRY_CAPTURE", id: record.id }));
+  }
+}
+
+async function prepareConflictReview(id: string): Promise<void> {
+  const response = await send({ type: "LOAD_RECENT_NOTE", id });
+  if (!response.ok) {
+    flash(response.error || "Couldn’t prepare the local edit.", true);
+    return;
+  }
+  flash("Local edit prepared. Open Quick Note on a regular web page to continue.");
+  await loadActivity();
+}
+
+async function runActivityAction<T extends RuntimeRequest>(message: T): Promise<void> {
+  const response = await send(message);
+  if (!response.ok) {
+    flash(("error" in response ? response.error : "") || "That delivery action didn’t complete.", true);
+    return;
+  }
+  await loadActivity();
+}
+
+async function clearDeliveredHistory(): Promise<void> {
+  if (!confirm("Clear all delivered capture history stored on this device? This does not delete pages from Notion.")) return;
+  const response = await send({ type: "DELETE_DELIVERED_HISTORY" });
+  if (!response.ok) return flash(response.error || "Couldn’t clear delivered history.", true);
+  flash(response.deleted ? `Cleared ${response.deleted} delivered ${response.deleted === 1 ? "capture" : "captures"}.` : "No delivered history to clear.");
+  await loadActivity();
+}
+
+async function loadDiagnostics(): Promise<void> {
+  const status = $("#diagnostics-status");
+  const grid = $("#diagnostics-grid");
+  status.textContent = "Checking storage…";
+  status.dataset.tone = "";
+  const response = await send({ type: "GET_STORAGE_DIAGNOSTICS" });
+  if (!response.ok) {
+    grid.hidden = true;
+    status.textContent = response.error || "Couldn’t inspect local storage.";
+    status.dataset.tone = "error";
+    return;
+  }
+  const diagnostics = response.diagnostics;
+  status.textContent = diagnostics.profile === "incognito" ? "Incognito session storage" : "Regular profile storage";
+  grid.hidden = false;
+  $("#capture-bytes").textContent = formatBytes(diagnostics.captureStorage.logicalBytes);
+  $("#chrome-bytes").textContent = diagnostics.chromeStorage.quotaBytes
+    ? `${formatBytes(diagnostics.chromeStorage.usedBytes)} of ${formatBytes(diagnostics.chromeStorage.quotaBytes)}`
+    : formatBytes(diagnostics.chromeStorage.usedBytes);
+  $("#origin-bytes").textContent = diagnostics.originStorage.quotaBytes
+    ? `${formatBytes(diagnostics.originStorage.usedBytes)} of ${formatBytes(diagnostics.originStorage.quotaBytes)}`
+    : "Unavailable";
+  $("#record-counts").textContent = `${diagnostics.captureStorage.drafts} drafts · ${diagnostics.captureStorage.queued} queued · ${diagnostics.captureStorage.delivered} delivered`;
+  $("#storage-health").textContent = diagnostics.migrationStatus === "warning"
+    ? "Migration needs attention"
+    : `${diagnostics.backend} · schema ${diagnostics.schemaVersion}`;
+  $("#persistence-state").textContent = diagnostics.profile === "incognito"
+    ? "Session only"
+    : diagnostics.persistent ? "Granted" : "Browser managed";
+  $("#maintenance-time").textContent = diagnostics.lastMaintenanceAt
+    ? new Date(diagnostics.lastMaintenanceAt).toLocaleString()
+    : "Not run yet";
+  const note = $("#diagnostics-note");
+  note.textContent = diagnostics.migrationError || (diagnostics.profile === "incognito"
+    ? "These records are cleared when this Incognito extension session ends."
+    : diagnostics.persistent ? "Chrome has granted persistent origin storage." : "Chrome manages IndexedDB persistence for this profile.");
+  note.dataset.tone = diagnostics.migrationError ? "error" : "";
+}
+
+async function exportRecovery(format: "json" | "markdown"): Promise<void> {
+  const button = document.querySelector<HTMLButtonElement>(`[data-export="${format}"]`);
+  if (!button) throw new Error("Quick Note recovery export button is missing.");
+  const label = button.textContent || "Export";
+  button.disabled = true;
+  button.textContent = "Preparing…";
+  const response = await send({ type: "EXPORT_CAPTURE_RECOVERY", format });
+  button.disabled = false;
+  button.textContent = label;
+  if (!response.ok) return flash(response.error || "Couldn’t create the recovery export.", true);
+  const blob = new Blob([response.export.content], { type: `${response.export.mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = response.export.filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  flash(`${format === "json" ? "JSON" : "Markdown"} recovery exported.`);
+}
+
+function documentPreview(node: EditorNode | undefined): string {
+  return truncateText(documentText(node).replace(/\s+/g, " ").trim(), 220);
+}
+
+function documentText(node: EditorNode | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return node.text || "";
+  if (node.type === "hardBreak") return "\n";
+  return (node.content || []).map(documentText).join(node.type === "doc" ? "\n" : "");
+}
+
+function truncateText(value: string, limit: number): string {
+  const characters = Array.from(value);
+  return characters.length > limit ? `${characters.slice(0, limit).join("").trimEnd()}…` : value;
+}
+
+function relativeTime(timestamp: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - Number(timestamp || 0)) / 1000));
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function formatBytes(value: number): string {
+  const bytes = Math.max(0, Number(value || 0));
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function deliveryStateLabel(status: DeliveryState): string {
+  const labels: Record<DeliveryState, string> = {
+    pending: "Queued",
+    sending: "Sending",
+    delivered: "Delivered",
+    blocked_setup: "Connect required",
+    blocked_auth: "Reconnect required",
+    blocked_destination: "Destination needs attention",
+    blocked_conflict: "Notion changed—review required",
+    uncertain: "Review required"
+  };
+  return labels[status];
+}
+
 function updateAiControls(): void {
   const enabled = $("#ai-enabled").checked;
   $("#ai-feature-controls").dataset.disabled = String(!enabled);
@@ -248,11 +544,15 @@ async function connectOAuth(button: HTMLButtonElement): Promise<void> {
   const clientId = PRODUCT_CONFIG.notionClientId || $("#oauth-client-id").value.trim();
   const brokerUrl = PRODUCT_CONFIG.oauthBrokerUrl || normalizeBrokerUrl($("#oauth-broker-url").value);
   if (!clientId || !brokerUrl) {
-    $("#advanced-setup").open = true;
-    return flash("Add a client ID and broker URL in Advanced setup first.", true);
+    $("#oauth-test-setup").open = true;
+    return flash("Add a client ID and broker URL to test OAuth.", true);
   }
 
-  const idleLabel = button === $("#refresh-permissions") ? "Grant access to more pages" : "Connect Notion";
+  const idleLabel = button === $("#refresh-permissions")
+    ? "Grant access to more pages"
+    : button === $("#oauth-connect-local")
+      ? "Test OAuth"
+      : "Connect Notion";
   const previousConnection = settings.authType === "oauth" ? {
     token: settings.token,
     connectionHandle: settings.connectionHandle,

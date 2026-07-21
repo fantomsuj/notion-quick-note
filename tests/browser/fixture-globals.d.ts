@@ -86,7 +86,6 @@ declare global {
     maxConcurrentDraftWrites: number;
     manualDraftSaves?: boolean;
     activeRuntimeListeners(): number;
-    terminalDraftEvents: Array<{ draftId: string; reason: "saved" | "discarded" }>;
     aiPrompts: FixtureLanguageModelPrompt[];
     aiDestroyed: number;
     aiClickWasTrusted?: boolean;

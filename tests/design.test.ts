@@ -81,8 +81,10 @@ test("Quick Note uses one browser-scoped action shortcut with cross-platform def
     }
   });
   assert.equal(manifest.commands._execute_action.global, undefined);
-  assert.match(background, /chrome\.action\.onClicked\.addListener\(\(tab\) => openQuickNote\(tab\)\)/);
-  assert.doesNotMatch(background, /chrome\.commands\.onCommand|QUICK_NOTE_COMMANDS|windows\.update/);
+  assert.match(background, /chrome\.action\.onClicked\.addListener\(\(tab\) => \{[\s\S]*?logDiagnostic\("worker\.toolbar\.click"[\s\S]*?void openQuickNote\(tab\);[\s\S]*?\}\);/);
+  assert.match(background, /chrome\.commands\.onCommand\.addListener/);
+  assert.match(background, /command !== "toggle-quick-note"/);
+  assert.doesNotMatch(background, /QUICK_NOTE_COMMANDS|windows\.update/);
   assert.match(options, /id="keyboard-shortcut-heading"/);
   assert.match(options, /id="shortcut-assignment-status"/);
   assert.match(options, /id="shortcut-keycaps"/);
@@ -106,43 +108,40 @@ test("shortcut documentation describes browser-only customization through the na
   assert.doesNotMatch(copy, /Option\+Z|system-wide keyboard shortcut|global shortcuts?/i);
 });
 
-test("persistent side panel opens by window and tracks active tabs only while connected", async () => {
+test("Quick Note injects its composer after a user gesture without a persistent browser surface", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   const background = await read("src/background.ts");
-  const sidepanel = await read("sidepanel/sidepanel.ts");
 
-  assert.ok(manifest.permissions.includes("tabs"));
+  assert.deepEqual(manifest.permissions, ["activeTab", "alarms", "contextMenus", "identity", "notifications", "scripting", "storage"]);
   assert.equal(manifest.action.default_popup, undefined);
-  assert.match(background, /chrome\.sidePanel\.open\(\{ windowId:/);
-  assert.match(background, /chrome\.tabs\.onActivated\.addListener/);
-  assert.match(background, /chrome\.tabs\.onUpdated\.addListener/);
-  assert.match(sidepanel, /chrome\.runtime\.connect\(\{ name: "notion-quick-note-panel" \}\)/);
-  assert.match(sidepanel, /await openComposer\(\)/);
+  assert.equal(manifest.side_panel, undefined);
+  assert.match(background, /(?:chrome\.)?scripting\.executeScript/);
+  assert.match(background, /createUnavailableNotice\(chrome\.notifications\)/);
+  assert.doesNotMatch(background, /chrome\.sidePanel|panelCoordinator|REGISTER_PANEL|SHOW_COMPOSER|SHOW_ACTIVITY|ACTIVE_PAGE_CONTEXT/);
 });
 
-test("window-scoped panel routing uses the typed coordinator without injection or tab-specific opening", async () => {
-  const manifest = JSON.parse(await read("manifest.json"));
-  const background = await read("src/background.ts");
-  const sidepanel = await read("sidepanel/sidepanel.ts");
-  const bundleCheck = await read("scripts/check-bundle-size.ts");
+test("composer visibility recovers when its stylesheet was already loaded", async () => {
+  const content = await read("src/content.ts");
 
-  assert.deepEqual(manifest.permissions, ["alarms", "contextMenus", "identity", "sidePanel", "storage", "tabs"]);
-  assert.match(background, /createPanelCoordinator/);
-  assert.match(background, /isPanelRegistrationMessage/);
-  assert.match(background, /panelCoordinator\.register/);
-  assert.match(background, /panelCoordinator\.unregister/);
-  assert.match(background, /panelCoordinator\.navigate/);
-  assert.match(background, /panelCoordinator\.publishContext/);
-  assert.doesNotMatch(background, /panelPorts|sidePanel\.setOptions|sidePanel\.open\(\{\s*tabId|scripting\.executeScript/);
-  for (const command of ["SHOW_COMPOSER", "SHOW_ACTIVITY", "ACTIVE_PAGE_CONTEXT"]) {
-    assert.match(`${background}\n${sidepanel}`, new RegExp(command));
+  assert.match(content, /const revealComposerSheet = \(\) => \{/);
+  assert.match(content, /if \(stylesheet\.sheet\) revealComposerSheet\(\);/);
+});
+
+test("the build and release checks contain no Side Panel artifacts", async () => {
+  const background = await read("src/background.ts");
+  const bundleCheck = await read("scripts/check-bundle-size.ts");
+  const releaseFiles = await read("scripts/release-files.ts");
+  const releaseCheck = await read("scripts/check-release.ts");
+
+  for (const source of [background, releaseFiles, releaseCheck]) {
+    assert.doesNotMatch(source, /sidePanel|sidepanel|panelCoordinator|REGISTER_PANEL|SHOW_COMPOSER|SHOW_ACTIVITY|ACTIVE_PAGE_CONTEXT/);
   }
-  assert.match(sidepanel, /WorkerToPanelMessage/);
-  assert.doesNotMatch(sidepanel, /OPEN_DRAFT/);
-  assert.doesNotMatch(bundleCheck, /content-loader/);
-  assert.match(bundleCheck, /background,[\s\S]*executeScript/);
-  await assert.rejects(read("src/content-loader.ts"), { code: "ENOENT" });
-  await assert.rejects(read("tests/content-loader.test.ts"), { code: "ENOENT" });
+  assert.match(bundleCheck, /content-loader/);
+  assert.match(bundleCheck, /executeScript/);
+  await assert.rejects(read("sidepanel/index.html"), { code: "ENOENT" });
+  await assert.rejects(read("sidepanel/sidepanel.ts"), { code: "ENOENT" });
+  await assert.rejects(read("src/panel-coordinator.ts"), { code: "ENOENT" });
+  await assert.rejects(read("src/panel-lifecycle.ts"), { code: "ENOENT" });
 });
 
 test("both surfaces consume shared tokens and keep the compact Notion page geometry", async () => {
@@ -170,32 +169,30 @@ test("small copy, placeholders, and segmented controls retain accessible focus a
 });
 
 test("legacy editorial and glass treatments are removed from runtime UI", async () => {
-  const runtime = `${await read("options/options.css")}\n${await read("options/options.html")}\n${await read("src/content.ts")}\n${await read("styles/composer.css")}\n${await read("sidepanel/sidepanel.css")}\n${await read("sidepanel/index.html")}`;
+  const runtime = `${await read("options/options.css")}\n${await read("options/options.html")}\n${await read("src/content.ts")}\n${await read("styles/composer.css")}`;
   assert.doesNotMatch(runtime, /Georgia|Avenir|SF Pro|backdrop-filter|#e8b44d|#fff4cf/i);
   assert.doesNotMatch(runtime, />\s*(?:N|•••|×|⌕|↻|✓)\s*</);
 });
 
 test("privacy handling is explained in settings, Notes, policy, and store copy", async () => {
   const options = await read("options/options.html");
-  const sidepanel = await read("sidepanel/index.html");
   const policy = await read("PRIVACY.md");
   const listing = await read("docs/STORE_LISTING.md");
-  const copy = `${options}\n${sidepanel}\n${policy}\n${listing}`;
+  const copy = `${options}\n${policy}\n${listing}`;
 
   assert.match(options, /What stays here, and what goes to Notion/);
-  assert.match(sidepanel, /How your captures are handled/);
   for (const phrase of ["note text", "selected text", "page title and URL", "until delivery succeeds or you delete them", "In Incognito", "selected Notion workspace"]) {
     assert.match(copy, new RegExp(phrase, "i"));
   }
 });
 
-test("persistent side panel documentation matches automatic context behavior", async () => {
+test("documentation describes explicit, invocation-time context", async () => {
   const storeListing = await read("docs/STORE_LISTING.md");
   const readme = await read("README.md");
 
-  assert.match(storeListing, /\| `tabs` \|/);
-  assert.match(storeListing, /while the Quick Note side panel is open/i);
-  assert.doesNotMatch(storeListing, /reads active-page details only when you invoke it/i);
-  assert.match(readme, /remains open while you switch tabs/i);
-  assert.match(readme, /remove.*source.*does not reappear/i);
+  assert.match(storeListing, /\| `activeTab` \|/);
+  assert.match(storeListing, /injected into the current eligible page/i);
+  assert.match(storeListing, /only when you invoke it/i);
+  assert.match(readme, /in-page composer/i);
+  assert.doesNotMatch(`${storeListing}\n${readme}`, /side panel|automatic(?:ally)? attach(?:ing)? each active page/i);
 });
