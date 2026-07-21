@@ -70,6 +70,7 @@ test("composer verifies the bundled NotionInter face before it becomes visible",
   const root = page.locator("#notion-quick-note-root");
   await expect(root).toHaveAttribute("data-font-status", "loaded");
   await expect.poll(() => page.evaluate(() => document.fonts.check('15px "NotionInter"'))).toBe(true);
+  await expect(root).toHaveCSS("font-family", /NotionInter/);
   await expect(root.locator(".sheet")).toHaveCSS("opacity", "1");
 });
 

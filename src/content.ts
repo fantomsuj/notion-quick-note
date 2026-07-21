@@ -447,7 +447,10 @@ function currentEditor(editor: Editor | undefined): Editor {
     host.setAttribute("aria-label", "Notion Quick Note");
     host.setAttribute("popover", "manual");
     host.setAttribute("role", "dialog");
-    host.style.cssText = "all:initial;position:fixed;margin:0;padding:0;border:0;background:transparent;overflow:visible";
+    // Keep geometry inline, but let the shadow stylesheet own typography. `all: initial`
+    // resets font-family to the browser's initial serif face (usually Times) and, because
+    // it is inline, overrides the `:host` NotionInter declaration in composer.css.
+    host.style.cssText = "position:fixed;margin:0;padding:0;border:0;background:transparent;overflow:visible";
     const shadowRoot = host.attachShadow({ mode: "open" });
     shadowRoot.innerHTML = template();
     const root = asComposerRoot(shadowRoot);
