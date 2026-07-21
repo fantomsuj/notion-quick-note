@@ -144,15 +144,19 @@ test("the build and release checks contain no Side Panel artifacts", async () =>
   await assert.rejects(read("src/panel-lifecycle.ts"), { code: "ENOENT" });
 });
 
-test("both surfaces consume shared tokens and keep the compact Notion page geometry", async () => {
+test("both surfaces consume shared tokens and keep the resizable compact Notion page geometry", async () => {
   const options = await read("options/options.html");
   const content = await read("src/content.ts");
   const composer = await read("styles/composer.css");
   assert.match(options, /href="\.\.\/styles\/tokens\.css"/);
   assert.match(content, /getURL\("styles\/composer\.css"\)/);
   assert.match(composer, /@import url\("tokens\.css"\)/);
-  assert.match(composer, /width:\s*min\(390px,/);
-  assert.match(composer, /max-height:\s*min\(520px,/);
+  assert.match(content, /setAttribute\("popover", "manual"\)/);
+  assert.match(content, /showPopover\(\)/);
+  assert.doesNotMatch(content, /showModal\(\)|aria-modal/);
+  assert.match(composer, /\.sheet\s*\{[\s\S]*?width:\s*100%[\s\S]*?height:\s*100%/);
+  assert.match(composer, /\.drag-region\s*\{[\s\S]*?cursor:\s*grab/);
+  assert.match(composer, /\.resize-handle\s*\{[\s\S]*?cursor:\s*nwse-resize/);
   assert.match(composer, /\.topbar\s*\{[\s\S]*?min-height:\s*40px/);
   assert.match(composer, /\.page\s*\{[\s\S]*?padding:\s*24px 24px 22px/);
   assert.match(composer, /\.editor\s*\{[\s\S]*?min-height:\s*180px[\s\S]*?overflow-y:\s*auto/);

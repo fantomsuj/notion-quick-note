@@ -1,105 +1,87 @@
-# Task 2 report: Strict Notion, settings, provisioning, and AI boundaries
+# Task 2 Report: Wire restricted-page notification
 
-Status: DONE
+## Outcome
 
-## Files
+Delivered in the combined restored-composer and native-notification commit `e00cdf8` (`Restore in-page composer and add unavailable notifications`). The implementation replaces the old Side Panel surface with an injected in-page composer, and every restricted-page failure now preserves its badge/title feedback while also showing the native unavailable notification.
 
-- `src/notion.ts`
-- `src/settings.ts`
-- `src/provisioning.ts`
-- `src/ai-note-actions.ts`
-- `tests/notion.test.ts`
-- `tests/settings.test.ts`
-- `tests/provisioning.test.ts`
-- `tests/ai-note-actions.test.ts`
+## Committed files
 
-## Design
+- Runtime and extension configuration: `manifest.json`, `src/background.ts`, `src/content.ts`, `src/content-loader.ts`, `src/contracts.ts`, `src/runtime-message.ts`, `src/diagnostics.ts`, `src/serialized-operation-queue.ts`, `types/globals.d.ts`, `tsconfig.extension.json`.
+- Removed Side Panel runtime: `sidepanel/index.html`, `sidepanel/sidepanel.css`, `sidepanel/sidepanel.ts`, `src/panel-coordinator.ts`, `src/panel-lifecycle.ts`.
+- Settings and release/build wiring: `options/options.css`, `options/options.html`, `options/options.ts`, `scripts/build.ts`, `scripts/check-bundle-size.ts`, `scripts/check-release.ts`, `scripts/release-files.ts`.
+- Tests and fixtures: `tests/content-loader.test.ts`, `tests/diagnostics.test.ts`, `tests/serialized-operation-queue.test.ts`, `tests/design.test.ts`, `tests/browser/fixture-globals.d.ts`, `tests/browser/mv3-extension.spec.ts`, `tests/browser/quick-note.spec.ts`, `tests/fixtures/media-page.html`, `tests/fixtures/mv3-manifest.json`, `tests/capture-store.test.ts`, `tests/runtime-message.test.ts`, `tests/settings.test.ts`, `tests/types/contracts.test-d.ts`, updated onboarding snapshots, and removed Side Panel unit tests.
+- Documentation: `README.md`, `PRIVACY.md`, `docs/PRODUCT.md`, `docs/RELEASE.md`, `docs/STORE_LISTING.md`, `docs/VISUAL_GUIDE.md`.
 
-- Removed strictness suppressions and added explicit boundary/domain types for Notion requests, Prompt API sessions, settings defaults, and provisioning dependencies/results.
-- Treats `response.json()`, direct database-resolution JSON, Prompt API responses, and caught errors as `unknown`.
-- Adds handwritten guards for the response subsets actually consumed: database/data-source IDs and schema properties, search/query result arrays and items, page title properties, block IDs/types/attributes/rich text, inserted block IDs, error metadata, and Prompt title/to-do output.
-- Malformed successful Notion payloads fail with `NotionApiError` (`code: "invalid_response"`) before provisioning or update journals save destination/remote state.
-- Prompt output now requires an object with a string `title`, or an array containing only string tasks, before normalization.
-- `DEFAULT_SETTINGS` has a stable `Readonly<Settings>` type while legacy OAuth credential migration behavior is unchanged.
-- Provisioning ports, outcomes, persisted in-flight state, and error metadata are explicit; concurrency, recovery, uncertain-create, migration, and connection-change behavior are preserved.
+Task 2-specific files within that scope:
 
-## RED evidence
+- `manifest.json` — declares the MV3 `notifications` permission.
+- `src/background.ts` — imports `createUnavailableNotice`, creates it with `chrome.notifications`, and awaits it together with the existing unavailable badge/title updates.
+- `scripts/check-release.ts` — requires `notifications` in the reviewed permission set.
+- `tests/design.test.ts` — requires the permission and static worker notifier wiring.
 
-1. `npx tsc -b --force --pretty false`
-   - Exit 2 after suppression removal.
-   - Exposed strict boundary diagnostics in the four task modules and their focused/downstream consumers.
-2. `npx tsx --test tests/ai-note-actions.test.ts tests/notion.test.ts --test-name-pattern='non-string tasks|incomplete successful'`
-   - Exit 1.
-   - Three intended failures: non-string Prompt tasks were accepted; incomplete database creation and incomplete search/block-list successes did not reject.
+## TDD evidence
 
-## GREEN evidence
+### RED
 
-1. `npx tsx --test tests/notion.test.ts tests/settings.test.ts tests/provisioning.test.ts tests/ai-note-actions.test.ts`
-   - Exit 0; 57 tests passed, 0 failed.
-2. `npx tsc -b --force --pretty false`
-   - Exit 0; no diagnostics.
-3. `git diff --check -- src/notion.ts src/settings.ts src/provisioning.ts src/ai-note-actions.ts tests/notion.test.ts tests/settings.test.ts tests/provisioning.test.ts tests/ai-note-actions.test.ts`
-   - Exit 0.
+1. Added the release permission expectation and static design expectations before production wiring.
+2. `npm run check:release && npm test -- --test-name-pattern='Quick Note injects its composer'`
+   - Failed at `scripts/check-release.ts:46` because the manifest lacked `notifications`.
+3. `npm test -- --test-name-pattern='Quick Note injects its composer'`
+   - Failed in the selected design test because the manifest lacked `notifications` (and the notifier wiring was not yet present).
 
-## Concerns
+### GREEN
 
-- None identified within Task 2 scope.
-- The workspace contains pre-existing/unrelated uncommitted changes; they were preserved. No files were staged, committed, restored, checked out, or reset.
+1. Added `notifications` to the manifest.
+2. Wired `createUnavailableNotice(chrome.notifications)` into `markOverlayUnavailable` and included it in the awaited `Promise.all` with the prior badge/title calls.
+3. `npm run check:release && npm test -- --test-name-pattern='native unavailable notification|Quick Note injects its composer'`
+   - Passed: release audit passed; 186 tests passed, 0 failed.
+4. `npm run typecheck && npm test`
+   - Passed: typecheck clean; 186 tests passed, 0 failed.
+5. `npm run check`
+   - Passed: typecheck, build, bundle check, release audit, 186 unit tests, and 69 Playwright browser tests all passed. Bundle size was 449,584 / 450,000 bytes.
 
-## Review follow-up
+## Commit
 
-Status: DONE
+`e00cdf8` — `Restore in-page composer and add unavailable notifications`
 
-Addressed all Critical/Important review findings:
+## Self-review
 
-- Insert responses now require every consumed block ID to be a non-empty string before updating or emitting the journal.
-- The final page response is validated for non-empty string `id`, `last_edited_time`, and `url` before the journal can enter `complete`.
-- Database/data-source create and retrieval paths enforce non-empty string IDs; schema-consuming callers validate `properties` as an object of property objects.
-- Rich-text guards validate consumed `type`, `plain_text`, `href`, `text.content`, `text.link.url`, annotation booleans/color, mention objects, and equation expressions.
-- Sparse page payloads remain compatible: missing `properties` produces the historical `Untitled` fallback, while present properties are validated.
-- Existing manual destinations now preserve their configured `page` or `database` type; provisioning results use the general `Destination` contract while creation/recovery/migration APIs remain managed-database-specific.
-- Managed capture query results require a non-empty string ID and a string URL when present.
+- The notifier is constructed once from `chrome.notifications`.
+- Every existing unavailable path reaches `markOverlayUnavailable`, which now retains its badge and title behavior while awaiting the native notification.
+- The helper already absorbs notification API failures, so a notification rejection does not prevent the badge/title updates from resolving.
+- The manifest permission and release/design expectations agree.
+- The complete injected-composer restoration was committed with the notification wiring because `markOverlayUnavailable` is an integral part of that worker replacement.
+- Staged-diff whitespace validation (`git diff --cached --check`) passed before committing.
+- `.superpowers` artifacts and the untracked design-plan document were intentionally excluded from the commit.
 
-### Review RED evidence
+## Privacy review follow-up: native notification payload
 
-`npx tsx --test tests/notion.test.ts tests/provisioning.test.ts`
+### Files changed
 
-- Exit 1; 40 passed and 7 failed.
-- Intended failures covered invalid inserted IDs, malformed final pages, sparse pages, wrong-type create/retrieve IDs, malformed rich text, wrong-type query results, and manual-page destination coercion.
+- `src/unavailable-notice.ts` — the Chrome notification message is now fixed safe copy and deliberately ignores its caller-provided detail. The caller contract and native notification ID/title remain unchanged.
+- `tests/unavailable-notice.test.ts` — adds a regression using a URL, selection-like text, and credential-like values, proving none can enter the notification payload; updates the existing payload expectation to the fixed copy.
+- `.superpowers/sdd/task-2-report.md` — this review record.
 
-### Review GREEN evidence
+### RED evidence
 
-1. `npx tsx --test tests/notion.test.ts tests/settings.test.ts tests/provisioning.test.ts tests/ai-note-actions.test.ts`
-   - Exit 0; 64 passed, 0 failed.
-2. `npx tsc -b --force --pretty false`
-   - Exit 0; no diagnostics.
-3. `git diff --check -- src/notion.ts src/settings.ts src/provisioning.ts src/ai-note-actions.ts tests/notion.test.ts tests/settings.test.ts tests/provisioning.test.ts tests/ai-note-actions.test.ts`
-   - Exit 0.
-4. Suppression scan across all eight focused files
-   - No `ts-nocheck`, `ts-ignore`, or blanket `any` usage.
+`npm test -- --test-name-pattern='never includes caller-provided page details'`
 
-## Second review follow-up
+- Exit 1: the new test failed as intended. Its payload contained `https://example.test/private?token=super-secret; selection: personal note; password=hunter2` where the expected fixed safe copy belonged.
 
-Status: DONE
+### GREEN evidence
 
-- Migration PATCH responses now require a non-empty string data-source `id` and a property-object map before the updated destination is consumed.
-- Data-source retrieval and managed-database recovery validate `parent.database_id` and fallback `database_id` as non-empty strings when present. Malformed successful payloads now throw `NotionApiError` with `code: "invalid_response"` before ID normalization.
-- Block response guards now validate optional `has_children`/`in_trash` booleans and `last_edited_time`, plus the consumed attribute fields `checked`, `language`, `list_start_index`, and `list_format`. Inline child blocks are validated recursively.
+1. `npx tsx --test tests/unavailable-notice.test.ts`
+   - Exit 0; 3 tests passed, 0 failed.
+2. `npm test`
+   - Exit 0; 187 tests passed, 0 failed.
 
-### Second review RED evidence
+### Self-review
 
-`npx tsx --test tests/notion.test.ts`
+- `markOverlayUnavailable` still makes the same badge text, badge color, and action-title calls with the detailed error; this change only constrains the native `chrome.notifications` payload.
+- The notification title and stable tab-derived notification ID are preserved.
+- The helper accepts the existing `detail` argument for callers but cannot place it in the notification payload.
+- Scoped code/test diff has no whitespace errors. The workspace-wide `git diff --check` reports pre-existing blank-line warnings in `.superpowers/sdd/task-1-brief.md` and `.superpowers/sdd/task-2-brief.md`, outside this follow-up's files.
 
-- Exit 1; 39 passed and 3 failed.
-- Intended failures covered malformed optional/consumed block fields, malformed retrieval/recovery parent database IDs leaking a raw `TypeError`, and a wrong-type migration PATCH ID being accepted.
+### Commit
 
-### Second review GREEN evidence
-
-1. `npx tsx --test tests/notion.test.ts tests/settings.test.ts tests/provisioning.test.ts tests/ai-note-actions.test.ts`
-   - Exit 0; 67 passed, 0 failed.
-2. `npx tsc -b --force --pretty false`
-   - Exit 0; no diagnostics after correcting the new test fixtures to include the required migration marker.
-3. `git diff --check -- src/notion.ts tests/notion.test.ts .superpowers/sdd/task-2-report.md`
-   - Exit 0 after the report append.
-4. Suppression scan across the touched production and test files
-   - No `ts-nocheck`, `ts-ignore`, `eslint-disable`, or blanket `any` usage.
+`a8367d8` — `Prevent unsafe unavailable notification details`

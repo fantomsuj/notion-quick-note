@@ -51,6 +51,9 @@ declare global {
     rememberedQuickNoteEditor?: Element;
     rememberedQuickNoteHost?: Element;
     mediaEvents: Array<{ type: string; key: string }>;
+    pagePointerEvents: number;
+    pageTouchEvents: number;
+    pageEscapeEvents: number;
     settingsResponse: Record<string, unknown>;
     currentDraft: CaptureDraft | null;
     runtimeMessages: FixtureRuntimeMessage[];

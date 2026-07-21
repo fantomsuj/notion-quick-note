@@ -1,36 +1,62 @@
-### Task 1: Strict domain, persistence, and queue core
+### Task 1: Isolate and test the native unavailable notice
 
 **Files:**
-- Modify: `src/contracts.ts`
-- Modify: `src/capture-store.ts`
-- Modify: `src/capture-indexed-db.ts`
-- Modify: `src/capture-key-store.ts`
-- Modify: `src/capture-record-repository.ts`
-- Modify: `src/capture-persistence.ts`
-- Modify: `src/capture-queue.ts`
-- Modify: `src/capture-export.ts`
-- Test: `tests/types/contracts.test-d.ts`
-- Test: `tests/capture-store.test.ts`
-- Test: `tests/capture-persistence.test.ts`
-- Test: `tests/capture-queue.test.ts`
-- Test: `tests/capture-export.test.ts`
+
+- Create: `src/unavailable-notice.ts`
+- Create: `tests/unavailable-notice.test.ts`
 
 **Interfaces:**
-- Consumes: existing storage versions, repository semantics, delivery state transitions, and recovery formats.
-- Produces: strict normalized domain types; typed storage, IndexedDB, repository, delivery, clock, UUID, and change-handler ports used by all later tasks.
 
-- [ ] **Step 1: Expose the compiler failures**
+- Consumes: `Pick<typeof chrome.notifications, "create">`, `tabId: number`, and a concise `detail: string`.
+- Produces: `showUnavailableNotice(tabId: number, detail: string): Promise<void>` that resolves even if the browser notification API rejects.
 
-Remove `// @ts-nocheck` from the task's production files and run `npx tsc -b --force --pretty false`. Expected: failure in these files, proving the strict gate covers them.
+- [ ] **Step 1: Write the failing tests**
 
-- [ ] **Step 2: Type normalized boundaries and ports**
+```ts
+test("shows a native unavailable notification with a stable tab ID", async () => {
+  const calls: unknown[] = [];
+  const show = createUnavailableNotice({
+    async create(id, options) { calls.push({ id, options }); return id; }
+  } as Pick<typeof chrome.notifications, "create">);
 
-Use `unknown` for persisted input and narrow it with `isRecord` plus field guards. Model drafts, records, metadata, repository methods, backend transactions, storage adapters, clock/UUID functions, and change events explicitly. Preserve migration fallbacks and return types; do not replace boundary values with unchecked casts.
+  await show(17, "Quick Note can only open on regular web pages, not browser pages or PDFs.");
 
-- [ ] **Step 3: Tighten discriminated state contracts**
+  assert.deepEqual(calls, [{
+    id: "notion-quick-note-unavailable-17",
+    options: {
+      type: "basic",
+      iconUrl: "icons/icon-128.png",
+      title: "Quick Note unavailable",
+      message: "Quick Note can only open on regular web pages, not browser pages or PDFs."
+    }
+  }]);
+});
+```
 
-Ensure delivered records require a remote target and non-delivered terminal states require typed error metadata. Make repository/queue transitions return `CaptureRecord` variants and use exhaustive switches or `assertNever` for state-dependent behavior.
+- [ ] **Step 2: Run the test and verify it fails**
 
-- [ ] **Step 4: Verify the core**
+Run: `npm test -- --test-name-pattern='native unavailable notification'`
 
-Run `npx tsc -b --force --pretty false` and the five listed test files through `tsx --test`. Expected: no task-file type diagnostics and all focused tests pass.
+Expected: FAIL because `src/unavailable-notice.ts` does not exist.
+
+- [ ] **Step 3: Implement the notifier**
+
+```ts
+export function createUnavailableNotice(notifications: Pick<typeof chrome.notifications, "create">) {
+  return async (tabId: number, detail: string): Promise<void> => {
+    await notifications.create(`notion-quick-note-unavailable-${tabId}`, {
+      type: "basic",
+      iconUrl: "icons/icon-128.png",
+      title: "Quick Note unavailable",
+      message: detail
+    }).catch(() => undefined);
+  };
+}
+```
+
+- [ ] **Step 4: Run the focused test and verify it passes**
+
+Run: `npm test -- --test-name-pattern='native unavailable notification'`
+
+Expected: PASS.
+

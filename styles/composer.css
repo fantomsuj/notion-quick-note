@@ -2,9 +2,6 @@
 
 :host {
   position: fixed;
-  inset: auto 24px 24px auto;
-  width: auto;
-  height: auto;
   margin: 0;
   padding: 0;
   overflow: visible;
@@ -15,7 +12,6 @@
   font-synthesis: none;
 }
 
-:host::backdrop { background: transparent; }
 :host(.closing) { display: block; pointer-events: none; }
 * { box-sizing: border-box; }
 button, input, textarea { color: inherit; font: inherit; }
@@ -24,9 +20,10 @@ button { -webkit-tap-highlight-color: transparent; }
 
 .sheet {
   position: relative;
-  width: min(390px, calc(100vw - 32px));
-  height: auto;
-  max-height: min(520px, calc(100vh - 32px));
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -68,6 +65,27 @@ button { -webkit-tap-highlight-color: transparent; }
   border-bottom: 1px solid var(--nqn-border);
   background: var(--nqn-surface);
 }
+
+.drag-region {
+  min-width: 0;
+  flex: 1;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.drag-region::before {
+  content: "";
+  width: 18px;
+  height: 12px;
+  margin-right: 7px;
+  opacity: .55;
+  background: radial-gradient(circle, var(--nqn-text-tertiary) 1px, transparent 1.5px) 0 0 / 6px 4px;
+}
+.drag-region:active { cursor: grabbing; }
 
 .status {
   min-width: 0;
@@ -156,7 +174,7 @@ button { -webkit-tap-highlight-color: transparent; }
   min-height: 0;
   display: flex;
   flex-direction: column;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   overflow: hidden;
   padding: 24px 24px 22px;
 }
@@ -182,7 +200,8 @@ button { -webkit-tap-highlight-color: transparent; }
 
 .editor {
   min-height: 180px;
-  max-height: 330px;
+  max-height: none;
+  flex: 1 1 auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-color: var(--nqn-border-strong) transparent;
@@ -770,20 +789,38 @@ kbd {
 }
 .toast[data-tone="error"] { background: var(--nqn-danger); color: var(--nqn-brand-white); }
 .toast[data-tone="success"] { background: var(--nqn-success); color: var(--nqn-brand-white); }
+.resize-handle {
+  position: absolute;
+  z-index: 32;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--nqn-text-tertiary);
+  border-bottom: 1px solid var(--nqn-text-tertiary);
+  opacity: .65;
+}
 
 :focus-visible { outline: 2px solid var(--nqn-focus); outline-offset: 2px; }
 .page-title:focus-visible { outline: none; border-radius: 4px; box-shadow: 0 0 0 1px var(--nqn-border-strong); caret-color: var(--nqn-text); }
 
 @media (max-width: 580px) {
-  :host { inset: auto 8px 8px; }
-  .sheet { width: min(390px, calc(100vw - 16px)); max-height: calc(100vh - 16px); }
   .page { padding: 20px 20px 18px; }
   .page-title { font-size: 28px; }
   .status { max-width: 145px; }
 }
 
 @media (max-height: 520px) {
-  .sheet { max-height: calc(100vh - 16px); }
   .page { padding-top: 16px; padding-bottom: 14px; }
   .editor { min-height: 120px; max-height: calc(100vh - 156px); }
   .ProseMirror { min-height: 120px; }
