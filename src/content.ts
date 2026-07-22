@@ -271,6 +271,7 @@ function currentEditor(editor: Editor | undefined): Editor {
   const DRAFT_VERSION = 2;
   const COMPOSER_BOUNDS_STORAGE_KEY = "quickNoteComposerBounds";
   const COMPOSER_FONT = '15px "NotionInter"';
+  const APPLE_PLATFORM = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   const KEYBOARD_EVENTS = ["keydown", "keypress", "keyup"];
   const handledKeyboardEvents = new WeakSet();
   const composerKeyboardEvents = new WeakSet<KeyboardEvent>();
@@ -728,6 +729,7 @@ function currentEditor(editor: Editor | undefined): Editor {
     instance.closed = true;
     if (popup === instance) popup = undefined;
     if (editor === instance.editor) editor = undefined;
+    if (blockSelectionEscalation?.editor === instance.editor) blockSelectionEscalation = null;
 
     stopTimers(instance);
     document.removeEventListener("fullscreenchange", instance.onFullscreenChange);
@@ -757,6 +759,7 @@ function currentEditor(editor: Editor | undefined): Editor {
     instance.closed = true;
     if (popup === instance) popup = undefined;
     if (editor === instance.editor) editor = undefined;
+    if (blockSelectionEscalation?.editor === instance.editor) blockSelectionEscalation = null;
     if (!instance.accepted && !instance.handoff && !instance.contextLost) void persistDraft(instance).catch(() => undefined);
     stopTimers(instance);
     document.removeEventListener("fullscreenchange", instance.onFullscreenChange);
@@ -2270,7 +2273,11 @@ function currentEditor(editor: Editor | undefined): Editor {
 
   function handleEditorKeyDown(root: ComposerRoot, event: KeyboardEvent): boolean {
     const activeEditor = currentEditor(editor);
-    const isSelectAll = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "a";
+    const hasPrimaryModifier = APPLE_PLATFORM ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+    const isSelectAll = hasPrimaryModifier
+      && !event.altKey
+      && !event.shiftKey
+      && event.key.toLowerCase() === "a";
     const isModifierOnly = event.key === "Alt" || event.key === "Control" || event.key === "Meta" || event.key === "Shift";
     if (!isSelectAll && !isModifierOnly) blockSelectionEscalation = null;
     if (event.key === "Tab" && !event.shiftKey && selectedListDepth(activeEditor) >= MAX_LIST_LEVELS) {
@@ -2301,6 +2308,7 @@ function currentEditor(editor: Editor | undefined): Editor {
     }
     if (isSelectAll) {
       event.preventDefault();
+      if (event.repeat) return true;
       return selectCurrentBlockOrDocument(activeEditor);
     }
     const slash = root.querySelector(".slash-menu");
@@ -2340,7 +2348,8 @@ function currentEditor(editor: Editor | undefined): Editor {
       && selection.from === blockSelectionEscalation.from
       && selection.to === blockSelectionEscalation.to;
 
-    if (!shouldEscalate && !(selection instanceof AllSelection) && withinOneTextBlock && selection.$from.parent.content.size > 0) {
+    const parentText = selection.$from.parent.textBetween(0, selection.$from.parent.content.size, "", "");
+    if (!shouldEscalate && !(selection instanceof AllSelection) && withinOneTextBlock && parentText.length > 0) {
       const from = selection.$from.start();
       const to = selection.$from.end();
       if (selection.from !== from || selection.to !== to) {
