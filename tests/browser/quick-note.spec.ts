@@ -156,6 +156,13 @@ async function expectRememberedEditorNode(page: Page) {
   ))).toBe(true);
 }
 
+async function selectedEditorText(page: Page): Promise<string> {
+  return page.locator("#notion-quick-note-root .ProseMirror").evaluate((node) => {
+    const root = node.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
+    return (root.getSelection?.() ?? document.getSelection())?.toString() || "";
+  });
+}
+
 async function corruptRequiredTemplateElement(page: Page, selector: string): Promise<void> {
   await page.evaluate((requiredSelector) => {
     const descriptor = Object.getOwnPropertyDescriptor(ShadowRoot.prototype, "innerHTML");
@@ -1347,6 +1354,79 @@ test("a runtime-message hang reconciles by draft and preserves content before re
   await expect(editor).toHaveText("Still here after a message hang");
   const messages = await page.evaluate(() => window.runtimeMessages.map((message) => message.type));
   expect(messages).toContain("GET_CAPTURE_STATUS");
+});
+
+test("select all scopes the first press to a non-empty block and the second to the document", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("First block\nSecond block\nThird block");
+  await editor.locator(":scope > p").nth(1).click();
+
+  await editor.press("Control+a");
+  await expect.poll(() => selectedEditorText(page)).toBe("Second block");
+  await root.locator(".bubble [data-command=bold]").click();
+  await expect(editor.locator(":scope > p").nth(1).locator("strong")).toHaveText("Second block");
+  await expect(editor.locator(":scope > p").first().locator("strong")).toHaveCount(0);
+  await expect(editor.locator(":scope > p").nth(2).locator("strong")).toHaveCount(0);
+
+  await editor.press("Control+a");
+  await expect.poll(() => selectedEditorText(page)).toBe("Second block");
+  await editor.press("Control+a");
+  await expect.poll(async () => (await selectedEditorText(page)).replace(/\s+/g, " ").trim()).toBe(
+    "First block Second block Third block"
+  );
+
+  await editor.locator(":scope > p").nth(2).click();
+  await editor.press("Meta+a");
+  await expect.poll(() => selectedEditorText(page)).toBe("Third block");
+});
+
+test("select all chooses the complete document immediately from an empty block", async ({ page }) => {
+  await openQuickNote(page);
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+  await editor.fill("First block\n\nThird block");
+  await editor.locator(":scope > p").nth(1).click();
+
+  await editor.press("Control+a");
+  await expect.poll(async () => (await selectedEditorText(page)).replace(/\s+/g, " ").trim()).toBe(
+    "First block Third block"
+  );
+});
+
+test("block commands stay scoped to the block-first selection", async ({ page }) => {
+  await openQuickNote(page);
+  const root = page.locator("#notion-quick-note-root");
+  const editor = root.locator(".ProseMirror");
+  await editor.fill("First block\nSecond block\nThird block");
+  await editor.locator(":scope > p").nth(1).click();
+  await editor.press("Control+a");
+
+  await root.locator(".block-type").click();
+  await root.locator('.format-menu [data-block="heading2"]').click();
+  await expect(editor.locator(":scope > h2")).toHaveText("Second block");
+  await expect(editor.locator(":scope > p")).toHaveText(["First block", "Third block"]);
+});
+
+test("adjacent block types use compact relationship-aware spacing", async ({ page }) => {
+  const draft = draftFixture("rhythm", "");
+  draft.doc = {
+    type: "doc",
+    content: [
+      { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Primary" }] },
+      { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "Secondary" }] },
+      { type: "paragraph", content: [{ type: "text", text: "Body" }] },
+      { type: "bulletList", content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "One" }] }] }] },
+      { type: "orderedList", attrs: { start: 1, type: null }, content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "Two" }] }] }] }
+    ]
+  };
+  await page.evaluate((draftJson: string) => { window.currentDraft = JSON.parse(draftJson) as CaptureDraft; }, JSON.stringify(draft));
+  await openQuickNote(page);
+  const editor = page.locator("#notion-quick-note-root .ProseMirror");
+
+  await expect(editor.locator(":scope > h2")).toHaveCSS("margin-top", "10px");
+  await expect(editor.locator(":scope > h2 + p")).toHaveCSS("margin-top", "0px");
+  await expect(editor.locator(":scope > ul + ol")).toHaveCSS("margin-top", "0px");
 });
 
 test("Markdown rules, slash commands, and the selection toolbar create native editor nodes", async ({ page }) => {

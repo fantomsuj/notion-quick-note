@@ -21,6 +21,7 @@ import TaskList from "@tiptap/extension-task-list";
 import Text from "@tiptap/extension-text";
 import Underline from "@tiptap/extension-underline";
 import { TrailingNode, UndoRedo } from "@tiptap/extensions";
+import { AllSelection, TextSelection } from "@tiptap/pm/state";
 import { MAX_CAPTURE_CHARACTERS, MAX_CAPTURE_TITLE_CHARACTERS } from "./constants.js";
 import { clampComposerBounds, defaultComposerBounds, normalizeStoredComposerBounds, type ComposerBounds } from "./composer-bounds.js";
 import { enqueueWithReconciliation, isContentRuntimeResponse, withRuntimeMessageDeadline, type ContentRuntimeRequest } from "./runtime-message.js";
@@ -291,6 +292,7 @@ function currentEditor(editor: Editor | undefined): Editor {
   let editor: Editor | undefined;
   let slashIndex = 0;
   let lastSlashQuery: string | null = null;
+  let blockSelectionEscalation: { editor: Editor; from: number; to: number } | null = null;
 
   let disposed = false;
   const instances = new Set<PopupInstance>();
@@ -1131,11 +1133,20 @@ function currentEditor(editor: Editor | undefined): Editor {
         handlePaste: (_view, event) => handleLinkPaste(event)
       },
       onUpdate: () => {
+        blockSelectionEscalation = null;
         instance.userEdited = true;
         updateEditorUi(root);
         scheduleDraft(instance);
       },
-      onSelectionUpdate: () => updateEditorUi(root),
+      onSelectionUpdate: ({ editor: updatedEditor }) => {
+        if (blockSelectionEscalation?.editor === updatedEditor) {
+          const { from, to } = updatedEditor.state.selection;
+          if (from !== blockSelectionEscalation.from || to !== blockSelectionEscalation.to) {
+            blockSelectionEscalation = null;
+          }
+        }
+        updateEditorUi(root);
+      },
       onFocus: () => updateEditorUi(root),
       onBlur: () => schedule(instance, () => {
         if (popup === instance && !instance.closed) updateBubble(root);
@@ -2242,6 +2253,9 @@ function currentEditor(editor: Editor | undefined): Editor {
 
   function handleEditorKeyDown(root: ComposerRoot, event: KeyboardEvent): boolean {
     const activeEditor = currentEditor(editor);
+    const isSelectAll = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "a";
+    const isModifierOnly = event.key === "Alt" || event.key === "Control" || event.key === "Meta" || event.key === "Shift";
+    if (!isSelectAll && !isModifierOnly) blockSelectionEscalation = null;
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "Enter") {
       handledKeyboardEvents.add(event);
       event.preventDefault();
@@ -2261,6 +2275,10 @@ function currentEditor(editor: Editor | undefined): Editor {
         const open = activeEditor.getAttributes("toggleBlock").open !== false;
         return activeEditor.chain().focus().updateAttributes("toggleBlock", { open: !open }).run();
       }
+    }
+    if (isSelectAll) {
+      event.preventDefault();
+      return selectCurrentBlockOrDocument(activeEditor);
     }
     const slash = root.querySelector(".slash-menu");
     if (!slash.hidden) {
@@ -2289,6 +2307,33 @@ function currentEditor(editor: Editor | undefined): Editor {
       return true;
     }
     return false;
+  }
+
+  function selectCurrentBlockOrDocument(activeEditor: Editor): boolean {
+    const { state, view } = activeEditor;
+    const { selection } = state;
+    const withinOneTextBlock = selection.$from.sameParent(selection.$to) && selection.$from.parent.isTextblock;
+    const shouldEscalate = blockSelectionEscalation?.editor === activeEditor
+      && selection.from === blockSelectionEscalation.from
+      && selection.to === blockSelectionEscalation.to;
+
+    if (!shouldEscalate && !(selection instanceof AllSelection) && withinOneTextBlock && selection.$from.parent.content.size > 0) {
+      const from = selection.$from.start();
+      const to = selection.$from.end();
+      if (selection.from !== from || selection.to !== to) {
+        view.dispatch(state.tr.setSelection(TextSelection.create(state.doc, from, to)).scrollIntoView());
+      }
+      blockSelectionEscalation = { editor: activeEditor, from, to };
+      view.focus();
+      return true;
+    }
+
+    blockSelectionEscalation = null;
+    if (!(selection instanceof AllSelection)) {
+      view.dispatch(state.tr.setSelection(new AllSelection(state.doc)).scrollIntoView());
+    }
+    view.focus();
+    return true;
   }
 
   function handleLinkPaste(event: ClipboardEvent): boolean {

@@ -49,7 +49,7 @@ The onboarding title is 40px, panel headings are 20px, explanatory copy is 15px,
 
 Primary actions are accessible blue. Secondary actions use a neutral outline and translucent hover state. Focus uses a visible 2px blue ring. Functional state transitions run for 150–180ms and are removed under `prefers-reduced-motion`.
 
-The onboarding sequence remains Connect → Destination → Ready with progressive disclosure for advanced configuration. The composer keeps a 40px header, a 15px page editor with an optional title and quote blocks, and a compact overflow menu for destination, source attachment, and settings. Long workspace, page, and destination names truncate instead of changing layout.
+The onboarding sequence remains Connect → Destination → Ready with progressive disclosure for advanced configuration. The composer keeps a 40px header, a 15px page editor with an optional title and quote blocks, and a compact overflow menu for destination, source attachment, and settings. Within the editor, the first `Command/Ctrl+A` selects the current non-empty block's text and the second selects the complete document; an empty block selects the complete document immediately. Adjacent headings, body blocks, and lists use relationship-aware spacing so section openings stay grouped without flattening the document hierarchy. Long workspace, page, and destination names truncate instead of changing layout.
 
 Use the bundled Notion cube artwork for Notion identity. UI actions use consistent 16px inline SVG icons; never substitute letters, punctuation, or Unicode glyphs for logo, more, search, refresh, close, or check controls.
 
