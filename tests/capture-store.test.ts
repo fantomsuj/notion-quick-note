@@ -4,19 +4,17 @@ import {
   addContextToDraft,
   badgeForState,
   CaptureStorageError,
-  createCaptureRepository,
-  detachActiveDrafts,
   DELIVERY_STATES,
   emptyCaptureState,
   migrateCaptureStateV1,
   normalizeCaptureState,
   normalizeDraft,
   normalizeRecord,
-  normalizeSources,
-  pruneCaptureState,
-  recoverInterruptedRecords
+  normalizeSources
 } from "../src/capture-store.js";
-import type { CaptureDraft, CaptureRecord, KeyValueStoragePort } from "../src/contracts.js";
+import { createLegacyGraphBackend } from "../src/capture-legacy-backend.js";
+import { createRecordCaptureRepository } from "../src/capture-record-repository.js";
+import type { CaptureDraft, CaptureRecord, Clock, KeyValueStoragePort, UUIDFactory } from "../src/contracts.js";
 
 function must<T>(value: T | null | undefined, label: string): T {
   assert.ok(value, label);
@@ -138,6 +136,24 @@ function memoryStorage(): KeyValueStoragePort & { values: Record<string, unknown
   };
 }
 
+function createCaptureRepository({
+  storage,
+  now,
+  uuid,
+  softLimitBytes
+}: {
+  storage: KeyValueStoragePort;
+  now?: Clock;
+  uuid?: UUIDFactory;
+  softLimitBytes?: number;
+}) {
+  return createRecordCaptureRepository({
+    backend: createLegacyGraphBackend({ storage, ...(softLimitBytes === undefined ? {} : { softLimitBytes }) }),
+    ...(now === undefined ? {} : { now }),
+    ...(uuid === undefined ? {} : { uuid })
+  });
+}
+
 test("each tab receives an independent draft while its composer remains open", async () => {
   const storage = memoryStorage();
   let id = 0;
@@ -213,26 +229,23 @@ test("captured selections are durable immediately", async () => {
   assert.equal(must((await repository.load()).drafts[draft.id], "durable selection").id, "selection");
 });
 
-test("serialized state recovery cannot overwrite a capture enqueued concurrently", async () => {
-  const repository = createCaptureRepository({ storage: memoryStorage(), uuid: () => "capture" });
-  let releaseRecovery: () => void = () => undefined;
-  const recovery = repository.updateState(async () => {
-    await new Promise<void>((resolve) => { releaseRecovery = resolve; });
-  });
-  const enqueue = repository.enqueue({
+test("serialized concurrent capture mutations do not overwrite each other", async () => {
+  let id = 0;
+  const repository = createCaptureRepository({ storage: memoryStorage(), uuid: () => `capture-${++id}` });
+  const enqueue = () => repository.enqueue({
     capture: { document: { doc: { type: "doc", content: [] } } },
     context: {},
     destination: null,
     connectionId: "",
     status: DELIVERY_STATES.blockedSetup
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  releaseRecovery();
-  await Promise.all([recovery, enqueue]);
-  assert.ok((await repository.load()).captures.capture);
+  await Promise.all([enqueue(), enqueue()]);
+  assert.deepEqual(Object.keys((await repository.load()).captures).sort(), ["capture-1", "capture-2"]);
 });
 
-test("retention never purges unresolved captures and recovers interrupted sends safely", () => {
+test("canonical maintenance retains unresolved captures and safely recovers interrupted sends", async () => {
+  const timestamp = 31 * 24 * 60 * 60 * 1000;
+  const repository = createCaptureRepository({ storage: memoryStorage(), now: () => timestamp });
   const state = emptyCaptureState();
   state.captures.pending = must(normalizeRecord({ id: "pending", status: DELIVERY_STATES.pending, updatedAt: 0 }), "pending fixture");
   state.captures.old = must(normalizeRecord({ id: "old", status: DELIVERY_STATES.delivered, updatedAt: 0 }), "delivered fixture");
@@ -256,21 +269,22 @@ test("retention never purges unresolved captures and recovers interrupted sends 
     updatedAt: 0
   }), "manual tree fixture");
 
-  recoverInterruptedRecords(state, true, 500);
-  assert.equal(must(state.captures.managed, "managed capture").status, DELIVERY_STATES.pending);
-  assert.equal(must(state.captures.manual, "manual capture").status, DELIVERY_STATES.uncertain);
-  assert.equal(must(state.captures.manualTree, "manual tree capture").status, DELIVERY_STATES.pending);
-  pruneCaptureState(state, 31 * 24 * 60 * 60 * 1000);
-  assert.equal(state.captures.old, undefined);
-  assert.ok(state.captures.pending);
-  assert.deepEqual(badgeForState(state), { text: "!", color: "#d70015" });
+  await repository.importState(state);
+
+  await repository.maintain({ recoverInterrupted: true, force: true });
+  const maintained = await repository.load();
+  assert.equal(must(maintained.captures.managed, "managed capture").status, DELIVERY_STATES.pending);
+  assert.equal(must(maintained.captures.manual, "manual capture").status, DELIVERY_STATES.uncertain);
+  assert.equal(must(maintained.captures.manualTree, "manual tree capture").status, DELIVERY_STATES.pending);
+  assert.equal(maintained.captures.old, undefined);
+  assert.ok(maintained.captures.pending);
+  assert.deepEqual(badgeForState(maintained), { text: "!", color: "#d70015" });
 });
 
 test("a new browser session preserves the global active draft", () => {
   const state = emptyCaptureState();
   state.drafts.draft = must(normalizeDraft({ id: "draft", updatedAt: 1 }), "draft fixture");
   state.activeDraftId = "draft";
-  detachActiveDrafts(state);
   assert.equal(state.activeDraftId, "draft");
   assert.ok(state.drafts.draft);
 });

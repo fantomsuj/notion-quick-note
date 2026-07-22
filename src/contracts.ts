@@ -347,7 +347,6 @@ export interface CaptureRepositoryPort {
   readonly backendName: string;
   setChangeHandler(handler: CaptureChangeHandler): void;
   load(): Promise<CaptureState>;
-  save(state: CaptureState): Promise<CaptureState>;
   getDraft(id: string): Promise<CaptureDraft | null>;
   getActiveDraft(): Promise<CaptureDraft | null>;
   getCapture(id: string): Promise<CaptureRecord | null>;
