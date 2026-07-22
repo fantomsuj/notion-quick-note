@@ -74,8 +74,9 @@ export function createRegularCapturePersistence({
 
   legacy.setChangeHandler((event) => forwardChange(legacy, event));
 
-  async function useLegacyAfterFailure(error: unknown): Promise<PersistenceInitialization> {
+  async function useLegacyAfterFailure(error: unknown, fallbackSafe: boolean): Promise<PersistenceInitialization> {
     migrationError = errorMessage(error);
+    if (!fallbackSafe) throw error;
     active = legacy;
     await legacy.updateMeta({ migrationStatus: "legacy", migrationError }).catch(() => undefined);
     readyComplete = true;
@@ -85,23 +86,37 @@ export function createRegularCapturePersistence({
   async function initialize(): Promise<PersistenceInitialization> {
     if (initialized) return initialized;
     initialized = (async () => {
+      let fallbackSafe = false;
       try {
+        const stored = await storage.get([REGULAR_CAPTURE_INDEX_KEY, REGULAR_CAPTURE_STATE_KEY]);
+        const indexStatus = regularIndexStatus(stored[REGULAR_CAPTURE_INDEX_KEY]);
+        const legacyGraphPresent = stored[REGULAR_CAPTURE_STATE_KEY] !== undefined;
+        fallbackSafe = legacyGraphPresent && (indexStatus === "missing" || indexStatus === "imported");
         const backend = createIndexedDbBackend({ indexedDB });
         const records = createRecordCaptureRepository({ backend, now, uuid });
         indexed = records;
         records.setChangeHandler((event) => forwardChange(records, event));
         const metadata = await records.getMeta();
 
-        if (metadata.migrationStatus !== "complete") {
+        if ((metadata.migrationStatus !== "complete" || indexStatus === "imported") && legacyGraphPresent) {
+          fallbackSafe = true;
           const legacyState = await legacy.load();
           await records.importState(legacyState, {
             migrationStatus: "imported",
             migrationError: "",
             migratedAt: now()
           });
-          await syncRegularIndex(records, storage, "");
+          await syncRegularIndex(records, storage, "", "imported");
           await records.updateMeta({ migrationStatus: "complete", migrationError: "" });
+          await syncRegularIndex(records, storage, "", "complete");
+          fallbackSafe = false;
+        } else if (metadata.migrationStatus !== "complete" || indexStatus === "imported") {
+          fallbackSafe = false;
+          await syncRegularIndex(records, storage, "", "imported");
+          await records.updateMeta({ migrationStatus: "complete", migrationError: "" });
+          await syncRegularIndex(records, storage, "", "complete");
         } else {
+          fallbackSafe = false;
           try {
             await syncRegularIndex(records, storage, "");
           } catch (error: unknown) {
@@ -120,7 +135,7 @@ export function createRegularCapturePersistence({
         }
         return { backend: "indexeddb", migrationError };
       } catch (error: unknown) {
-        return useLegacyAfterFailure(error);
+        return useLegacyAfterFailure(error, fallbackSafe);
       }
     })();
     return initialized;
@@ -219,7 +234,12 @@ function delegatePersistence(configuration: PersistenceConfiguration) {
   };
 }
 
-async function syncRegularIndex(repository: RecordRepository, storage: KeyValueStoragePort, migrationError: string): Promise<void> {
+async function syncRegularIndex(
+  repository: RecordRepository,
+  storage: KeyValueStoragePort,
+  migrationError: string,
+  migrationStatus: "imported" | "complete" = "complete"
+): Promise<void> {
   const [meta, drafts, captures] = await Promise.all([
     repository.getMeta(), repository.listDrafts(), repository.listCaptures()
   ]);
@@ -231,7 +251,7 @@ async function syncRegularIndex(repository: RecordRepository, storage: KeyValueS
       draftCount: drafts.length,
       unresolvedCount,
       deliveredCount: captures.length - unresolvedCount,
-      migrationStatus: migrationError ? "warning" : "complete",
+      migrationStatus: migrationError ? "warning" : migrationStatus,
       migrationError,
       lastMaintenanceAt: Number(meta.lastMaintenanceAt || 0)
     }
@@ -240,4 +260,11 @@ async function syncRegularIndex(repository: RecordRepository, storage: KeyValueS
 
 function errorMessage(error: unknown): string {
   return isRecord(error) && typeof error.message === "string" ? error.message : "Capture persistence failed.";
+}
+
+function regularIndexStatus(value: unknown): "missing" | "invalid" | "imported" | "canonical" {
+  if (value === undefined) return "missing";
+  if (!isRecord(value) || value.version !== CAPTURE_INDEX_VERSION) return "invalid";
+  if (value.migrationStatus === "imported") return "imported";
+  return value.migrationStatus === "complete" || value.migrationStatus === "warning" ? "canonical" : "invalid";
 }

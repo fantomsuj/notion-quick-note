@@ -185,6 +185,102 @@ test("failed IndexedDB initialization preserves and continues using legacy captu
   assert.match(repository.migrationError, /unavailable/);
 });
 
+test("canonical IndexedDB data is never replaced by an empty writable fallback", async () => {
+  const storage = chromeStorage({
+    captureStateV1: {
+      version: 2,
+      activeDraftId: "draft",
+      drafts: { draft: { id: "draft", doc: document("Canonical"), updatedAt: 1 } },
+      captures: {}
+    }
+  });
+  const indexedDB = new IDBFactory();
+  const migrated = createRegularCapturePersistence({ storage, indexedDB });
+  await migrated.ready();
+  assert.equal(storage.values.captureStateV1, undefined);
+
+  const unavailable = {
+    open() { throw new Error("transient IndexedDB failure"); }
+  } as unknown as IDBFactory;
+  const failedRestart = createRegularCapturePersistence({ storage, indexedDB: unavailable });
+  await assert.rejects(failedRestart.ready(), /transient IndexedDB failure/);
+  assert.equal(storage.values.captureStateV1, undefined);
+
+  const recovered = createRegularCapturePersistence({ storage, indexedDB });
+  await recovered.ready();
+  assert.equal(must(await recovered.getDraft("draft"), "canonical draft").id, "draft");
+});
+
+test("a failed canonical-authority read cannot activate writable legacy fallback", async () => {
+  const storage = chromeStorage({
+    captureStateV1: {
+      version: 2,
+      activeDraftId: "draft",
+      drafts: { draft: { id: "draft", doc: document("Canonical"), updatedAt: 1 } },
+      captures: {}
+    }
+  });
+  const indexedDB = new IDBFactory();
+  await createRegularCapturePersistence({ storage, indexedDB }).ready();
+
+  const get = storage.get.bind(storage);
+  storage.get = async () => { throw new Error("authority read interrupted"); };
+  const failedRestart = createRegularCapturePersistence({ storage, indexedDB });
+  await assert.rejects(failedRestart.ready(), /authority read interrupted/);
+  assert.equal(storage.values.captureStateV1, undefined);
+
+  storage.get = get;
+  const recovered = createRegularCapturePersistence({ storage, indexedDB });
+  await recovered.ready();
+  assert.equal(must(await recovered.getDraft("draft"), "canonical draft").id, "draft");
+});
+
+test("an imported checkpoint without its legacy graph fails closed and preserves IndexedDB", async () => {
+  const storage = chromeStorage({
+    captureStateV1: {
+      version: 2,
+      activeDraftId: "draft",
+      drafts: { draft: { id: "draft", doc: document("Canonical"), updatedAt: 1 } },
+      captures: {}
+    }
+  });
+  const indexedDB = new IDBFactory();
+  await createRegularCapturePersistence({ storage, indexedDB }).ready();
+  mustRecord(storage.values.captureIndexV3, "capture index").migrationStatus = "imported";
+
+  const unavailable = {
+    open() { throw new Error("IndexedDB unavailable during incomplete handoff"); }
+  } as unknown as IDBFactory;
+  await assert.rejects(
+    createRegularCapturePersistence({ storage, indexedDB: unavailable }).ready(),
+    /unavailable during incomplete handoff/
+  );
+  assert.equal(storage.values.captureStateV1, undefined);
+
+  const recovered = createRegularCapturePersistence({ storage, indexedDB });
+  await recovered.ready();
+  assert.equal(must(await recovered.getDraft("draft"), "canonical draft").id, "draft");
+  assert.equal(mustRecord(storage.values.captureIndexV3, "repaired index").migrationStatus, "complete");
+});
+
+test("a malformed authority checkpoint never authorizes a stale legacy graph", async () => {
+  const storage = chromeStorage({
+    captureIndexV3: { version: 3, migrationStatus: "unknown" },
+    captureStateV1: {
+      version: 2,
+      activeDraftId: "stale",
+      drafts: { stale: { id: "stale", doc: document("Stale"), updatedAt: 1 } },
+      captures: {}
+    }
+  });
+  const unavailable = {
+    open() { throw new Error("IndexedDB unavailable with malformed checkpoint"); }
+  } as unknown as IDBFactory;
+  const repository = createRegularCapturePersistence({ storage, indexedDB: unavailable });
+  await assert.rejects(repository.ready(), /malformed checkpoint/);
+  assert.ok(storage.values.captureStateV1);
+});
+
 test("a failed local-index checkpoint uses legacy for the run and retries the import on restart", async () => {
   const storage = chromeStorage({
     captureStateV1: {
@@ -246,12 +342,22 @@ test("a failed completion marker retains legacy changes and retries the full imp
     IDBObjectStore.prototype.put = originalPut;
   }
 
+  assert.equal(mustRecord(storage.values.captureIndexV3, "migration checkpoint").migrationStatus, "imported");
+  const unavailable = {
+    open() { throw new Error("IndexedDB still unavailable"); }
+  } as unknown as IDBFactory;
+  const fallbackRestart = createRegularCapturePersistence({ storage, indexedDB: unavailable, now: () => 150 });
+  await fallbackRestart.ready();
+  assert.equal(fallbackRestart.backendName, "legacy");
+  const fallbackDraft = must(await fallbackRestart.getDraft("draft"), "second fallback draft");
+  await fallbackRestart.upsertDraft({ ...fallbackDraft, doc: document("Changed while IndexedDB remained unavailable") }, fallbackDraft.revision);
+
   const restarted = createRegularCapturePersistence({ storage, indexedDB, now: () => 200 });
   await restarted.ready();
   assert.equal(restarted.backendName, "indexeddb");
   assert.equal(
     must(must(must(await restarted.getDraft("draft"), "reimported draft").doc.content?.[0], "paragraph").content?.[0], "text").text,
-    "Changed after marker failure"
+    "Changed while IndexedDB remained unavailable"
   );
   assert.equal(storage.values.captureStateV1, undefined);
 });
@@ -283,7 +389,7 @@ test("a missing IndexedDB factory falls back lazily and records honest legacy di
 });
 
 test("a failed fallback metadata write does not hide the in-memory migration warning", async () => {
-  const storage = chromeStorage();
+  const storage = chromeStorage({ captureStateV1: { version: 2, activeDraftId: "", drafts: {}, captures: {} } });
   storage.set = async () => { throw new Error("legacy metadata unavailable"); };
   const repository = createRegularCapturePersistence({ storage });
   await repository.ready();
