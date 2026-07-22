@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createDeliveryQueue, classifyDeliveryError } from "../src/capture-queue.js";
 import { createCaptureRepository, DELIVERY_STATES } from "../src/capture-store.js";
-import type { CaptureDestination, CaptureRecord, CaptureRepositoryPort, Clock, DeliveryState } from "../src/contracts.js";
+import type { CaptureDestination, CaptureRecord, CaptureRepositoryPort, Clock, DeliveryState, TreeWriteJournal } from "../src/contracts.js";
 
 type TestRepository = ReturnType<typeof createCaptureRepository> & CaptureRepositoryPort;
 type TestConnection =
@@ -46,6 +46,21 @@ async function enqueue(
 function must<T>(value: T | null | undefined, label: string): T {
   assert.ok(value, label);
   return value;
+}
+
+function treeWrite(overrides: Partial<TreeWriteJournal> = {}): TreeWriteJournal {
+  return {
+    version: 1,
+    phase: "writing",
+    connectionId: "connection-1",
+    destinationType: "page",
+    destinationParentId: "original-page",
+    pageId: "original-page",
+    operationTimestamp: "2026-07-21T12:00:00.000Z",
+    groups: {},
+    archivedBlockIds: [],
+    ...overrides
+  };
 }
 
 test("queue honors Retry-After and serializes concurrent drains", async () => {
@@ -186,6 +201,41 @@ test("retarget without setup clears the old binding so completed setup can adopt
   assert.equal(stored.status, DELIVERY_STATES.pending);
 });
 
+test("manual destinations with tree journals retry ambiguous failures automatically", async () => {
+  const repository = repositoryFixture(() => 3_500);
+  const record = await enqueue(repository, { destination: { managedDestination: false, destinationId: "original-page", destinationType: "page" } });
+  await repository.updateCapture(record.id, { syncJournal: { treeWrite: treeWrite() } });
+  const queue = createDeliveryQueue({
+    repository,
+    now: () => 3_500,
+    getConnection: async () => ({ configured: true, connectionId: "connection-1" }),
+    deliver: async () => { throw Object.assign(new Error("Network lost"), { code: "network_error" }); }
+  });
+  const result = must(await queue.attempt(record.id), "tree retry result");
+  assert.equal(result.status, DELIVERY_STATES.pending);
+  assert.equal(result.lastError?.kind, "ambiguous_managed");
+});
+
+test("retarget refuses to reuse a journal after remote mutation evidence", async () => {
+  const repository = repositoryFixture(() => 3_750);
+  const destination = { managedDestination: false, destinationId: "original-page", destinationType: "page" } as const;
+  const record = await enqueue(repository, { destination, status: DELIVERY_STATES.blockedDestination });
+  await repository.updateCapture(record.id, {
+    syncJournal: { treeWrite: treeWrite({ groups: { "capture/section": ["root-1"] } }) }
+  });
+  const queue = createDeliveryQueue({
+    repository,
+    now: () => 3_750,
+    getConnection: async () => ({ configured: false }),
+    deliver: async () => ({ id: "unused" })
+  });
+  const result = must(await queue.retry(record.id, { retarget: true }), "blocked retarget");
+  assert.equal(result.status, DELIVERY_STATES.uncertain);
+  assert.deepEqual(result.destination, destination);
+  assert.deepEqual(result.syncJournal?.treeWrite?.groups, { "capture/section": ["root-1"] });
+  assert.equal(result.lastError?.kind, "attention_required");
+});
+
 test("restored authorization resumes captures from the same connection only", async () => {
   const repository = repositoryFixture(() => 4_000);
   const matching = await enqueue(repository, { status: DELIVERY_STATES.blockedAuth });
@@ -233,6 +283,7 @@ test("delivery classification distinguishes auth, destination, retryable, and am
   assert.equal(classifyDeliveryError({ status: 401 }).status, DELIVERY_STATES.blockedAuth);
   assert.equal(classifyDeliveryError({ status: 403 }).status, DELIVERY_STATES.blockedDestination);
   assert.equal(classifyDeliveryError({ status: 429 }).status, DELIVERY_STATES.pending);
+  assert.equal(classifyDeliveryError({ code: "tree_write_ambiguous" }, true).status, DELIVERY_STATES.uncertain);
   assert.equal(classifyDeliveryError({ offline: true }).status, DELIVERY_STATES.pending);
   assert.equal(classifyDeliveryError({ status: 404 }).status, DELIVERY_STATES.blockedDestination);
   assert.equal(classifyDeliveryError({ status: 409, code: "remote_conflict", name: "NotionConflictError" }).status, DELIVERY_STATES.blockedConflict);

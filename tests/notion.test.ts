@@ -25,6 +25,8 @@ import {
   updateRemoteNote,
   validateDestinationHealth
 } from "../src/notion.js";
+import { maximumListDepth } from "../src/editor-document-limits.js";
+import type { EditorNode, SyncJournal } from "../src/contracts.js";
 
 test("maps live Notion blocks back to editable Tiptap nodes and locks unsupported blocks in place", () => {
   const mapped = notionDocumentFromBlocks([
@@ -155,7 +157,7 @@ test("rejects inserted blocks without non-empty string IDs before journaling", a
     }),
     (error) => error instanceof NotionApiError && error.code === "invalid_response"
   );
-  assert.deepEqual(journals, []);
+  assert.deepEqual(journals, [{ phase: "writing" }]);
 });
 
 test("validates the final page before persisting a complete update journal", async () => {
@@ -184,6 +186,83 @@ test("validates the final page before persisting a complete update journal", asy
     (error) => error instanceof NotionApiError && error.code === "invalid_response"
   );
   assert.equal(phases.includes("complete"), false);
+});
+
+test("section replacement trees preserve locked roots and finish before archiving", async () => {
+  const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
+  const journals: SyncJournal[] = [];
+  let appendIndex = 0;
+  let pageGets = 0;
+  const initialBlocks = [
+    { id: "heading-old", type: "heading_3", heading_3: { rich_text: [{ plain_text: "Old" }] } },
+    { id: "before-old", type: "paragraph", paragraph: { rich_text: [{ plain_text: "Before old" }] } },
+    { id: "image", type: "image", image: { external: { url: "https://example.com/image.png" } } },
+    { id: "after-old", type: "paragraph", paragraph: { rich_text: [{ plain_text: "After old" }] } },
+    { id: "time-old", type: "paragraph", paragraph: { rich_text: [{ plain_text: "Updated yesterday" }] } },
+    { id: "divider-old", type: "divider", divider: {} }
+  ];
+  const result = await updateRemoteNote({
+    token: "token",
+    record: {
+      connectionId: "connection-1",
+      destination: { destinationType: "page", destinationId: "page" },
+      remote: {
+        kind: "section",
+        id: "page",
+        pageId: "page",
+        url: "https://notion.so/page",
+        blockIds: initialBlocks.map((block) => block.id)
+      }
+    },
+    capture: {
+      includeSource: false,
+      document: {
+        title: "Updated",
+        doc: {
+          type: "doc",
+          content: [
+            { type: "paragraph", content: [{ type: "text", text: "Before new" }] },
+            { type: "notionBlock", attrs: { remoteId: "image", remoteType: "image", label: "image" } },
+            { type: "paragraph", content: [{ type: "text", text: "After new" }] }
+          ]
+        }
+      }
+    },
+    now: () => new Date("2026-07-21T12:00:00.000Z"),
+    onJournal: async (value) => { journals.push(structuredClone(value)); },
+    fetchImpl: async (url, options = {}) => {
+      const method = options.method || "GET";
+      const body = options.body ? JSON.parse(String(options.body)) as Record<string, unknown> : {};
+      calls.push({ url, method, body });
+      if (url.includes("/blocks/page/children") && method === "GET") return response(200, { results: initialBlocks, has_more: false });
+      if (url.includes("/blocks/page/children") && method === "PATCH") {
+        const children = body.children as Array<{ type: string }>;
+        const prefix = appendIndex++ === 0 ? "before" : "after";
+        return response(200, { results: children.map((_, index) => ({ id: `${prefix}-${index}` })) });
+      }
+      if (method === "DELETE") return response(200, { id: url.split("/").at(-1), in_trash: true });
+      if (url.includes("/pages/page")) {
+        pageGets += 1;
+        return response(200, {
+          id: "page",
+          url: "https://notion.so/page",
+          last_edited_time: pageGets === 1 ? "before" : "after",
+          properties: { Name: { id: "title", type: "title", title: [{ plain_text: "Old" }] } }
+        });
+      }
+      throw new Error(`Unexpected ${method} ${url}`);
+    }
+  });
+
+  const patches = calls.filter((call) => call.method === "PATCH" && call.url.includes("/children"));
+  const firstDelete = calls.findIndex((call) => call.method === "DELETE");
+  assert.equal(patches.length, 2);
+  assert.ok(firstDelete > calls.map((call) => call.method).lastIndexOf("PATCH"));
+  assert.deepEqual(mustRecord(patches[0]?.body.position), { type: "start" });
+  assert.deepEqual(mustRecord(patches[1]?.body.position), { type: "after_block", after_block: { id: "image" } });
+  assert.ok(!calls.some((call) => call.method === "DELETE" && call.url.endsWith("/image")));
+  assert.deepEqual(result.blockIds, ["before-0", "before-1", "image", "after-0", "after-1", "after-2"]);
+  assert.equal(journals.at(-1)?.treeWrite?.phase, "complete");
 });
 
 test("loads sparse page successes as Untitled when properties are absent", async () => {
@@ -404,6 +483,9 @@ test("resolves a database URL to its first data source before saving", async () 
     calls.push({ url, options });
     if (url.includes("/data_sources/")) return response(404, { message: "not a data source" });
     if (url.includes("/databases/")) return response(200, { data_sources: [{ id: "resolved-source" }] });
+    if (url.includes("/blocks/created/children")) return response(200, {
+      results: [{ id: "root", type: "paragraph", paragraph: { rich_text: [{ plain_text: "Test note" }] } }]
+    });
     return response(200, {
       id: "created",
       url: "https://notion.so/created",
@@ -418,8 +500,10 @@ test("resolves a database URL to its first data source before saving", async () 
     fetchImpl
   });
 
-  const finalBody = parseBody(must(calls.at(-1)).options);
+  const createCall = must(calls.find((call) => call.url.endsWith("/v1/pages")));
+  const finalBody = parseBody(createCall.options);
   assert.equal(mustRecord(finalBody.parent).data_source_id, "resolved-source");
+  assert.equal("children" in finalBody, false);
 });
 
 test("rejects malformed successful page appends before exposing a remote target", async () => {
@@ -440,6 +524,7 @@ test("rejects malformed successful page appends before exposing a remote target"
         fetchImpl: async () => response(200, payload)
       }),
       (error) => error instanceof NotionApiError && error.code === "invalid_response"
+        || typeof error === "object" && error !== null && Reflect.get(error, "code") === "tree_write_ambiguous"
     );
   }
 });
@@ -463,6 +548,136 @@ test("rejects malformed successful database creates before exposing a remote tar
       (error) => error instanceof NotionApiError && error.code === "invalid_response"
     );
   }
+});
+
+test("database captures persist metadata-first tree progress before every mutation", async () => {
+  const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
+  const journals: SyncJournal[] = [];
+  const remote = await sendCapture({
+    token: "secret",
+    connectionId: "connection-1",
+    settings: {
+      destinationType: "database",
+      destinationId: "source-id",
+      managedDestination: true,
+      destinationProperties: {
+        title: { id: "title", name: "Name" },
+        captureId: { id: "capture-id", name: "Capture ID" }
+      }
+    },
+    capture: {
+      captureId: "capture-1",
+      includeSource: false,
+      document: {
+        title: "Nested",
+        doc: {
+          type: "doc",
+          content: [{
+            type: "bulletList",
+            content: [{
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "Root" }] },
+                { type: "orderedList", content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "Child" }] }] }] }
+              ]
+            }]
+          }]
+        }
+      }
+    },
+    now: () => new Date("2026-07-21T12:00:00.000Z"),
+    onJournal: async (value) => { journals.push(structuredClone(value)); },
+    fetchImpl: async (url, options = {}) => {
+      const body = options.body ? JSON.parse(String(options.body)) as Record<string, unknown> : {};
+      calls.push({ url, method: options.method || "GET", body });
+      if (url.includes("/query")) return response(200, { results: [] });
+      if (url.endsWith("/v1/pages") && options.method === "POST") return response(200, {
+        id: "page-1",
+        url: "https://notion.so/page-1",
+        last_edited_time: "2026-07-21T12:00:01.000Z"
+      });
+      if (url.includes("/blocks/page-1/children")) return response(200, { results: [{ id: "root-1" }] });
+      if (url.includes("/blocks/root-1/children")) return response(200, { results: [{ id: "child-1" }] });
+      if (url.includes("/pages/page-1")) return response(200, {
+        id: "page-1",
+        url: "https://notion.so/page-1",
+        last_edited_time: "2026-07-21T12:00:02.000Z"
+      });
+      throw new Error(`Unexpected ${options.method || "GET"} ${url}`);
+    }
+  });
+
+  const create = must(calls.find((call) => call.url.endsWith("/v1/pages")));
+  assert.equal("children" in create.body, false);
+  const captureIdText = mustRecord(item(must(mustRecord(mustRecord(create.body.properties)["capture-id"]).rich_text as unknown[]), 0));
+  assert.equal(mustRecord(captureIdText.text).content, "capture-1");
+  assert.deepEqual(journals.map((value) => value.treeWrite?.phase), ["creating_page", "writing", "writing", "writing", "complete"]);
+  assert.equal(journals[0]?.treeWrite?.pageId, undefined);
+  assert.equal(journals[1]?.treeWrite?.pageId, "page-1");
+  assert.deepEqual(journals.at(-1)?.treeWrite?.groups, {
+    "capture/content": ["root-1"],
+    "capture/content/0": ["child-1"]
+  });
+  assert.equal(remote.kind, "page");
+});
+
+test("shared-page captures write one managed section from an immutable timestamp", async () => {
+  const appendBodies: Record<string, unknown>[] = [];
+  const journals: SyncJournal[] = [];
+  const remote = await sendCapture({
+    token: "secret",
+    connectionId: "connection-1",
+    settings: { destinationType: "page", destinationId: "page-1", destinationUrl: "https://notion.so/page-1" },
+    capture: {
+      includeSource: true,
+      document: { title: "Section", doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Body" }] }] } },
+      sources: [{ title: "Example", url: "https://example.com" }]
+    },
+    now: () => new Date("2026-07-21T12:00:00.000Z"),
+    onJournal: async (value) => { journals.push(structuredClone(value)); },
+    fetchImpl: async (url, options = {}) => {
+      const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+      appendBodies.push(body);
+      const children = body.children as Array<{ type: string }>;
+      if (url.includes("/blocks/page-1/children")) return response(200, {
+        results: children.map((_, index) => ({ id: `root-${index}` }))
+      });
+      if (url.includes("/blocks/root-2/children")) return response(200, { results: [{ id: "source-1" }] });
+      throw new Error(`Unexpected ${url}`);
+    }
+  });
+  const roots = appendBodies[0]?.children as Array<Record<string, unknown>>;
+  assert.deepEqual(roots.map((block) => block.type), ["heading_3", "paragraph", "toggle", "paragraph", "divider"]);
+  const timestampText = mustRecord(item(must(mustRecord(roots[3]).paragraph as { rich_text: unknown[] }).rich_text, 0));
+  assert.equal(mustRecord(timestampText.text).content, `Captured ${new Date("2026-07-21T12:00:00.000Z").toLocaleString()}`);
+  assert.equal(remote.kind, "section");
+  assert.deepEqual(remote.blockIds, ["root-0", "root-1", "root-2", "root-3", "root-4"]);
+  assert.equal(journals.at(-1)?.treeWrite?.phase, "complete");
+});
+
+test("ten-level mixed lists round trip with ordered metadata and checked states", () => {
+  const listTypes = Array.from({ length: 10 }, (_, index) => ["bulletList", "orderedList", "taskList"][index % 3] as string);
+  const nested = (index: number): EditorNode => {
+    const type = listTypes[index]!;
+    const itemType = type === "taskList" ? "taskItem" : "listItem";
+    return {
+      type,
+      ...(type === "orderedList" ? { attrs: { start: index + 2, type: index % 2 ? "a" : "i" } } : {}),
+      content: [{
+        type: itemType,
+        ...(type === "taskList" ? { attrs: { checked: index % 2 === 0 } } : {}),
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: `Level ${index + 1}` }] },
+          ...(index < 9 ? [nested(index + 1)] : [])
+        ]
+      }]
+    };
+  };
+  const original: EditorNode = { type: "doc", content: [nested(0)] };
+  const blocks = notionBlocksFromDocument(original);
+  const restored = notionDocumentFromBlocks(blocks).doc;
+  assert.equal(maximumListDepth(restored), 10);
+  assert.deepEqual(notionBlocksFromDocument(restored), blocks);
 });
 
 test("builds a workspace-level Quick Notes database with a title property", () => {
