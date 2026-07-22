@@ -21,6 +21,7 @@ import TaskList from "@tiptap/extension-task-list";
 import Text from "@tiptap/extension-text";
 import Underline from "@tiptap/extension-underline";
 import { TrailingNode, UndoRedo } from "@tiptap/extensions";
+import { AllSelection, TextSelection } from "@tiptap/pm/state";
 import { LIST_DEPTH_LIMIT_MESSAGE, MAX_CAPTURE_CHARACTERS, MAX_CAPTURE_TITLE_CHARACTERS, MAX_LIST_LEVELS } from "./constants.js";
 import { clampComposerBounds, defaultComposerBounds, normalizeStoredComposerBounds, type ComposerBounds } from "./composer-bounds.js";
 import { enqueueWithReconciliation, isContentRuntimeResponse, withRuntimeMessageDeadline, type ContentRuntimeRequest } from "./runtime-message.js";
@@ -270,6 +271,7 @@ function currentEditor(editor: Editor | undefined): Editor {
   const DRAFT_VERSION = 2;
   const COMPOSER_BOUNDS_STORAGE_KEY = "quickNoteComposerBounds";
   const COMPOSER_FONT = '15px "NotionInter"';
+  const APPLE_PLATFORM = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   const KEYBOARD_EVENTS = ["keydown", "keypress", "keyup"];
   const handledKeyboardEvents = new WeakSet();
   const composerKeyboardEvents = new WeakSet<KeyboardEvent>();
@@ -292,6 +294,7 @@ function currentEditor(editor: Editor | undefined): Editor {
   let editor: Editor | undefined;
   let slashIndex = 0;
   let lastSlashQuery: string | null = null;
+  let blockSelectionEscalation: { editor: Editor; from: number; to: number } | null = null;
 
   let disposed = false;
   const instances = new Set<PopupInstance>();
@@ -726,6 +729,7 @@ function currentEditor(editor: Editor | undefined): Editor {
     instance.closed = true;
     if (popup === instance) popup = undefined;
     if (editor === instance.editor) editor = undefined;
+    if (blockSelectionEscalation?.editor === instance.editor) blockSelectionEscalation = null;
 
     stopTimers(instance);
     document.removeEventListener("fullscreenchange", instance.onFullscreenChange);
@@ -755,6 +759,7 @@ function currentEditor(editor: Editor | undefined): Editor {
     instance.closed = true;
     if (popup === instance) popup = undefined;
     if (editor === instance.editor) editor = undefined;
+    if (blockSelectionEscalation?.editor === instance.editor) blockSelectionEscalation = null;
     if (!instance.accepted && !instance.handoff && !instance.contextLost) void persistDraft(instance).catch(() => undefined);
     stopTimers(instance);
     document.removeEventListener("fullscreenchange", instance.onFullscreenChange);
@@ -1137,12 +1142,21 @@ function currentEditor(editor: Editor | undefined): Editor {
         }
       },
       onUpdate: () => {
+        blockSelectionEscalation = null;
         instance.userEdited = true;
         updateEditorUi(root);
         reportListDepthViolation(root, createdEditor);
         scheduleDraft(instance);
       },
-      onSelectionUpdate: () => updateEditorUi(root),
+      onSelectionUpdate: ({ editor: updatedEditor }) => {
+        if (blockSelectionEscalation?.editor === updatedEditor) {
+          const { from, to } = updatedEditor.state.selection;
+          if (from !== blockSelectionEscalation.from || to !== blockSelectionEscalation.to) {
+            blockSelectionEscalation = null;
+          }
+        }
+        updateEditorUi(root);
+      },
       onFocus: () => updateEditorUi(root),
       onBlur: () => schedule(instance, () => {
         if (popup === instance && !instance.closed) updateBubble(root);
@@ -2259,6 +2273,13 @@ function currentEditor(editor: Editor | undefined): Editor {
 
   function handleEditorKeyDown(root: ComposerRoot, event: KeyboardEvent): boolean {
     const activeEditor = currentEditor(editor);
+    const hasPrimaryModifier = APPLE_PLATFORM ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+    const isSelectAll = hasPrimaryModifier
+      && !event.altKey
+      && !event.shiftKey
+      && event.key.toLowerCase() === "a";
+    const isModifierOnly = event.key === "Alt" || event.key === "Control" || event.key === "Meta" || event.key === "Shift";
+    if (!isSelectAll && !isModifierOnly) blockSelectionEscalation = null;
     if (event.key === "Tab" && !event.shiftKey && selectedListDepth(activeEditor) >= MAX_LIST_LEVELS) {
       handledKeyboardEvents.add(event);
       event.preventDefault();
@@ -2284,6 +2305,11 @@ function currentEditor(editor: Editor | undefined): Editor {
         const open = activeEditor.getAttributes("toggleBlock").open !== false;
         return activeEditor.chain().focus().updateAttributes("toggleBlock", { open: !open }).run();
       }
+    }
+    if (isSelectAll) {
+      event.preventDefault();
+      if (event.repeat) return true;
+      return selectCurrentBlockOrDocument(activeEditor);
     }
     const slash = root.querySelector(".slash-menu");
     if (!slash.hidden) {
@@ -2312,6 +2338,34 @@ function currentEditor(editor: Editor | undefined): Editor {
       return true;
     }
     return false;
+  }
+
+  function selectCurrentBlockOrDocument(activeEditor: Editor): boolean {
+    const { state, view } = activeEditor;
+    const { selection } = state;
+    const withinOneTextBlock = selection.$from.sameParent(selection.$to) && selection.$from.parent.isTextblock;
+    const shouldEscalate = blockSelectionEscalation?.editor === activeEditor
+      && selection.from === blockSelectionEscalation.from
+      && selection.to === blockSelectionEscalation.to;
+
+    const parentText = selection.$from.parent.textBetween(0, selection.$from.parent.content.size, "", "");
+    if (!shouldEscalate && !(selection instanceof AllSelection) && withinOneTextBlock && parentText.length > 0) {
+      const from = selection.$from.start();
+      const to = selection.$from.end();
+      if (selection.from !== from || selection.to !== to) {
+        view.dispatch(state.tr.setSelection(TextSelection.create(state.doc, from, to)).scrollIntoView());
+      }
+      blockSelectionEscalation = { editor: activeEditor, from, to };
+      view.focus();
+      return true;
+    }
+
+    blockSelectionEscalation = null;
+    if (!(selection instanceof AllSelection)) {
+      view.dispatch(state.tr.setSelection(new AllSelection(state.doc)).scrollIntoView());
+    }
+    view.focus();
+    return true;
   }
 
   function handleLinkPaste(event: ClipboardEvent): boolean {

@@ -316,6 +316,12 @@ button { -webkit-tap-highlight-color: transparent; }
 .ProseMirror details[data-type="toggle-block"] { margin: 2px 0; }
 .ProseMirror details[data-type="toggle-block"] > summary { cursor: text; }
 .ProseMirror details[data-type="toggle-block"] > summary::marker { color: var(--nqn-text-secondary); }
+.ProseMirror > :is(h1, h2, h3):has(+ :is(p, blockquote, pre, ul, ol, details[data-type="toggle-block"])) { margin-bottom: 4px; }
+.ProseMirror > :is(h1, h2, h3) + :is(p, blockquote, pre, ul, ol, details[data-type="toggle-block"]) { margin-top: 0; }
+.ProseMirror > h1 + :is(h2, h3),
+.ProseMirror > h2 + h3 { margin-top: 10px; }
+.ProseMirror > :is(ul, ol):has(+ :is(ul, ol)) { margin-bottom: 0; }
+.ProseMirror > :is(ul, ol) + :is(ul, ol) { margin-top: 0; }
 .ProseMirror ::selection { background: color-mix(in srgb, var(--nqn-focus), transparent 76%); }
 .notion-block-placeholder {
   min-height: 52px;
