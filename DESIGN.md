@@ -35,13 +35,14 @@ Bundle NotionInter locally in Regular 400, Medium 500, Semibold 600, and Bold 70
 | Panel/subheading | `-1%` | `120%` |
 | Body and controls | `0` | `140%` |
 
-The onboarding title is 40px, panel headings are 20px, explanatory copy is 15px, and compact controls and metadata are 12–13px. Notion's Serif (Lyon Text) and Mono (iA Writer Mono) modes are page-style references only; neither font is bundled because these surfaces do not expose Notion's page-font selector.
+Use 40px for the onboarding title, 28px for the composer title, 20px for panel headings, and 15px for editor and explanatory copy. Standard interface chrome uses 12–14px; 10–11px is reserved for secondary metadata and nonessential supporting copy, never primary actions or delivery state. Notion's Serif (Lyon Text) and Mono (iA Writer Mono) modes are page-style references only; neither font is bundled because these surfaces do not expose Notion's page-font selector.
 
 ## Shape, spacing, and elevation
 
 - Use a 4px spacing foundation.
 - Controls use 6px radii, structural panels use 8px, and the composer uses a 10px outer radius.
 - Do not introduce radii larger than 10px.
+- Reserve pill radii for toggles, badges, and compact status indicators; calls to action retain the 6px control radius.
 - Use borders before shadows. Panels use the shallow outline shadow; only the floating composer uses the oversized popover shadow.
 - Do not use blur, translucency as a surface treatment, gradients, or decorative glass effects.
 
@@ -51,30 +52,8 @@ Primary actions are accessible blue. Secondary actions use a neutral outline and
 
 The onboarding sequence remains Connect → Destination → Ready with progressive disclosure for advanced configuration. The composer keeps a 40px header, a 15px page editor with an optional title and quote blocks, and a compact overflow menu for destination, source attachment, and settings. Long workspace, page, and destination names truncate instead of changing layout.
 
-Use the bundled Notion cube artwork for Notion identity. UI actions use consistent 16px inline SVG icons; never substitute letters, punctuation, or Unicode glyphs for logo, more, search, refresh, close, or check controls.
+Use the bundled Notion cube artwork for Notion identity. Inline SVG icons use three intentional tiers: 14px for compact control glyphs, 16px for standard actions and navigation, and 20px for content or destination identity. Never substitute letters, punctuation, or Unicode glyphs for logo, more, search, refresh, close, or check controls.
 
 ## Accessibility and compatibility
 
 Both surfaces support light and dark browser preferences, keyboard-only operation, visible focus, reduced motion, and widths below 640px. All fonts and design assets are packaged with the extension; the UI must not issue remote font or asset requests. Styling may change without changing OAuth, storage keys, Notion messages, draft behavior, or save timing.
-
-## Native Notion tree delivery
-
-Quick Note writes native Notion block trees as sequential childless sibling groups. Before the first remote mutation it persists a versioned `treeWrite` journal containing the immutable operation timestamp, destination identity, page identity when known, deterministic group-path-to-block-ID mappings, and archived root IDs. Only a tree's root group receives an insertion position; descendant groups append to the parent IDs returned by Notion.
-
-```text
-initializing
-    |
-    +-- database --> creating_page --> writing
-    |
-    +-- shared page ----------------> writing
-                                       |
-                            all groups journaled
-                                       |
-                         update only: archiving
-                                       |
-                                    complete
-                                       |
-                            queue marks delivered
-```
-
-The queue never treats page existence alone as proof of delivery for a tree write. On interruption, journaled groups are skipped and an unjournaled ambiguous group is adopted only when one contiguous shallow-fingerprint match exists at the expected parent and root position. Zero or multiple matches require review. Recent-note updates materialize every replacement tree before archiving any old editable root, preserve top-level locked Notion placeholders in their original order, and continue the legacy `insertedSegments` path for operations started before this journal version.

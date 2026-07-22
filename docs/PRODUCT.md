@@ -48,6 +48,28 @@ Quick Note preserves bullet, numbered, task, and mixed list types when saving, r
 
 Pasted, restored, or programmatically supplied documents deeper than ten levels remain editable and are still saved locally as drafts. Remote enqueue is blocked with the same message until the deepest items are outdented to level 10 or less.
 
+## Native Notion tree delivery
+
+Quick Note writes native Notion block trees as sequential childless sibling groups. Before the first remote mutation it persists a versioned `treeWrite` journal containing the immutable operation timestamp, destination identity, page identity when known, deterministic group-path-to-block-ID mappings, and archived root IDs. Only a tree's root group receives an insertion position; descendant groups append to the parent IDs returned by Notion.
+
+```text
+initializing
+    |
+    +-- database --> creating_page --> writing
+    |
+    +-- shared page ----------------> writing
+                                       |
+                            all groups journaled
+                                       |
+                         update only: archiving
+                                       |
+                                    complete
+                                       |
+                            queue marks delivered
+```
+
+The queue never treats page existence alone as proof of delivery for a tree write. On interruption, journaled groups are skipped and an unjournaled ambiguous group is adopted only when one contiguous shallow-fingerprint match exists at the expected parent and root position. Zero or multiple matches require review. Recent-note updates materialize every replacement tree before archiving any old editable root, preserve top-level locked Notion placeholders in their original order, and continue the legacy `insertedSegments` path for operations started before this journal version.
+
 ## Release gates
 
 - Verify refresh-token rotation and revocation against the deployed production broker
