@@ -51,13 +51,21 @@ function compactRemoteId(value: unknown = ""): string {
   return String(value || "").replaceAll("-", "").toLowerCase();
 }
 
-interface RecordRepositoryOptions {
+export interface RecordRepositoryOptions {
   backend: CaptureBackend;
   now?: Clock;
   uuid?: UUIDFactory;
 }
 
-interface EditDraftRequest {
+export interface DraftRequest {
+  tabId?: number | null;
+  context?: unknown;
+  includeSource?: boolean;
+  sessionId?: string;
+  draftId?: string;
+}
+
+export interface EditDraftRequest {
   recordId: string;
   title: string;
   doc: unknown;
@@ -70,7 +78,7 @@ interface EditDraftRequest {
   replace?: boolean;
 }
 
-interface EnqueueRequest {
+export interface EnqueueRequest {
   draftId?: string;
   capture: unknown;
   context?: unknown;
@@ -80,7 +88,15 @@ interface EnqueueRequest {
   incognito?: boolean;
 }
 
-interface ImportRemoteCaptureRequest {
+export interface EnqueueUpdateRequest {
+  draftId: string;
+  recordId: string;
+  capture: unknown;
+  baseFingerprint?: string;
+  status: DeliveryState;
+}
+
+export interface ImportRemoteCaptureRequest {
   pageId: string;
   title?: string;
   url?: string;
@@ -150,14 +166,6 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       await changed("import", { structural: true });
       return repository.load();
     },
-    async save(state: CaptureState) {
-      return repository.importState(state);
-    },
-    async updateState(callback: (state: CaptureState) => void | Promise<void>) {
-      const state = await repository.load();
-      await callback(state);
-      return repository.importState(state);
-    },
     async getMeta() {
       return transaction(["meta"], "readonly", metaIn);
     },
@@ -207,7 +215,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         return counts;
       }, {});
     },
-    async getOrCreateDraft({ tabId, context, includeSource = true, sessionId = "", draftId = "" }: { tabId?: number | null; context?: unknown; includeSource?: boolean; sessionId?: string; draftId?: string }) {
+    async getOrCreateDraft({ tabId, context, includeSource = true, sessionId = "", draftId = "" }: DraftRequest) {
       let structural = false;
       const result = await transaction(["meta", "drafts"], "readwrite", async (tx) => {
         const meta = await metaIn(tx);
@@ -422,7 +430,7 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
       await changed("capture", { structural: true, id: result.id, record: result });
       return result;
     },
-    async enqueueUpdate({ draftId, recordId, capture, baseFingerprint, status }: { draftId: string; recordId: string; capture: unknown; baseFingerprint?: string; status: DeliveryState }) {
+    async enqueueUpdate({ draftId, recordId, capture, baseFingerprint, status }: EnqueueUpdateRequest) {
       const result = await transaction(["meta", "drafts", "captures"], "readwrite", async (tx) => {
         const record = await tx.getCapture(recordId);
         if (!record) throw new CaptureStorageError("The recent note is no longer available locally.", "missing_capture");

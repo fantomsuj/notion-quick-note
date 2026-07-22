@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createLegacyGraphBackend } from "../src/capture-legacy-backend.js";
 import { createDeliveryQueue, classifyDeliveryError } from "../src/capture-queue.js";
-import { createCaptureRepository, DELIVERY_STATES } from "../src/capture-store.js";
+import { createRecordCaptureRepository } from "../src/capture-record-repository.js";
+import { DELIVERY_STATES } from "../src/capture-store.js";
 import type { CaptureDestination, CaptureRecord, CaptureRepositoryPort, Clock, DeliveryState } from "../src/contracts.js";
 
-type TestRepository = ReturnType<typeof createCaptureRepository> & CaptureRepositoryPort;
+type TestRepository = ReturnType<typeof createRecordCaptureRepository> & CaptureRepositoryPort;
 type TestConnection =
   | { configured: false; connectionId?: string; destination?: CaptureDestination | null }
   | { configured: true; connectionId: string; destination?: CaptureDestination | null };
@@ -22,10 +24,10 @@ function repositoryFixture(now: Clock): TestRepository {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
     }
   };
-  const repository = createCaptureRepository({ storage, now, uuid: () => `capture-${++id}` });
-  return Object.assign(repository, {
-    backendName: "memory",
-    setChangeHandler: (_handler: Parameters<CaptureRepositoryPort["setChangeHandler"]>[0]) => undefined
+  return createRecordCaptureRepository({
+    backend: createLegacyGraphBackend({ storage }),
+    now,
+    uuid: () => `capture-${++id}`
   });
 }
 
