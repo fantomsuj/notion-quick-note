@@ -7,11 +7,22 @@ import { buildExtension } from "../../scripts/build.js";
 import { isRuntimeResponse, type CaptureContext, type EditorNode, type RuntimeRequest, type RuntimeResponse } from "../../src/contracts.js";
 
 type HarnessPoint = "enqueue_committed" | "sending_committed" | "request_pending" | "remote_succeeded" | "oauth_refresh"
-  | "malformed_database_success" | "malformed_page_success";
+  | "malformed_database_success" | "malformed_page_success"
+  | "tree_journal_initialized" | "page_created" | "root_group_remote_succeeded"
+  | "child_group_journaled" | "archiving_started" | "complete_journaled";
 type HarnessKeysPayload = { harnessKey: string; eventKey: string; ledgerKey: string; point: HarnessPoint; runId: string };
 type HarnessArmPayload = Pick<HarnessKeysPayload, "harnessKey" | "point" | "runId">;
 interface LedgerRequest { url: string; body?: Record<string, unknown> }
-interface HarnessLedger { pages: Record<string, unknown>; requests: LedgerRequest[]; createAttempts: number; acceptedCreates: number; refreshCompletions: number }
+interface HarnessLedger {
+  pages: Record<string, unknown>;
+  requests: LedgerRequest[];
+  createAttempts: number;
+  acceptedCreates: number;
+  refreshCompletions: number;
+  groups?: Record<string, Array<Record<string, unknown>>>;
+  appendAttemptsByParent?: Record<string, number>;
+  archiveAttempts?: Record<string, number>;
+}
 interface EnqueueOutcome {
   response?: { ok?: boolean; accepted?: boolean };
   portError?: string;
@@ -164,12 +175,17 @@ test("real MV3 worker durably recovers a queued capture after termination and pr
 });
 
 const terminationCases = [
-  { point: "enqueue_committed", label: "immediately after enqueue commits", beforeStatus: "pending", beforeAttempts: 0, createAttempts: 1 },
-  { point: "sending_committed", label: "after sending is durable", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1 },
-  { point: "request_pending", label: "while the Notion create is pending", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 2 },
-  { point: "remote_succeeded", label: "after Notion succeeds before local delivery is recorded", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1 },
-  { point: "oauth_refresh", label: "during OAuth token refresh", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 2 }
-] as const satisfies readonly { point: HarnessPoint; label: string; beforeStatus: string; beforeAttempts: number; createAttempts: number }[];
+  { point: "enqueue_committed", label: "immediately after enqueue commits", beforeStatus: "pending", beforeAttempts: 0, createAttempts: 1, acceptedCreates: 0 },
+  { point: "sending_committed", label: "after sending is durable", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 0 },
+  { point: "request_pending", label: "while the Notion create is pending", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 2, acceptedCreates: 0 },
+  { point: "remote_succeeded", label: "after Notion succeeds before local delivery is recorded", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 1 },
+  { point: "oauth_refresh", label: "during OAuth token refresh", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 0 },
+  { point: "tree_journal_initialized", label: "after the tree journal is initialized", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 0 },
+  { point: "page_created", label: "after the page is created", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 1 },
+  { point: "root_group_remote_succeeded", label: "after a root group succeeds remotely", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 1 },
+  { point: "child_group_journaled", label: "after a child group is journaled", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 1 },
+  { point: "complete_journaled", label: "after completion is journaled", beforeStatus: "sending", beforeAttempts: 1, createAttempts: 1, acceptedCreates: 1 }
+] as const satisfies readonly { point: HarnessPoint; label: string; beforeStatus: string; beforeAttempts: number; createAttempts: number; acceptedCreates: number }[];
 
 for (const scenario of terminationCases) {
   test(`real MV3 worker recovers ${scenario.label}`, async () => {
@@ -284,7 +300,7 @@ for (const scenario of terminationCases) {
       };
       expect(before.record).toMatchObject({ status: scenario.beforeStatus, attemptCount: scenario.beforeAttempts });
       expect(before.draftPresent).toBe(false);
-      expect(before.ledger.acceptedCreates).toBe(scenario.point === "remote_succeeded" ? 1 : 0);
+      expect(before.ledger.acceptedCreates).toBe(scenario.acceptedCreates);
       if (scenario.point === "oauth_refresh") {
         expect(before.token).toBe("access-old");
         expect(before.refreshToken).toBeUndefined();

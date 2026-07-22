@@ -22,11 +22,12 @@ import Text from "@tiptap/extension-text";
 import Underline from "@tiptap/extension-underline";
 import { TrailingNode, UndoRedo } from "@tiptap/extensions";
 import { AllSelection, TextSelection } from "@tiptap/pm/state";
-import { MAX_CAPTURE_CHARACTERS, MAX_CAPTURE_TITLE_CHARACTERS } from "./constants.js";
+import { LIST_DEPTH_LIMIT_MESSAGE, MAX_CAPTURE_CHARACTERS, MAX_CAPTURE_TITLE_CHARACTERS, MAX_LIST_LEVELS } from "./constants.js";
 import { clampComposerBounds, defaultComposerBounds, normalizeStoredComposerBounds, type ComposerBounds } from "./composer-bounds.js";
 import { enqueueWithReconciliation, isContentRuntimeResponse, withRuntimeMessageDeadline, type ContentRuntimeRequest } from "./runtime-message.js";
 import { AI_NOTE_LIMITS, cleanNoteTask, extractNoteTodos, languageModelAvailability, suggestNoteTitle } from "./ai-note-actions.js";
 import { isEditorNode, isRecord, type CaptureContext, type CaptureDraft, type CaptureDraftInput, type CaptureSource, type CaptureStatusRecord, type EditorNode, type NotionColorName, type QuickSettings, type RecentItem, type RemoteTarget, type RuntimeRequest, type RuntimeResponse } from "./contracts.js";
+import { assertSupportedListDepth, maximumListDepth } from "./editor-document-limits.js";
 
 type HTMLElementConstructor<T extends HTMLElement = HTMLElement> = { new(): T };
 interface ComposerElements {
@@ -949,6 +950,7 @@ function currentEditor(editor: Editor | undefined): Editor {
     root.querySelector(".page-title").value = draft.title || "";
     const draftEditor = requireEditor(instance);
     draftEditor.commands.setContent(draft.doc, { emitUpdate: false });
+    reportListDepthViolation(root, draftEditor);
     renderSources(root, instance);
     renderEditBanner(root, instance);
     instance.userEdited = false;
@@ -1130,12 +1132,17 @@ function currentEditor(editor: Editor | undefined): Editor {
           }
         },
         handleKeyDown: (_view, event) => handleEditorKeyDown(root, event),
-        handlePaste: (_view, event) => handleLinkPaste(event)
+        handlePaste: (_view, event) => {
+          const handled = handleLinkPaste(event);
+          queueMicrotask(() => reportListDepthViolation(root, createdEditor));
+          return handled;
+        }
       },
       onUpdate: () => {
         blockSelectionEscalation = null;
         instance.userEdited = true;
         updateEditorUi(root);
+        reportListDepthViolation(root, createdEditor);
         scheduleDraft(instance);
       },
       onSelectionUpdate: ({ editor: updatedEditor }) => {
@@ -1155,6 +1162,7 @@ function currentEditor(editor: Editor | undefined): Editor {
     instance.editor = createdEditor;
     editor = createdEditor;
     updateEditorUi(root);
+    reportListDepthViolation(root, createdEditor);
   }
 
   async function discardDraft(root: ComposerRoot, instance: PopupInstance): Promise<void> {
@@ -1999,6 +2007,15 @@ function currentEditor(editor: Editor | undefined): Editor {
       captureEditor.commands.focus();
       return;
     }
+    try {
+      const value: unknown = captureEditor.getJSON();
+      if (!isEditorNode(value)) throw new Error("Quick Note editor produced an invalid document.");
+      assertSupportedListDepth(value);
+    } catch (error: unknown) {
+      showToast(root, errorMessage(error, LIST_DEPTH_LIMIT_MESSAGE), "error", instance);
+      captureEditor.commands.focus();
+      return;
+    }
 
     if (instance.draftTimer !== null) clearTimeout(instance.draftTimer);
     if (instance.draftFeedbackTimer !== null) clearTimeout(instance.draftFeedbackTimer);
@@ -2256,6 +2273,12 @@ function currentEditor(editor: Editor | undefined): Editor {
     const isSelectAll = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "a";
     const isModifierOnly = event.key === "Alt" || event.key === "Control" || event.key === "Meta" || event.key === "Shift";
     if (!isSelectAll && !isModifierOnly) blockSelectionEscalation = null;
+    if (event.key === "Tab" && !event.shiftKey && selectedListDepth(activeEditor) >= MAX_LIST_LEVELS) {
+      handledKeyboardEvents.add(event);
+      event.preventDefault();
+      showToast(root, LIST_DEPTH_LIMIT_MESSAGE, "error");
+      return true;
+    }
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "Enter") {
       handledKeyboardEvents.add(event);
       event.preventDefault();
@@ -2343,6 +2366,23 @@ function currentEditor(editor: Editor | undefined): Editor {
     if (from === to || !isUrl(url)) return false;
     event.preventDefault();
     activeEditor.chain().focus().setLink({ href: url }).run();
+    return true;
+  }
+
+  function selectedListDepth(activeEditor: Editor): number {
+    const { $from } = activeEditor.state.selection;
+    let depth = 0;
+    for (let index = 0; index <= $from.depth; index += 1) {
+      const type = $from.node(index).type.name;
+      if (type === "bulletList" || type === "orderedList" || type === "taskList") depth += 1;
+    }
+    return depth;
+  }
+
+  function reportListDepthViolation(root: ComposerRoot, activeEditor: Editor): boolean {
+    const value: unknown = activeEditor.getJSON();
+    if (!isEditorNode(value) || maximumListDepth(value) <= MAX_LIST_LEVELS) return false;
+    showToast(root, LIST_DEPTH_LIMIT_MESSAGE, "error");
     return true;
   }
 

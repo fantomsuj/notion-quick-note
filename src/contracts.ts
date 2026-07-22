@@ -169,9 +169,26 @@ export interface RemoteTarget {
   fingerprint: string;
 }
 
+export type TreeWritePhase = "initializing" | "creating_page" | "writing" | "archiving" | "complete";
+
+export interface TreeWriteJournal {
+  version: 1;
+  phase: TreeWritePhase;
+  connectionId: string;
+  destinationType: "database" | "page";
+  destinationParentId: string;
+  pageId?: string;
+  pageUrl?: string;
+  operationTimestamp: string;
+  groups: Record<string, string[]>;
+  archivedBlockIds: string[];
+}
+
 export interface SyncJournal {
   insertedSegments?: Record<string, string[]>;
-  [key: string]: JsonValue | undefined;
+  archivedIds?: string[];
+  treeWrite?: TreeWriteJournal;
+  [key: string]: JsonValue | TreeWriteJournal | undefined;
 }
 
 export interface CaptureDraft {
