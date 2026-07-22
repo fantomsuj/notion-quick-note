@@ -589,7 +589,9 @@ export function createRecordCaptureRepository({ backend, now = () => Date.now(),
         const captures = await tx.getAllCaptures();
         if (recoverInterrupted) {
           for (const record of captures.filter((item) => item.status === DELIVERY_STATES.sending)) {
-            record.status = record.destination?.managedDestination ? DELIVERY_STATES.pending : DELIVERY_STATES.uncertain;
+            record.status = record.destination?.managedDestination || record.syncJournal?.treeWrite
+              ? DELIVERY_STATES.pending
+              : DELIVERY_STATES.uncertain;
             record.nextAttemptAt = record.status === DELIVERY_STATES.pending ? timestamp : 0;
             record.lastError = { kind: "interrupted", message: "Delivery was interrupted before Notion confirmed the result." };
             record.updatedAt = timestamp;

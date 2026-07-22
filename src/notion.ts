@@ -3,7 +3,15 @@ import {
   MAX_CAPTURE_CHARACTERS,
   MAX_CAPTURE_TITLE_CHARACTERS
 } from "./constants.js";
-import type { CaptureDestination, CaptureSource, EditorMark, EditorNode, RemoteTarget, Settings } from "./contracts.js";
+import type { CaptureDestination, CaptureSource, EditorMark, EditorNode, RemoteTarget, Settings, SyncJournal, TreeWriteJournal } from "./contracts.js";
+import {
+  appendBlockTree,
+  NotionTreeWriteReviewError,
+  type NotionAppendPosition,
+  type NotionRemoteBlock,
+  type NotionTreeRequestPort,
+  type NotionWriteBlock
+} from "./notion-tree-writer.js";
 
 type NotionFetchPort = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -137,8 +145,9 @@ interface RemoteInput {
 }
 
 interface NoteRecordInput {
+  connectionId?: string;
   remote?: RemoteInput;
-  syncJournal?: { insertedSegments?: Record<string, string[]> };
+  syncJournal?: SyncJournal | null;
   pendingCapture?: CaptureInput;
   syncedCapture?: CaptureInput;
   capture?: CaptureInput;
@@ -411,13 +420,12 @@ function notionCodeLanguage(language: unknown): string {
 
 function validateBlocks(blocks: NotionEntity[]): void {
   let total = 0;
-  const visit = (items: NotionEntity[], depth = 0): void => {
+  const visit = (items: NotionEntity[]): void => {
     if (items.length > MAX_BLOCK_CHILDREN) throw new Error("Quick Note supports up to 100 blocks in one section.");
-    if (depth > 2) throw new Error("Notion supports two nested list levels per quick capture. Reduce the nesting before saving.");
     for (const block of items) {
       total += 1;
       const children = blockAttributes(block).children || [];
-      if (children.length) visit(children, depth + 1);
+      if (children.length) visit(children);
     }
   };
   visit(blocks);
@@ -668,7 +676,23 @@ export async function validateDestinationHealth({ token, settings, fetchImpl = f
   return { ok: true, id: block.id };
 }
 
-export async function sendCapture({ token, settings, capture, fetchImpl = fetch }: NotionRequestOptions & { settings: NotionSettingsInput; capture: CaptureInput }) {
+export async function sendCapture({
+  token,
+  settings,
+  capture,
+  connectionId = "",
+  journal = {},
+  onJournal = async () => undefined,
+  fetchImpl = fetch,
+  now = () => new Date()
+}: NotionRequestOptions & {
+  settings: NotionSettingsInput;
+  capture: CaptureInput;
+  connectionId?: string;
+  journal?: SyncJournal;
+  onJournal?: (journal: SyncJournal) => Promise<void>;
+  now?: () => Date;
+}): Promise<RemoteTarget> {
   if (!token) throw new Error("Connect Notion in Settings first.");
   if (!settings.destinationId) throw new Error("Choose a Notion destination in Settings.");
   const resolvedSettings = settings.destinationType === "database"
@@ -679,9 +703,177 @@ export async function sendCapture({ token, settings, capture, fetchImpl = fetch 
           : await resolveDataSourceId(token, settings.destinationId, fetchImpl)
       }
     : settings;
-  const request = buildCaptureRequest({ ...resolvedSettings, destinationId: resolvedSettings.destinationId || settings.destinationId }, capture);
-  const result = await notionRequest(token, request.path, request, fetchImpl);
-  return captureRemoteTarget(result, resolvedSettings);
+  const destinationParentId = normalizeNotionId(resolvedSettings.destinationId || settings.destinationId);
+  const destinationType = resolvedSettings.destinationType === "database" ? "database" : "page";
+  const existingTree = journal.treeWrite;
+  if (existingTree && (existingTree.connectionId !== connectionId
+    || existingTree.destinationType !== destinationType
+    || normalizeNotionId(existingTree.destinationParentId) !== destinationParentId)) {
+    throw new NotionTreeIdentityError();
+  }
+
+  let treeWrite: TreeWriteJournal = existingTree ? cloneTreeWrite(existingTree) : {
+    version: 1,
+    phase: destinationType === "database" ? "creating_page" : "writing",
+    connectionId,
+    destinationType,
+    destinationParentId,
+    ...(destinationType === "page" ? {
+      pageId: destinationParentId,
+      ...(resolvedSettings.destinationUrl ? { pageUrl: resolvedSettings.destinationUrl } : {})
+    } : {}),
+    operationTimestamp: now().toISOString(),
+    groups: {},
+    archivedBlockIds: []
+  };
+  const persistTree = async (next: TreeWriteJournal): Promise<void> => {
+    treeWrite = cloneTreeWrite(next);
+    await onJournal({ ...journal, treeWrite: cloneTreeWrite(next) });
+  };
+  if (!existingTree) await persistTree(treeWrite);
+
+  const built = buildCaptureRequest({ ...resolvedSettings, destinationId: destinationParentId }, capture, new Date(treeWrite.operationTimestamp));
+  let pageId = treeWrite.pageId || "";
+  let pageUrl = treeWrite.pageUrl || resolvedSettings.destinationUrl || "";
+  let createdFingerprint = "";
+
+  if (destinationType === "database" && !pageId) {
+    if (resolvedSettings.managedDestination && capture.captureId) {
+      const existing = await findManagedCaptureById({ token, settings: resolvedSettings, captureId: capture.captureId, fetchImpl });
+      if (existing) {
+        pageId = existing.id;
+        pageUrl = existing.url;
+      }
+    }
+    if (!pageId) {
+      let created: NotionEntity;
+      try {
+        created = await notionRequest(token, "/v1/pages", {
+          method: "POST",
+          body: {
+            parent: built.body.parent,
+            properties: built.body.properties
+          }
+        }, fetchImpl);
+      } catch (error) {
+        if (!resolvedSettings.managedDestination && isAmbiguousNotionMutation(error)) {
+          throw new NotionTreeWriteReviewError("Notion may have created this database page. Review the destination before retrying.");
+        }
+        throw error;
+      }
+      const id = Reflect.get(created, "id");
+      const url = Reflect.get(created, "url");
+      const lastEditedTime = Reflect.get(created, "last_edited_time");
+      if (!isNonEmptyString(id) || !isNonEmptyString(url) || !isNonEmptyString(lastEditedTime)) {
+        throw invalidSuccessResponse("Notion returned incomplete created page details.");
+      }
+      pageId = id;
+      pageUrl = url;
+      createdFingerprint = lastEditedTime;
+    }
+    treeWrite = { ...treeWrite, phase: "writing", pageId, pageUrl };
+    await persistTree(treeWrite);
+  }
+
+  const blocks = destinationType === "database"
+    ? contentBlocks(capture)
+    : [
+        {
+          object: "block",
+          type: "heading_3",
+          heading_3: { rich_text: richText(captureTitle(capture)), is_toggleable: false }
+        },
+        ...contentBlocks(capture),
+        notionTextBlock("paragraph", richText(`Captured ${new Date(treeWrite.operationTimestamp).toLocaleString()}`), { color: "gray" }),
+        { object: "block", type: "divider", divider: {} }
+      ];
+  validateTopLevelChildren(blocks);
+  const written = await appendBlockTree({
+    parentId: pageId || destinationParentId,
+    blocks: blocks as NotionWriteBlock[],
+    namespace: destinationType === "database" ? "capture/content" : "capture/section",
+    journal: treeWrite,
+    onProgress: persistTree,
+    request: notionTreeRequestPort(token, fetchImpl),
+    reconcileMissingGroups: Boolean(existingTree)
+  });
+  treeWrite = written.journal;
+
+  if (destinationType === "database") {
+    const finalPage = await notionRequest(token, `/v1/pages/${normalizeNotionId(pageId)}`, {}, fetchImpl);
+    if (!isValidFinalPage(finalPage)) throw invalidSuccessResponse("Notion returned incomplete final page details.");
+    treeWrite = { ...treeWrite, phase: "complete" };
+    await persistTree(treeWrite);
+    return {
+      kind: "page",
+      id: pageId,
+      pageId,
+      url: pageUrl || String(finalPage.url || ""),
+      blockIds: [],
+      fingerprint: String(finalPage.last_edited_time || createdFingerprint)
+    };
+  }
+
+  treeWrite = { ...treeWrite, phase: "complete" };
+  await persistTree(treeWrite);
+  return {
+    kind: "section",
+    id: destinationParentId,
+    pageId: destinationParentId,
+    url: pageUrl,
+    blockIds: written.rootBlockIds,
+    fingerprint: written.rootBlockIds.join("|")
+  };
+}
+
+class NotionTreeIdentityError extends NotionApiError {
+  constructor() {
+    super("This delivery journal belongs to a different Notion destination.", { status: 409, code: "tree_write_destination_changed" });
+    this.name = "NotionTreeIdentityError";
+  }
+}
+
+function cloneTreeWrite(journal: TreeWriteJournal): TreeWriteJournal {
+  return {
+    ...journal,
+    groups: Object.fromEntries(Object.entries(journal.groups).map(([path, ids]) => [path, [...ids]])),
+    archivedBlockIds: [...journal.archivedBlockIds]
+  };
+}
+
+function notionTreeRequestPort(token: string, fetchImpl: NotionFetchPort): NotionTreeRequestPort {
+  return {
+    appendChildren: async (parentId: string, children: NotionWriteBlock[], position?: NotionAppendPosition) => {
+      const result = await notionRequest(token, `/v1/blocks/${normalizeNotionId(parentId)}/children`, {
+        method: "PATCH",
+        body: { children, ...(position ? { position } : {}) }
+      }, fetchImpl);
+      const blocks = requiredEntityArray(result, "results", "Notion returned incomplete inserted block details.");
+      return requiredEntityIds(blocks, "Notion returned an inserted block without an ID.").map((id) => ({ id }));
+    },
+    retrieveChildren: async (parentId: string): Promise<NotionRemoteBlock[]> => retrieveDirectChildren({ token, blockId: parentId, fetchImpl }),
+    isAmbiguousMutation: (error: unknown): boolean => {
+      if (!(error instanceof NotionApiError)) return false;
+      return error.code !== "invalid_response"
+        && (error.timeout === true || error.code === "network_error" || error.status >= 500);
+    }
+  };
+}
+
+async function retrieveDirectChildren({ token, blockId, fetchImpl }: NotionRequestOptions & { blockId: string }): Promise<NotionRemoteBlock[]> {
+  const results: NotionRemoteBlock[] = [];
+  let cursor = "";
+  do {
+    const query = new URLSearchParams({ page_size: "100" });
+    if (cursor) query.set("start_cursor", cursor);
+    const page = await notionRequest(token, `/v1/blocks/${normalizeNotionId(blockId)}/children?${query}`, {}, fetchImpl);
+    const blocks = requiredEntityArray(page, "results", "Notion returned an incomplete block list.");
+    const pagination = paginationEnvelope(page, "Notion returned a malformed block pagination response.");
+    if (!blocks.every(isValidBlock)) throw invalidSuccessResponse("Notion returned an incomplete block response.");
+    results.push(...blocks);
+    cursor = pagination.hasMore ? pagination.nextCursor || "" : "";
+  } while (cursor);
+  return results;
 }
 
 function captureRemoteTarget(result: NotionEntity, settings: NotionSettingsInput): RemoteTarget {
@@ -744,7 +936,10 @@ export async function loadRemoteNote({ token, record, fetchImpl = fetch }: Notio
   let blocks = allBlocks;
   let previousSiblingId = "";
   if (remote.kind === "section") {
-    const journalIds = Object.values(record.syncJournal?.insertedSegments || {}).flat();
+    const journalIds = [
+      ...Object.values(record.syncJournal?.insertedSegments || {}).flat(),
+      ...Object.values(record.syncJournal?.treeWrite?.groups || {}).flat()
+    ];
     const tracked = new Set([...(remote.blockIds || []), ...journalIds]);
     blocks = allBlocks.filter((block) => typeof block.id === "string" && tracked.has(block.id));
     if (!blocks.length) throw new NotionApiError("This note section is no longer available in the running page.", { status: 404, code: "section_not_found" });
@@ -791,7 +986,33 @@ export async function loadRemoteNote({ token, record, fetchImpl = fetch }: Notio
   };
 }
 
-export async function updateRemoteNote({ token, record, capture, baseFingerprint, journal = {}, onJournal = async () => {}, fetchImpl = fetch }: NotionRequestOptions & {
+export async function updateRemoteNote(options: NotionRequestOptions & {
+  record: NoteRecordInput;
+  capture: CaptureInput;
+  baseFingerprint?: string;
+  journal?: SyncJournal;
+  onJournal?: (journal: SyncJournal & { phase: string }) => Promise<void>;
+  now?: () => Date;
+}): Promise<RemoteTarget> {
+  const journal = options.journal || {};
+  if (journal.insertedSegments && !journal.treeWrite) {
+    const legacy = await updateRemoteNoteLegacy({
+      ...options,
+      journal: {
+        ...(typeof journal.phase === "string" ? { phase: journal.phase } : {}),
+        insertedSegments: journal.insertedSegments,
+        ...(journal.archivedIds ? { archivedIds: journal.archivedIds } : {})
+      },
+      onJournal: options.onJournal
+        ? async (next) => options.onJournal?.(next)
+        : async () => undefined
+    });
+    return { ...legacy, id: legacy.id || legacy.pageId };
+  }
+  return updateRemoteNoteTree(options);
+}
+
+async function updateRemoteNoteLegacy({ token, record, capture, baseFingerprint, journal = {}, onJournal = async () => {}, fetchImpl = fetch }: NotionRequestOptions & {
   record: NoteRecordInput;
   capture: CaptureInput;
   baseFingerprint?: string;
@@ -894,6 +1115,149 @@ export async function updateRemoteNote({ token, record, capture, baseFingerprint
   };
 }
 
+async function updateRemoteNoteTree({
+  token,
+  record,
+  capture,
+  baseFingerprint,
+  journal = {},
+  onJournal = async () => undefined,
+  fetchImpl = fetch,
+  now = () => new Date()
+}: NotionRequestOptions & {
+  record: NoteRecordInput;
+  capture: CaptureInput;
+  baseFingerprint?: string;
+  journal?: SyncJournal;
+  onJournal?: (journal: SyncJournal & { phase: string }) => Promise<void>;
+  now?: () => Date;
+}): Promise<RemoteTarget> {
+  const loaded = await loadRemoteNote({ token, record, fetchImpl });
+  const currentTree = journal.treeWrite;
+  const hasMutationEvidence = Boolean(currentTree && (
+    Object.values(currentTree.groups).some((ids) => ids.length > 0)
+    || currentTree.archivedBlockIds.length > 0
+  ));
+  if (!hasMutationEvidence && baseFingerprint && loaded.baseFingerprint !== baseFingerprint) throw new NotionConflictError();
+
+  const remote = loaded.remote;
+  const destinationType: TreeWriteJournal["destinationType"] = remote.kind === "section"
+    ? "page"
+    : record.destination?.destinationType === "database" ? "database" : "page";
+  const destinationParentId = normalizeNotionId(record.destination?.destinationId || remote.pageId);
+  if (currentTree && (currentTree.connectionId !== (record.connectionId || "")
+    || currentTree.destinationType !== destinationType
+    || normalizeNotionId(currentTree.destinationParentId) !== destinationParentId
+    || normalizeNotionId(currentTree.pageId || "") !== normalizeNotionId(remote.pageId))) {
+    throw new NotionTreeIdentityError();
+  }
+
+  let treeWrite: TreeWriteJournal = currentTree ? cloneTreeWrite(currentTree) : {
+    version: 1,
+    phase: "writing",
+    connectionId: record.connectionId || "",
+    destinationType,
+    destinationParentId,
+    pageId: normalizeNotionId(remote.pageId),
+    ...(remote.url ? { pageUrl: remote.url } : {}),
+    operationTimestamp: now().toISOString(),
+    groups: {},
+    archivedBlockIds: []
+  };
+  const persistTree = async (next: TreeWriteJournal): Promise<void> => {
+    treeWrite = cloneTreeWrite(next);
+    await onJournal({ ...journal, phase: next.phase, treeWrite: cloneTreeWrite(next) });
+  };
+  if (!currentTree) await persistTree(treeWrite);
+
+  const segments = replacementTreeSegments(capture, remote.kind, treeWrite.operationTimestamp);
+  if (treeWrite.phase === "complete") {
+    return {
+      ...remote,
+      id: remote.id || remote.pageId,
+      blockIds: remote.kind === "section" ? orderedTreeRemoteIds(capture.document?.doc, treeWrite.groups, segments) : [],
+      fingerprint: loaded.baseFingerprint
+    };
+  }
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (!segment?.blocks.length) continue;
+    const afterId = segment.afterId || (index === 0 ? remote.previousSiblingId : "");
+    const rootPosition: NotionAppendPosition = afterId
+      ? { type: "after_block", after_block: { id: normalizeNotionId(afterId) } }
+      : { type: "start" };
+    const written = await appendBlockTree({
+      parentId: normalizeNotionId(remote.pageId),
+      blocks: segment.blocks as NotionWriteBlock[],
+      rootPosition,
+      namespace: `update/segment/${index}`,
+      journal: treeWrite,
+      onProgress: persistTree,
+      request: notionTreeRequestPort(token, fetchImpl),
+      reconcileMissingGroups: Boolean(currentTree)
+    });
+    treeWrite = written.journal;
+  }
+
+  if (remote.kind === "page") {
+    await notionRequest(token, `/v1/pages/${normalizeNotionId(remote.pageId)}`, {
+      method: "PATCH",
+      body: {
+        properties: {
+          [remote.titlePropertyId || record.destination?.titleProperty || "title"]: { title: richText(captureTitle(capture)) },
+          ...managedSourceProperties(record.destination, capture)
+        }
+      }
+    }, fetchImpl);
+  }
+
+  if (treeWrite.phase !== "archiving") {
+    treeWrite = { ...treeWrite, phase: "archiving" };
+    await persistTree(treeWrite);
+  }
+  const placeholderIds = new Set(opaqueBlockIds(capture.document?.doc));
+  const replacementRootIds = new Set(Object.entries(treeWrite.groups)
+    .filter(([path]) => path.startsWith("update/segment/") && path.split("/").length === 3)
+    .flatMap(([, ids]) => ids));
+  const oldEditableIds = loaded._trackedBlocks
+    .filter((block) => typeof block.id === "string" && !placeholderIds.has(block.id) && !replacementRootIds.has(block.id))
+    .map((block) => block.id)
+    .filter((id): id is string => typeof id === "string");
+
+  for (const id of oldEditableIds) {
+    if (treeWrite.archivedBlockIds.includes(id)) continue;
+    try {
+      await notionRequest(token, `/v1/blocks/${normalizeNotionId(id)}`, { method: "DELETE" }, fetchImpl);
+    } catch (error) {
+      if (!isAmbiguousNotionMutation(error)) throw error;
+      const retrieved = await notionRequest(token, `/v1/blocks/${normalizeNotionId(id)}`, {}, fetchImpl);
+      if (retrieved.in_trash !== true) {
+        throw new NotionTreeWriteReviewError("Notion may not have archived an old note block. Review the note before retrying.");
+      }
+    }
+    treeWrite = { ...treeWrite, archivedBlockIds: [...treeWrite.archivedBlockIds, id] };
+    await persistTree(treeWrite);
+  }
+
+  const finalPage = await notionRequest(token, `/v1/pages/${normalizeNotionId(remote.pageId)}`, {}, fetchImpl);
+  if (!isValidFinalPage(finalPage)) throw invalidSuccessResponse("Notion returned incomplete final page details.");
+  treeWrite = { ...treeWrite, phase: "complete" };
+  await persistTree(treeWrite);
+  const rootIds = Object.entries(treeWrite.groups)
+    .filter(([path]) => path.startsWith("update/segment/") && path.split("/").length === 3)
+    .flatMap(([, ids]) => ids);
+  return {
+    ...remote,
+    id: remote.id || String(finalPage.id || ""),
+    url: remote.url || String(finalPage.url || ""),
+    blockIds: remote.kind === "section" ? orderedTreeRemoteIds(capture.document?.doc, treeWrite.groups, segments) : [],
+    fingerprint: remote.kind === "section"
+      ? `updated:${finalPage.last_edited_time || treeWrite.operationTimestamp}:${rootIds.join(",")}`
+      : String(finalPage.last_edited_time || "")
+  };
+}
+
 export function notionDocumentFromBlocks(blocks: NotionEntity[] = []): { doc: EditorNode; sources: CaptureSource[] } {
   const content: EditorNode[] = [];
   const sources: CaptureSource[] = [];
@@ -904,7 +1268,7 @@ export function notionDocumentFromBlocks(blocks: NotionEntity[] = []): { doc: Ed
       sources.push(...sourcesFromBlock(block));
       continue;
     }
-    if ((block.type === "bulleted_list_item" || block.type === "numbered_list_item") && isSafelyEditableListBlock(block)) {
+    if (isListBlockType(block.type) && isSafelyEditableListBlock(block)) {
       const type = block.type;
       const items: EditorNode[] = [];
       while (blocks[index]?.type === type) {
@@ -915,7 +1279,7 @@ export function notionDocumentFromBlocks(blocks: NotionEntity[] = []): { doc: Ed
       }
       index -= 1;
       content.push({
-        type: type === "bulleted_list_item" ? "bulletList" : "orderedList",
+        type: type === "bulleted_list_item" ? "bulletList" : type === "numbered_list_item" ? "orderedList" : "taskList",
         ...(type === "numbered_list_item" ? { attrs: { start: Number(blockAttributes(block).list_start_index || 1), type: blockAttributes(block).list_format === "letters" ? "a" : blockAttributes(block).list_format === "roman" ? "i" : "1" } } : {}),
         content: items
       });
@@ -927,13 +1291,17 @@ export function notionDocumentFromBlocks(blocks: NotionEntity[] = []): { doc: Ed
 }
 
 function isSafelyEditableListBlock(block: NotionEntity = {}): boolean {
-  if (!["bulleted_list_item", "numbered_list_item"].includes(block.type || "")) return false;
+  if (!isListBlockType(block.type)) return false;
   return (blockAttributes(block).children || []).every((child) => {
-    if (["bulleted_list_item", "numbered_list_item"].includes(child.type || "")) return isSafelyEditableListBlock(child);
+    if (isListBlockType(child.type)) return isSafelyEditableListBlock(child);
     const attrs = blockAttributes(child);
-    return ["paragraph", "heading_1", "heading_2", "heading_3", "to_do", "quote", "toggle", "code", "divider"].includes(child.type || "")
+    return ["paragraph", "heading_1", "heading_2", "heading_3", "quote", "toggle", "code", "divider"].includes(child.type || "")
       && !(attrs.children || []).length;
   });
+}
+
+function isListBlockType(type: unknown): type is "bulleted_list_item" | "numbered_list_item" | "to_do" {
+  return type === "bulleted_list_item" || type === "numbered_list_item" || type === "to_do";
 }
 
 async function retrieveBlockTree({ token, blockId, fetchImpl }: NotionRequestOptions & { blockId: string }): Promise<NotionEntity[]> {
@@ -975,11 +1343,12 @@ function notionNodeFromBlock(block: NotionEntity = {}): EditorNode {
   return opaqueNode(block);
 }
 
-function listNodeFromBlock(block: NotionEntity, _type: string): EditorNode {
+function listNodeFromBlock(block: NotionEntity, type: "bulleted_list_item" | "numbered_list_item" | "to_do"): EditorNode {
   const attrs = blockAttributes(block);
   const children = notionDocumentFromBlocks(attrs.children || []).doc.content || [];
   return {
-    type: "listItem",
+    type: type === "to_do" ? "taskItem" : "listItem",
+    ...(type === "to_do" ? { attrs: { checked: Boolean(attrs.checked) } } : {}),
     content: [{ type: "paragraph", content: inlineNodesFromRichText(attrs.rich_text || []) }, ...children.filter((node) => node.type !== "paragraph" || node.content?.length)]
   };
 }
@@ -1035,6 +1404,36 @@ function editableSegments(doc: EditorNode | undefined): EditableSegment[] {
   return segments;
 }
 
+function replacementTreeSegments(capture: CaptureInput, remoteKind: RemoteTarget["kind"], operationTimestamp: string): EditableSegment[] {
+  const segments: EditableSegment[] = [];
+  let current: EditableSegment = { afterId: "", blocks: [] };
+  if (remoteKind === "section") {
+    current.blocks.push({
+      object: "block",
+      type: "heading_3",
+      heading_3: { rich_text: richText(captureTitle(capture)), is_toggleable: false }
+    });
+  }
+
+  for (const node of capture.document?.doc?.content || []) {
+    if (node.type === "notionBlock") {
+      if (current.blocks.length) segments.push(current);
+      current = { afterId: typeof node.attrs?.remoteId === "string" ? node.attrs.remoteId : "", blocks: [] };
+      continue;
+    }
+    current.blocks.push(...notionBlocksFromDocument({ type: "doc", content: [node] }));
+  }
+  current.blocks.push(...sourceBlocks(capture));
+  if (remoteKind === "section") {
+    current.blocks.push(
+      notionTextBlock("paragraph", richText(`Updated ${new Date(operationTimestamp).toLocaleString()}`), { color: "gray" }),
+      { object: "block", type: "divider", divider: {} }
+    );
+  }
+  if (current.blocks.length) segments.push(current);
+  return segments;
+}
+
 function opaqueBlockIds(doc: EditorNode | undefined): string[] {
   return (doc?.content || []).filter((node) => node.type === "notionBlock").map((node) => node.attrs?.remoteId).filter((id): id is string => typeof id === "string" && Boolean(id));
 }
@@ -1055,6 +1454,31 @@ function orderedRemoteIds(doc: EditorNode | undefined, insertedSegments: Record<
   if (hasEditable || insertedSegments[segmentIndex]) ids.push(...(insertedSegments[segmentIndex] || []));
   for (let index = segmentIndex + 1; insertedSegments[index]; index += 1) ids.push(...(insertedSegments[index] || []));
   return ids.filter((id): id is string => Boolean(id));
+}
+
+function orderedTreeRemoteIds(doc: EditorNode | undefined, groups: Record<string, string[]>, segments: EditableSegment[]): string[] {
+  const rootsByAnchor = new Map<string, string[]>();
+  segments.forEach((segment, index) => {
+    rootsByAnchor.set(segment.afterId, [...(rootsByAnchor.get(segment.afterId) || []), ...(groups[`update/segment/${index}`] || [])]);
+  });
+  const placeholders = (doc?.content || [])
+    .filter((node) => node.type === "notionBlock")
+    .map((node) => typeof node.attrs?.remoteId === "string" ? node.attrs.remoteId : "")
+    .filter(Boolean);
+  if (!placeholders.length) return rootsByAnchor.get("") || [];
+
+  const ids: string[] = [...(rootsByAnchor.get("") || [])];
+  for (const placeholder of placeholders) {
+    ids.push(placeholder);
+    ids.push(...(rootsByAnchor.get(placeholder) || []));
+  }
+  return ids;
+}
+
+function isAmbiguousNotionMutation(error: unknown): boolean {
+  return error instanceof NotionApiError
+    && error.code !== "invalid_response"
+    && (error.timeout === true || error.code === "network_error" || error.status >= 500);
 }
 
 function managedSourceProperties(destination: Partial<CaptureDestination> = {}, capture: CaptureInput = {}): Record<string, unknown> {
@@ -1108,10 +1532,11 @@ export async function findManagedCaptureById({ token, settings, captureId, fetch
         property: propertyName,
         rich_text: { equals: captureId }
       },
-      page_size: 1
+      page_size: 2
     }
   }, fetchImpl);
   const results = requiredEntityArray(payload, "results", "Notion returned an incomplete query response.");
+  if (results.length > 1) throw new NotionTreeWriteReviewError("More than one managed Notion page has this capture ID. Review the duplicates before retrying.");
   const page = results[0];
   if (!page) return null;
   const id = Reflect.get(page, "id");

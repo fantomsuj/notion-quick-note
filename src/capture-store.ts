@@ -483,10 +483,37 @@ function normalizeSyncJournal(value: unknown): SyncJournal | null {
       .filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]))
       .map(([key, ids]) => [key, ids.map(String)]));
   }
+  if (Array.isArray(value.archivedIds)) journal.archivedIds = value.archivedIds.map(String);
+  const treeWrite = normalizeTreeWriteJournal(value.treeWrite);
+  if (treeWrite) journal.treeWrite = treeWrite;
   for (const [key, child] of Object.entries(value)) {
-    if (key !== "insertedSegments" && isJsonValue(child)) journal[key] = child;
+    if (key !== "insertedSegments" && key !== "archivedIds" && key !== "treeWrite" && isJsonValue(child)) journal[key] = child;
   }
   return journal;
+}
+
+function normalizeTreeWriteJournal(value: unknown): SyncJournal["treeWrite"] | null {
+  if (!isRecord(value) || value.version !== 1) return null;
+  if (!new Set(["initializing", "creating_page", "writing", "archiving", "complete"]).has(String(value.phase))) return null;
+  if (value.destinationType !== "database" && value.destinationType !== "page") return null;
+  if (typeof value.connectionId !== "string" || typeof value.destinationParentId !== "string"
+    || typeof value.operationTimestamp !== "string") return null;
+  if (value.pageId !== undefined && typeof value.pageId !== "string") return null;
+  if (value.pageUrl !== undefined && typeof value.pageUrl !== "string") return null;
+  if (!isRecord(value.groups) || !Object.values(value.groups).every((ids) => Array.isArray(ids) && ids.every((id) => typeof id === "string"))) return null;
+  if (!Array.isArray(value.archivedBlockIds) || !value.archivedBlockIds.every((id) => typeof id === "string")) return null;
+  return {
+    version: 1,
+    phase: value.phase as NonNullable<SyncJournal["treeWrite"]>["phase"],
+    connectionId: value.connectionId,
+    destinationType: value.destinationType,
+    destinationParentId: value.destinationParentId,
+    ...(value.pageId !== undefined ? { pageId: value.pageId } : {}),
+    ...(value.pageUrl !== undefined ? { pageUrl: value.pageUrl } : {}),
+    operationTimestamp: value.operationTimestamp,
+    groups: Object.fromEntries(Object.entries(value.groups).map(([path, ids]) => [path, [...ids as string[]]])),
+    archivedBlockIds: [...value.archivedBlockIds]
+  };
 }
 
 function normalizeDeliveryError(value: unknown, fallback: DeliveryErrorMetadata = { kind: "unknown", message: "Delivery needs attention." }): DeliveryErrorMetadata {

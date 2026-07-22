@@ -160,7 +160,7 @@ export function createDeliveryQueue({
   }
 
   async function handleFailure(record: CaptureRecord, error: unknown): Promise<CaptureRecord | null> {
-    const failure = classifyDeliveryError(error, record.destination?.managedDestination);
+    const failure = classifyDeliveryError(error, Boolean(record.destination?.managedDestination || record.syncJournal?.treeWrite));
     if (failure.verify) {
       const connection = await getConnection();
       const existing = await findExisting(record, connection).catch(() => null);
@@ -192,12 +192,27 @@ export function createDeliveryQueue({
       forceRetry: Boolean(force),
       lastError: connection?.configured ? null : { kind: "setup", message: "Connect Notion to deliver this capture." }
     };
+    if (retarget && hasRemoteMutationEvidence(record)) {
+      const blocked = await repository.updateCapture(id, {
+        status: DELIVERY_STATES.uncertain,
+        nextAttemptAt: 0,
+        forceRetry: false,
+        lastError: {
+          kind: "attention_required",
+          message: "This capture already changed its original Notion destination. Review it before retargeting."
+        }
+      });
+      await onChanged();
+      return blocked;
+    }
     if (retarget && connection?.configured) {
       updates.connectionId = connection.connectionId;
       updates.destination = connection.destination || null;
+      updates.syncJournal = null;
     } else if (retarget) {
       updates.connectionId = "";
       updates.destination = null;
+      updates.syncJournal = null;
     }
     const next = await repository.updateCapture(id, updates);
     await onChanged();
@@ -208,9 +223,15 @@ export function createDeliveryQueue({
   return { drain, attempt, retry, markDelivered, bindUnconfiguredCaptures };
 }
 
-export function classifyDeliveryError(error: unknown = {}, managedDestination = false): ClassifiedDeliveryFailure {
+export function classifyDeliveryError(error: unknown = {}, canReconcile = false): ClassifiedDeliveryFailure {
   const value = isRecord(error) ? error : {};
   const status = Number(value.status || 0);
+  if (value.code === "tree_write_ambiguous") {
+    return blocked(DELIVERY_STATES.uncertain, "attention_required", "Notion may contain more than one matching block group. Review the note before retrying.");
+  }
+  if (value.code === "invalid_response") {
+    return blocked(DELIVERY_STATES.uncertain, "attention_required", "Notion returned an incomplete write result. Review the note before retrying.");
+  }
   if (value.code === "remote_conflict" || status === 409 && value.name === "NotionConflictError") {
     return blocked(DELIVERY_STATES.blockedConflict, "remote_conflict", "This note changed in Notion. Your local edit is preserved for review.");
   }
@@ -219,7 +240,7 @@ export function classifyDeliveryError(error: unknown = {}, managedDestination = 
     return blocked(DELIVERY_STATES.blockedDestination, "destination", "The destination is unavailable or no longer compatible.");
   }
   if (status === 408 || value.timeout || value.code === "notion_timeout") {
-    return managedDestination
+    return canReconcile
       ? { ...blocked(DELIVERY_STATES.pending, "timeout", "Notion took too long. Delivery will be checked and retried automatically."), verify: true }
       : blocked(DELIVERY_STATES.uncertain, "timeout_manual", "Notion may have accepted this capture. Review it before retrying.");
   }
@@ -227,11 +248,23 @@ export function classifyDeliveryError(error: unknown = {}, managedDestination = 
     return blocked(DELIVERY_STATES.pending, status === 429 ? "rate_limited" : "offline", "Delivery will retry automatically.");
   }
   if (status >= 500 || value.code === "network_error" || !status) {
-    return managedDestination
+    return canReconcile
       ? { ...blocked(DELIVERY_STATES.pending, "ambiguous_managed", "Delivery will be checked and retried automatically."), verify: true }
       : blocked(DELIVERY_STATES.uncertain, "ambiguous_manual", "Notion may have accepted this capture. Review it before retrying.");
   }
   return blocked(DELIVERY_STATES.blockedDestination, "delivery", "Notion rejected this capture.");
+}
+
+function hasRemoteMutationEvidence(record: CaptureRecord): boolean {
+  const tree = record.syncJournal?.treeWrite;
+  if (tree) {
+    const pageIsRemoteChild = tree.destinationType === "database"
+      && Boolean(tree.pageId)
+      && tree.pageId !== tree.destinationParentId;
+    if (pageIsRemoteChild || Object.values(tree.groups).some((ids) => ids.length > 0) || tree.archivedBlockIds.length > 0) return true;
+  }
+  return Object.values(record.syncJournal?.insertedSegments || {}).some((ids) => ids.length > 0)
+    || Boolean(record.syncJournal?.archivedIds?.length);
 }
 
 function blocked(status: DeliveryState, kind: DeliveryErrorKind, message: string): ClassifiedDeliveryFailure {

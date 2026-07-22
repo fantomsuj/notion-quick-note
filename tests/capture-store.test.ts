@@ -86,6 +86,41 @@ test("missing-version and known v1 persisted items still migrate to v2", () => {
   assert.equal(state.activeDraftId, "unversioned");
 });
 
+test("tree write journals normalize strictly while legacy update journals survive", () => {
+  const treeWrite = {
+    version: 1,
+    phase: "writing",
+    connectionId: "connection-1",
+    destinationType: "database",
+    destinationParentId: "data-source-1",
+    pageId: "page-1",
+    pageUrl: "https://notion.so/page-1",
+    operationTimestamp: "2026-07-21T12:00:00.000Z",
+    groups: { "capture/content": ["root-1"], "capture/content/0": ["child-1"] },
+    archivedBlockIds: ["old-root"]
+  } as const;
+  const normalized = normalizeRecord({ id: "capture", syncJournal: { treeWrite } });
+  assert.deepEqual(normalized?.syncJournal?.treeWrite, treeWrite);
+
+  const legacy = normalizeRecord({
+    id: "legacy",
+    syncJournal: { insertedSegments: { 0: ["inserted"] }, archivedIds: ["old"] }
+  });
+  assert.deepEqual(legacy?.syncJournal, { insertedSegments: { 0: ["inserted"] }, archivedIds: ["old"] });
+
+  for (const invalid of [
+    { ...treeWrite, version: 2 },
+    { ...treeWrite, phase: "guessing" },
+    { ...treeWrite, pageId: 1 },
+    { ...treeWrite, groups: { "capture/content": [7] } },
+    { ...treeWrite, archivedBlockIds: [false] }
+  ]) {
+    const record = normalizeRecord({ id: "invalid", syncJournal: { treeWrite: invalid, insertedSegments: { 0: ["legacy"] } } });
+    assert.equal(record?.syncJournal?.treeWrite, undefined);
+    assert.deepEqual(record?.syncJournal?.insertedSegments, { 0: ["legacy"] });
+  }
+});
+
 function memoryStorage(): KeyValueStoragePort & { values: Record<string, unknown> } {
   const values: Record<string, unknown> = {};
   return {
@@ -216,12 +251,31 @@ test("canonical maintenance retains unresolved captures and safely recovers inte
   state.captures.old = must(normalizeRecord({ id: "old", status: DELIVERY_STATES.delivered, updatedAt: 0 }), "delivered fixture");
   state.captures.managed = must(normalizeRecord({ id: "managed", status: DELIVERY_STATES.sending, destination: { managedDestination: true }, updatedAt: 0 }), "managed fixture");
   state.captures.manual = must(normalizeRecord({ id: "manual", status: DELIVERY_STATES.sending, destination: { managedDestination: false }, updatedAt: 0 }), "manual fixture");
+  state.captures.manualTree = must(normalizeRecord({
+    id: "manualTree",
+    status: DELIVERY_STATES.sending,
+    destination: { managedDestination: false },
+    syncJournal: { treeWrite: {
+      version: 1,
+      phase: "writing",
+      connectionId: "connection",
+      destinationType: "page",
+      destinationParentId: "page",
+      pageId: "page",
+      operationTimestamp: "2026-07-21T12:00:00.000Z",
+      groups: {},
+      archivedBlockIds: []
+    } },
+    updatedAt: 0
+  }), "manual tree fixture");
+
   await repository.importState(state);
 
   await repository.maintain({ recoverInterrupted: true, force: true });
   const maintained = await repository.load();
   assert.equal(must(maintained.captures.managed, "managed capture").status, DELIVERY_STATES.pending);
   assert.equal(must(maintained.captures.manual, "manual capture").status, DELIVERY_STATES.uncertain);
+  assert.equal(must(maintained.captures.manualTree, "manual tree capture").status, DELIVERY_STATES.pending);
   assert.equal(maintained.captures.old, undefined);
   assert.ok(maintained.captures.pending);
   assert.deepEqual(badgeForState(maintained), { text: "!", color: "#d70015" });
